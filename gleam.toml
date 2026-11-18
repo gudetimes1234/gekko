@@ -1,0 +1,17 @@
+name = "gekko"
+version = "0.1.0"
+description = "A Gleam-to-MoonBit transpiler and WebAssembly Component compiler."
+licences = ["MIT"]
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+glance = ">= 7.0.0 and < 8.0.0"
+glexer = ">= 2.5.0 and < 3.0.0"
+simplifile = ">= 2.7.0 and < 3.0.0"
+filepath = ">= 1.1.2 and < 2.0.0"
+tom = ">= 2.1.0 and < 3.0.0"
+gleam_json = ">= 3.1.0 and < 4.0.0"
+argv = ">= 1.1.0 and < 2.0.0"
+
+[dev-dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
