@@ -6,6 +6,11 @@ import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
 import index/symbol_table
+import lower/desugar
+import lower/ir
+import lower/mangle
+import lower/pattern
+import lower/tco
 import project/ffi_config
 import project/interface
 import project/prepass
@@ -571,4 +576,610 @@ pub fn symbol_table_multi_module_indexing_test() {
   assert priv_fn.publicity == glance.Private
   assert priv_fn.return_type
     == Some(interface.NamedType("Int", "", "gleam", []))
+}
+
+// -----------------------------------------------------------------------------
+// 6. Phase 2: Mangling tests
+// -----------------------------------------------------------------------------
+
+pub fn mangle_keywords_and_type_params_test() {
+  assert mangle.is_reserved_keyword("match") == True
+  assert mangle.is_reserved_keyword("loop") == True
+  assert mangle.is_reserved_keyword("guard") == True
+  assert mangle.is_reserved_keyword("struct") == True
+  assert mangle.is_reserved_keyword("count") == False
+
+  assert mangle.mangle_ident("match") == "match_"
+  assert mangle.mangle_ident("loop") == "loop_"
+  assert mangle.mangle_ident("guard") == "guard_"
+  assert mangle.mangle_ident("normal_var") == "normal_var"
+
+  assert mangle.mangle_type_param("item") == "Item"
+  assert mangle.mangle_type_param("key_value") == "KeyValue"
+  assert mangle.mangle_type_param("int") == "T_Int"
+  assert mangle.mangle_type_param("string") == "T_String"
+  assert mangle.type_var_id_to_name(2) == "T2"
+}
+
+// -----------------------------------------------------------------------------
+// 7. Phase 2: Pattern lowering tests
+// -----------------------------------------------------------------------------
+
+pub fn pattern_lists_strings_and_shorthand_variants_test() {
+  let src =
+    "pub type User {\n"
+    <> "  User(name: String, age: Int)\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn inspect_list(xs: List(Int)) -> Int {\n"
+    <> "  case xs {\n"
+    <> "    [] -> 0\n"
+    <> "    [x] -> x\n"
+    <> "    [x, y, ..rest] -> x + y\n"
+    <> "  }\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn parse_cmd(s: String) -> String {\n"
+    <> "  case s {\n"
+    <> "    \"cmd:\" as p <> rest if rest != \"\" -> p <> rest\n"
+    <> "    \"hi:\" <> rest -> rest\n"
+    <> "    _ -> \"\"\n"
+    <> "  }\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn match_user(u: User) -> String {\n"
+    <> "  case u {\n"
+    <> "    User(name:, ..) -> name\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre_res)) = prepass.parse_module("pat_mod", src)
+  let table =
+    symbol_table.index_project(
+      "pat_pkg",
+      [#("pat_mod", ast_mod, pre_res)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "pat_mod")
+
+  // List pattern lowering: [], [x], [x, y, ..rest]
+  let assert Ok(inspect_fn) =
+    list.find(ir_mod.functions, fn(f) { f.name == "inspect_list" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(clauses: list_clauses, ..))] =
+    inspect_fn.body
+  let assert [c_empty, c_single, c_cons2] = list_clauses
+
+  assert c_empty.patterns
+    == [[ir.IrPatVariant(Some("prelude"), None, "Nil", [], False)]]
+  assert c_single.patterns
+    == [
+      [
+        ir.IrPatVariant(
+          Some("prelude"),
+          None,
+          "Cons",
+          [
+            ir.IrPatArg(None, ir.IrPatVar("x")),
+            ir.IrPatArg(
+              None,
+              ir.IrPatVariant(Some("prelude"), None, "Nil", [], False),
+            ),
+          ],
+          False,
+        ),
+      ],
+    ]
+  assert c_cons2.patterns
+    == [
+      [
+        ir.IrPatVariant(
+          Some("prelude"),
+          None,
+          "Cons",
+          [
+            ir.IrPatArg(None, ir.IrPatVar("x")),
+            ir.IrPatArg(
+              None,
+              ir.IrPatVariant(
+                Some("prelude"),
+                None,
+                "Cons",
+                [
+                  ir.IrPatArg(None, ir.IrPatVar("y")),
+                  ir.IrPatArg(None, ir.IrPatVar("rest")),
+                ],
+                False,
+              ),
+            ),
+          ],
+          False,
+        ),
+      ],
+    ]
+
+  // String prefix pattern lowering with `as` prefix alias + user guard
+  let assert Ok(parse_fn) =
+    list.find(ir_mod.functions, fn(f) { f.name == "parse_cmd" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(clauses: str_clauses, ..))] =
+    parse_fn.body
+  let assert [c_cmd, c_hi, c_wild] = str_clauses
+
+  assert c_cmd.patterns == [[ir.IrPatVar("__str_pfx_0")]]
+  assert c_cmd.prefix_bindings
+    == [
+      #("p", ir.IrString("cmd:")),
+      #(
+        "rest",
+        ir.IrCall(
+          ir.IrModuleRef(Some("prelude"), "prelude", "string_drop_prefix"),
+          [
+            ir.IrCallArg(None, ir.IrVar("__str_pfx_0")),
+            ir.IrCallArg(None, ir.IrString("cmd:")),
+          ],
+        ),
+      ),
+    ]
+  // Guard has both synthetic has_prefix AND user guard wrapped with prefix bindings
+  let assert Some(ir.IrBinOp(ir.IrAnd, has_pfx_call, ir.IrBlock(guard_block))) =
+    c_cmd.guard
+  assert has_pfx_call
+    == ir.IrCall(
+      ir.IrModuleRef(Some("prelude"), "prelude", "string_has_prefix"),
+      [
+        ir.IrCallArg(None, ir.IrVar("__str_pfx_0")),
+        ir.IrCallArg(None, ir.IrString("cmd:")),
+      ],
+    )
+  assert list.length(guard_block) == 3
+
+  assert c_hi.patterns == [[ir.IrPatVar("__str_pfx_1")]]
+  assert c_wild.patterns == [[ir.IrPatDiscard]]
+
+  // Shorthand variant pattern: User(name:, ..)
+  let assert Ok(user_fn) =
+    list.find(ir_mod.functions, fn(f) { f.name == "match_user" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(clauses: [c_user], ..))] = user_fn.body
+  assert c_user.patterns
+    == [
+      [
+        ir.IrPatVariant(
+          None,
+          None,
+          "User",
+          [ir.IrPatArg(Some("name"), ir.IrPatVar("name"))],
+          True,
+        ),
+      ],
+    ]
+  let _ = pattern.lower_pattern
+  Nil
+}
+
+// -----------------------------------------------------------------------------
+// 8. Phase 2: Desugar, Use, Pipes, Captures, Getters & Record Updates
+// -----------------------------------------------------------------------------
+
+pub fn desugar_use_chains_and_let_assert_test() {
+  let src =
+    "pub fn wrap(x: a, f: fn(a) -> b) -> b {\n"
+    <> "  f(x)\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn bare(f: fn(Int) -> Int) -> Int {\n"
+    <> "  f(10)\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn pipeline(res: Result(Int, String)) -> Int {\n"
+    <> "  use #(a, b) <- wrap(#(1, 2))\n"
+    <> "  use n <- bare\n"
+    <> "  let assert Ok(v) = res as \"must be ok\"\n"
+    <> "  a + b + n + v\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre_res)) = prepass.parse_module("use_mod", src)
+  let table =
+    symbol_table.index_project(
+      "use_pkg",
+      [#("use_mod", ast_mod, pre_res)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "use_mod")
+  let assert Ok(pipe_fn) =
+    list.find(ir_mod.functions, fn(f) { f.name == "pipeline" })
+
+  // Outer `use #(a, b) <- wrap(#(1, 2))` becomes single call expr
+  let assert [
+    ir.IrStmtExpr(ir.IrCall(
+      ir.IrVar("wrap"),
+      [
+        ir.IrCallArg(None, ir.IrTuple([ir.IrInt("1"), ir.IrInt("2")])),
+        ir.IrCallArg(None, ir.IrFn(params: [outer_param], body: outer_body, ..)),
+      ],
+    )),
+  ] = pipe_fn.body
+
+  assert outer_param.name == "__use_arg_0"
+
+  // Destructured tuple `let #(a, b) = __use_arg_0`, followed by `use n <- bare`
+  let assert [
+    ir.IrStmtLet(
+      ir.IrPatTuple([ir.IrPatVar("a"), ir.IrPatVar("b")]),
+      None,
+      ir.IrVar("__use_arg_0"),
+    ),
+    ir.IrStmtExpr(ir.IrCall(
+      ir.IrVar("bare"),
+      [ir.IrCallArg(None, ir.IrFn(params: [inner_param], body: inner_body, ..))],
+    )),
+  ] = outer_body
+
+  assert inner_param.name == "n"
+
+  // Inside inner closure: `let assert Ok(v) = res` -> IrStmtGuard + final addition
+  let assert [
+    ir.IrStmtGuard(
+      value: ir.IrVar("res"),
+      pattern: ir.IrPatVariant(
+        None,
+        None,
+        "Ok",
+        [ir.IrPatArg(None, ir.IrPatVar("v"))],
+        False,
+      ),
+      guard_condition: None,
+      abort_message: Some(ir.IrString("must be ok")),
+      post_bindings: [],
+    ),
+    ir.IrStmtExpr(ir.IrBinOp(ir.IrAddInt, _, ir.IrVar("v"))),
+  ] = inner_body
+}
+
+pub fn desugar_pipes_captures_getters_and_record_updates_test() {
+  let helper_src =
+    "pub fn inc(x: Int) -> Int {\n"
+    <> "  x + 1\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub type Account {\n"
+    <> "  Admin(id: Int, name: String, level: Int)\n"
+    <> "  Guest(id: Int, name: String)\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub type Box(a) {\n"
+    <> "  Box(value: a, tag: String)\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub type Hook {\n"
+    <> "  Hook(cb: fn(Int) -> Int)\n"
+    <> "}\n"
+
+  let main_src =
+    "import app/helper\n"
+    <> "import app/helper.{Admin, Box, Guest}\n"
+    <> "\n"
+    <> "pub fn add(a: Int, b: Int) -> Int { a + b }\n"
+    <> "pub fn divide(numerator: Int, by denominator: Int) -> Int { numerator / denominator }\n"
+    <> "pub fn greet(prefix p: String, name n: String) -> String { p <> n }\n"
+    <> "pub fn make_adder(n: Int) -> fn(Int) -> Int { fn(x) { x + n } }\n"
+    <> "\n"
+    <> "pub fn test_pipes_and_captures(x: Int) -> Int {\n"
+    <> "  let f1 = add(1, _)\n"
+    <> "  let f2 = divide(by: _, 20)\n"
+    <> "  let r1 = x |> helper.inc\n"
+    <> "  let r2 = x |> add(10)\n"
+    <> "  let r3 = x |> make_adder(5)\n"
+    <> "  let r4 = x |> add(1, _)\n"
+    <> "  f1(r1) + f2(2) + r2 + r3 + r4\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn test_labeled_pipe() -> String {\n"
+    <> "  \"Alice\" |> greet(prefix: \"Hi, \")\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn test_getters_and_updates(acc: Account, box: Box(Int)) -> #(Int, Account, Box(Int), Int) {\n"
+    <> "  let helper = box\n"
+    <> "  let v = helper.value\n"
+    <> "  let id = acc.id\n"
+    <> "  let name = \"NewName\"\n"
+    <> "  let acc2 = Admin(..acc, name:)\n"
+    <> "  let box2 = Box(..box, value: 99)\n"
+    <> "  #(id, acc2, box2, v)\n"
+    <> "}\n"
+
+  let assert Ok(#(helper_ast, helper_pre)) =
+    prepass.parse_module("app/helper", helper_src)
+  let assert Ok(#(main_ast, main_pre)) =
+    prepass.parse_module("app/main", main_src)
+
+  let table =
+    symbol_table.index_project(
+      "app",
+      [
+        #("app/helper", helper_ast, helper_pre),
+        #("app/main", main_ast, main_pre),
+      ],
+      None,
+      dict.new(),
+    )
+
+  let helper_ir = desugar.desugar_module(helper_ast, table, "app/helper")
+  let main_ir = desugar.desugar_module(main_ast, table, "app/main")
+
+  // Verify Uniform Enum derive flag & synthesized getters on helper_ir
+  let assert Ok(acc_def) =
+    list.find(helper_ir.types, fn(t) { t.name == "Account" })
+  assert acc_def.derive_eq_debug_hash == True
+
+  let assert Ok(hook_def) =
+    list.find(helper_ir.types, fn(t) { t.name == "Hook" })
+  assert hook_def.derive_eq_debug_hash == False
+
+  let acc_getters =
+    list.filter(helper_ir.getters, fn(g) { g.type_name == "Account" })
+  assert list.map(acc_getters, fn(g) { g.field_name }) == ["id", "name"]
+
+  let box_getters =
+    list.filter(helper_ir.getters, fn(g) { g.type_name == "Box" })
+  assert list.map(box_getters, fn(g) { #(g.field_name, g.type_params) })
+    == [#("tag", ["A"]), #("value", ["A"])]
+
+  // Verify captures & pipes
+  let assert Ok(pipes_fn) =
+    list.find(main_ir.functions, fn(f) { f.name == "test_pipes_and_captures" })
+  let assert [
+    // f1 = add(1, _)
+    ir.IrStmtLet(
+      ir.IrPatVar("f1"),
+      None,
+      ir.IrFn(
+        params: [ir.IrFnParam("__capture_0", None)],
+        body: [
+          ir.IrStmtExpr(ir.IrCall(
+            ir.IrVar("add"),
+            [
+              ir.IrCallArg(None, ir.IrInt("1")),
+              ir.IrCallArg(None, ir.IrVar("__capture_0")),
+            ],
+          )),
+        ],
+        ..,
+      ),
+    ),
+    // f2 = divide(by: _, 20)
+    ir.IrStmtLet(
+      ir.IrPatVar("f2"),
+      None,
+      ir.IrFn(
+        params: [ir.IrFnParam("__capture_1", None)],
+        body: [
+          ir.IrStmtExpr(ir.IrCall(
+            ir.IrVar("divide"),
+            [
+              ir.IrCallArg(Some("by"), ir.IrVar("__capture_1")),
+              ir.IrCallArg(None, ir.IrInt("20")),
+            ],
+          )),
+        ],
+        ..,
+      ),
+    ),
+    // r1 = x |> helper.inc
+    ir.IrStmtLet(
+      ir.IrPatVar("r1"),
+      None,
+      ir.IrCall(
+        ir.IrModuleRef(Some("helper"), "app/helper", "inc"),
+        [ir.IrCallArg(None, ir.IrVar("x"))],
+      ),
+    ),
+    // r2 = x |> add(10)
+    ir.IrStmtLet(
+      ir.IrPatVar("r2"),
+      None,
+      ir.IrCall(
+        ir.IrVar("add"),
+        [ir.IrCallArg(None, ir.IrVar("x")), ir.IrCallArg(None, ir.IrInt("10"))],
+      ),
+    ),
+    // r3 = x |> make_adder(5)  (saturated -> closure call)
+    ir.IrStmtLet(
+      ir.IrPatVar("r3"),
+      None,
+      ir.IrCall(
+        ir.IrCall(ir.IrVar("make_adder"), [ir.IrCallArg(None, ir.IrInt("5"))]),
+        [ir.IrCallArg(None, ir.IrVar("x"))],
+      ),
+    ),
+    // r4 = x |> add(1, _)
+    ir.IrStmtLet(
+      ir.IrPatVar("r4"),
+      None,
+      ir.IrCall(
+        ir.IrVar("add"),
+        [ir.IrCallArg(None, ir.IrInt("1")), ir.IrCallArg(None, ir.IrVar("x"))],
+      ),
+    ),
+    _,
+  ] = pipes_fn.body
+
+  // Verify labeled pipe slot resolution: "Alice" |> greet(prefix: "Hi, ")
+  let assert Ok(greet_pipe_fn) =
+    list.find(main_ir.functions, fn(f) { f.name == "test_labeled_pipe" })
+  assert greet_pipe_fn.body
+    == [
+      ir.IrStmtExpr(
+        ir.IrCall(ir.IrVar("greet"), [
+          ir.IrCallArg(Some("name"), ir.IrString("Alice")),
+          ir.IrCallArg(Some("prefix"), ir.IrString("Hi, ")),
+        ]),
+      ),
+    ]
+
+  // Verify local variable shadowing module alias (`let helper = box; helper.value` -> getter),
+  // uniform getter (`acc.id`), and multi-variant vs single-variant record updates
+  let assert Ok(upd_fn) =
+    list.find(main_ir.functions, fn(f) { f.name == "test_getters_and_updates" })
+  let assert [
+    ir.IrStmtLet(ir.IrPatVar("helper"), None, ir.IrVar("box")),
+    ir.IrStmtLet(
+      ir.IrPatVar("v"),
+      None,
+      ir.IrGetterCall(ir.IrVar("helper"), "value"),
+    ),
+    ir.IrStmtLet(
+      ir.IrPatVar("id"),
+      None,
+      ir.IrGetterCall(ir.IrVar("acc"), "id"),
+    ),
+    ir.IrStmtLet(ir.IrPatVar("name"), None, ir.IrString("NewName")),
+    ir.IrStmtLet(
+      ir.IrPatVar("acc2"),
+      None,
+      ir.IrMatch([ir.IrVar("acc")], [acc_match_arm, acc_abort_arm]),
+    ),
+    ir.IrStmtLet(
+      ir.IrPatVar("box2"),
+      None,
+      ir.IrMatch([ir.IrVar("box")], [box_match_arm]),
+    ),
+    _,
+  ] = upd_fn.body
+
+  // Multi-variant record update has abort fallback and non-shadowing synthetic vars
+  assert acc_abort_arm.patterns == [[ir.IrPatDiscard]]
+  assert acc_abort_arm.body
+    == ir.IrAbort(
+      ir.PanicAbort,
+      Some(ir.IrString("unreachable record update variant")),
+    )
+  let assert [
+    [
+      ir.IrPatVariant(
+        Some("helper"),
+        Some("app/helper"),
+        "Admin",
+        [
+          ir.IrPatArg(Some("id"), ir.IrPatVar("__upd_2_id")),
+          ir.IrPatArg(Some("name"), ir.IrPatDiscard),
+          ir.IrPatArg(Some("level"), ir.IrPatVar("__upd_2_level")),
+        ],
+        False,
+      ),
+    ],
+  ] = acc_match_arm.patterns
+  assert acc_match_arm.body
+    == ir.IrCall(ir.IrConstructor(Some("helper"), Some("app/helper"), "Admin"), [
+      ir.IrCallArg(Some("id"), ir.IrVar("__upd_2_id")),
+      ir.IrCallArg(Some("name"), ir.IrVar("name")),
+      ir.IrCallArg(Some("level"), ir.IrVar("__upd_2_level")),
+    ])
+
+  // Single-variant record update is exhaustive (1 arm, no abort fallback)
+  let assert [
+    [
+      ir.IrPatVariant(
+        Some("helper"),
+        Some("app/helper"),
+        "Box",
+        [
+          ir.IrPatArg(Some("value"), ir.IrPatDiscard),
+          ir.IrPatArg(Some("tag"), ir.IrPatVar("__upd_3_tag")),
+        ],
+        False,
+      ),
+    ],
+  ] = box_match_arm.patterns
+}
+
+// -----------------------------------------------------------------------------
+// 9. Phase 2: Functional `for` TCO tests
+// -----------------------------------------------------------------------------
+
+pub fn tco_functional_for_loop_lowering_test() {
+  let src =
+    "pub fn sum_loop(items: List(Int), acc: Int) -> Int {\n"
+    <> "  case items {\n"
+    <> "    [] -> acc\n"
+    <> "    [x, ..rest] -> sum_loop(rest, acc + x)\n"
+    <> "  }\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn count_labeled(count n: Int, acc total: Int, tag _tag: String) -> Int {\n"
+    <> "  case n {\n"
+    <> "    0 -> total\n"
+    <> "    _ -> {\n"
+    <> "      let next = n - 1\n"
+    <> "      count_labeled(acc: total + n, count: next, tag: \"loop\")\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn map_naive(items: List(Int), f: fn(Int) -> Int) -> List(Int) {\n"
+    <> "  case items {\n"
+    <> "    [] -> []\n"
+    <> "    [x, ..rest] -> [f(x), ..map_naive(rest, f)]\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre_res)) = prepass.parse_module("tco_mod", src)
+  let table =
+    symbol_table.index_project(
+      "tco_pkg",
+      [#("tco_mod", ast_mod, pre_res)],
+      None,
+      dict.new(),
+    )
+  let ir_mod =
+    desugar.desugar_module(ast_mod, table, "tco_mod")
+    |> tco.optimize_module
+
+  // 1. Self-tail-recursive sum_loop -> IrForLoop with IrBreak & IrContinue
+  let assert Ok(sum_fn) =
+    list.find(ir_mod.functions, fn(f) { f.name == "sum_loop" })
+  let assert [
+    ir.IrStmtExpr(ir.IrForLoop(
+      bindings: [#("items", ir.IrVar("items")), #("acc", ir.IrVar("acc"))],
+      body: [ir.IrStmtExpr(ir.IrMatch(clauses: [arm_nil, arm_cons], ..))],
+    )),
+  ] = sum_fn.body
+
+  assert arm_nil.body == ir.IrBreak(ir.IrVar("acc"))
+  assert arm_cons.body
+    == ir.IrContinue([
+      ir.IrVar("rest"),
+      ir.IrBinOp(ir.IrAddInt, ir.IrVar("acc"), ir.IrVar("x")),
+    ])
+
+  // 2. Labeled reordered call args + discarded param normalized to `__tco_unused_2`
+  let assert Ok(cnt_fn) =
+    list.find(ir_mod.functions, fn(f) { f.name == "count_labeled" })
+  assert list.map(cnt_fn.params, fn(p) { p.name })
+    == ["n", "total", "__tco_unused_2"]
+  let assert [
+    ir.IrStmtExpr(ir.IrForLoop(
+      bindings: [
+        #("n", ir.IrVar("n")),
+        #("total", ir.IrVar("total")),
+        #("__tco_unused_2", ir.IrVar("__tco_unused_2")),
+      ],
+      body: [ir.IrStmtExpr(ir.IrMatch(clauses: [arm_zero, arm_step], ..))],
+    )),
+  ] = cnt_fn.body
+
+  assert arm_zero.body == ir.IrBreak(ir.IrVar("total"))
+  let assert ir.IrBlock([
+    ir.IrStmtLet(ir.IrPatVar("next"), None, _),
+    ir.IrStmtExpr(ir.IrContinue([
+      ir.IrVar("next"),
+      ir.IrBinOp(ir.IrAddInt, ir.IrVar("total"), ir.IrVar("n")),
+      ir.IrString("loop"),
+    ])),
+  ]) = arm_step.body
+
+  // 3. Non-tail-recursive map_naive stays an ordinary function (no IrForLoop)
+  let assert Ok(map_fn) =
+    list.find(ir_mod.functions, fn(f) { f.name == "map_naive" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(..))] = map_fn.body
 }
