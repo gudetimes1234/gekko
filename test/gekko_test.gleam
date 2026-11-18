@@ -1,3 +1,6 @@
+import emit/moonbit
+import emit/pkg_config
+import emit/prelude_runtime
 import filepath
 import glance
 import gleam/dict
@@ -11,10 +14,12 @@ import lower/ir
 import lower/mangle
 import lower/pattern
 import lower/tco
+import project/cmd
 import project/ffi_config
 import project/interface
 import project/prepass
 import project/staging
+import project/workspace
 import simplifile
 
 pub fn main() -> Nil {
@@ -651,19 +656,19 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
   let assert [c_empty, c_single, c_cons2] = list_clauses
 
   assert c_empty.patterns
-    == [[ir.IrPatVariant(Some("prelude"), None, "Nil", [], False)]]
+    == [[ir.IrPatVariant(Some("gprelude"), None, "Nil", [], False)]]
   assert c_single.patterns
     == [
       [
         ir.IrPatVariant(
-          Some("prelude"),
+          Some("gprelude"),
           None,
           "Cons",
           [
             ir.IrPatArg(None, ir.IrPatVar("x")),
             ir.IrPatArg(
               None,
-              ir.IrPatVariant(Some("prelude"), None, "Nil", [], False),
+              ir.IrPatVariant(Some("gprelude"), None, "Nil", [], False),
             ),
           ],
           False,
@@ -674,7 +679,7 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
     == [
       [
         ir.IrPatVariant(
-          Some("prelude"),
+          Some("gprelude"),
           None,
           "Cons",
           [
@@ -682,7 +687,7 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
             ir.IrPatArg(
               None,
               ir.IrPatVariant(
-                Some("prelude"),
+                Some("gprelude"),
                 None,
                 "Cons",
                 [
@@ -712,7 +717,7 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
       #(
         "rest",
         ir.IrCall(
-          ir.IrModuleRef(Some("prelude"), "prelude", "string_drop_prefix"),
+          ir.IrModuleRef(Some("gprelude"), "gprelude", "string_drop_prefix"),
           [
             ir.IrCallArg(None, ir.IrVar("__str_pfx_0")),
             ir.IrCallArg(None, ir.IrString("cmd:")),
@@ -725,7 +730,7 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
     c_cmd.guard
   assert has_pfx_call
     == ir.IrCall(
-      ir.IrModuleRef(Some("prelude"), "prelude", "string_has_prefix"),
+      ir.IrModuleRef(Some("gprelude"), "gprelude", "string_has_prefix"),
       [
         ir.IrCallArg(None, ir.IrVar("__str_pfx_0")),
         ir.IrCallArg(None, ir.IrString("cmd:")),
@@ -1182,4 +1187,141 @@ pub fn tco_functional_for_loop_lowering_test() {
   let assert Ok(map_fn) =
     list.find(ir_mod.functions, fn(f) { f.name == "map_naive" })
   let assert [ir.IrStmtExpr(ir.IrMatch(..))] = map_fn.body
+}
+
+// -----------------------------------------------------------------------------
+// 10. Phase 3: Prelude runtime sync, pkg_config, MoonBit emitter & Golden E2E
+// -----------------------------------------------------------------------------
+
+pub fn prelude_runtime_matches_disk_files_test() {
+  let assert Ok(disk_mbt) = simplifile.read("runtime/prelude/gprelude.mbt")
+  let assert Ok(disk_pkg) = simplifile.read("runtime/prelude/moon.pkg")
+  assert prelude_runtime.gprelude_mbt() == disk_mbt
+  assert prelude_runtime.moon_pkg() == disk_pkg
+}
+
+pub fn pkg_config_generation_test() {
+  assert pkg_config.module_to_pkg_dir("app/auth/token") == "app_auth_token"
+  assert pkg_config.module_to_pkg_dir("prelude") == "mod_prelude"
+  assert pkg_config.module_to_pkg_dir("gprelude") == "mod_gprelude"
+
+  let mod_str = pkg_config.emit_moon_mod("demo", "0.2.0")
+  assert string.contains(mod_str, "name = \"demo\"")
+  assert string.contains(mod_str, "version = \"0.2.0\"")
+
+  let pkg_str =
+    pkg_config.emit_moon_pkg(
+      "demo",
+      [
+        #("gprelude", "gprelude"),
+        #("demo_math", "math"),
+        #("demo_math", "math"),
+        #("my_org/wit_fs", "my_org_wit_fs"),
+      ],
+      True,
+    )
+  assert string.contains(pkg_str, "\"demo/gprelude\" @gprelude,")
+  assert string.contains(pkg_str, "\"demo/demo_math\" @math,")
+  assert string.contains(pkg_str, "\"my_org/wit_fs\" @my_org_wit_fs,")
+  assert string.contains(pkg_str, "\"is-main\": true")
+}
+
+pub fn emit_moonbit_ffi_and_constructs_test() {
+  let src =
+    "/// @external(moonbit, \"my_org/wit_fs\", \"read_file\")\n"
+    <> "pub fn read_file(path: String) -> Result(String, Nil) {\n"
+    <> "  Error(Nil)\n"
+    <> "}\n"
+    <> "\n"
+    <> "@external(moonbit, \"wasm:env\", \"host_add\")\n"
+    <> "pub fn host_add(a: Int, b: Int) -> Int\n"
+    <> "\n"
+    <> "pub fn greet(prefix p: String, name n: String) -> String {\n"
+    <> "  p <> n\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn apply(x: a, f: fn(a) -> b) -> b {\n"
+    <> "  f(x)\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn wrap_ok(x: Int) -> Result(Int, String) {\n"
+    <> "  apply(x, Ok)\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre_res)) = prepass.parse_module("ffi_mod", src)
+  let table =
+    symbol_table.index_project(
+      "ffi_pkg",
+      [#("ffi_mod", ast_mod, pre_res)],
+      None,
+      dict.new(),
+    )
+  let ir_mod =
+    desugar.desugar_module(ast_mod, table, "ffi_mod")
+    |> tco.optimize_module
+  let #(mbt, imports) = moonbit.emit_module(ir_mod)
+
+  assert list.contains(imports, #("my_org/wit_fs", "my_org_wit_fs"))
+  assert string.contains(mbt, "@my_org_wit_fs.read_file(path)")
+  assert string.contains(
+    mbt,
+    "fn __ffi_host_add(Int64, Int64) -> Int64 = \"env\" \"host_add\"",
+  )
+  assert string.contains(mbt, "__ffi_host_add(a, b)")
+  assert string.contains(
+    mbt,
+    "pub fn greet(prefix~ : String, name~ : String) -> String {\n  let p = prefix\n  let n = name",
+  )
+  assert string.contains(mbt, "apply(x, fn(__c_0) { Ok(__c_0) })")
+}
+
+pub fn golden_pure_gleam_e2e_test() {
+  let out_dir = "build/test_fixtures/golden_pure_mbt"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  let assert Ok(summary) =
+    workspace.transpile_project("fixtures/golden/pure_gleam", out_dir)
+
+  assert summary.project_name == "pure_gleam"
+  assert simplifile.is_file(filepath.join(out_dir, "moon.mod")) == Ok(True)
+  assert simplifile.is_file(filepath.join(out_dir, "gprelude/gprelude.mbt"))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(out_dir, "pure_gleam/pure_gleam.mbt"))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(
+      out_dir,
+      "pure_gleam_models/pure_gleam_models.mbt",
+    ))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(
+      out_dir,
+      "pure_gleam_math/pure_gleam_math.mbt",
+    ))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(
+      out_dir,
+      "test_pure_gleam_test/test_pure_gleam_test.mbt",
+    ))
+    == Ok(True)
+
+  let check_res =
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+  assert check_res.exit_code == 0
+
+  let test_wasm =
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
+  assert test_wasm.exit_code == 0
+  assert string.contains(test_wasm.output, "passed: 4, failed: 0")
+
+  let test_wasm_gc =
+    cmd.run(
+      command: "moon",
+      args: ["test", "--target", "wasm-gc"],
+      cwd: out_dir,
+    )
+  assert test_wasm_gc.exit_code == 0
+  assert string.contains(test_wasm_gc.output, "passed: 4, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
 }

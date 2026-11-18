@@ -96,7 +96,7 @@ pub fn lower_pattern(
     glance.PatternList(elements:, tail:, ..) -> {
       let #(tail_pat, guards, bindings, names, cur_id) = case tail {
         None -> #(
-          IrPatVariant(Some("prelude"), None, "Nil", [], False),
+          IrPatVariant(Some("gprelude"), None, "Nil", [], False),
           [],
           [],
           [],
@@ -120,7 +120,7 @@ pub fn lower_pattern(
       let list_pat =
         list.fold(rev_els, tail_pat, fn(acc_tail, el_pat) {
           IrPatVariant(
-            module_alias: Some("prelude"),
+            module_alias: Some("gprelude"),
             target_module: None,
             constructor: "Cons",
             args: [IrPatArg(None, el_pat), IrPatArg(None, acc_tail)],
@@ -156,8 +156,8 @@ pub fn lower_pattern(
       let prefix_check =
         IrCall(
           function: IrModuleRef(
-            module_alias: Some("prelude"),
-            target_module: "prelude",
+            module_alias: Some("gprelude"),
+            target_module: "gprelude",
             symbol: "string_has_prefix",
           ),
           args: [
@@ -179,8 +179,8 @@ pub fn lower_pattern(
           let drop_call =
             IrCall(
               function: IrModuleRef(
-                module_alias: Some("prelude"),
-                target_module: "prelude",
+                module_alias: Some("gprelude"),
+                target_module: "gprelude",
                 symbol: "string_drop_prefix",
               ),
               args: [

@@ -1,3 +1,5 @@
 /build
 /erl_crash.dump
 *.beam
+fixtures/golden/*/build
+fixtures/golden/*/manifest.toml

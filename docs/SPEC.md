@@ -97,8 +97,9 @@ gekko/
 │   ├── prelude/                   # GList[T], BitArray, Dynamic, safe Int64/Double div, helpers
 │   ├── gleam_stdlib_ffi/          # Native MoonBit FFI backing packages for gleam_stdlib leaf externals
 │   └── gleam_json_ffi/            # Native MoonBit FFI backing package for gleam_json (@json.Json)
+├── fixtures/
+│   └── golden/                    # End-to-end `.gleam` -> `.mbt` -> `moon test` golden fixture projects
 └── test/
-    ├── golden/                    # End-to-end `.gleam` -> `.mbt` -> `moon test` golden fixtures
     └── gekko_test.gleam
 ```
 
