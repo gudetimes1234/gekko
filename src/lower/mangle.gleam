@@ -50,6 +50,7 @@ fn reserved_keywords() -> Set(String) {
     "return",
     "throw",
     "and",
+    "dyn",
     "true",
     "false",
     "Self",

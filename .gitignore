@@ -3,3 +3,5 @@
 *.beam
 fixtures/golden/*/build
 fixtures/golden/*/manifest.toml
+examples/*/build
+examples/*/manifest.toml

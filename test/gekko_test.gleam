@@ -1563,3 +1563,66 @@ pub fn golden_stdlib_and_deps_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
+
+pub fn example_weather_app_moon_run_test() {
+  let fixture_dir = "examples/weather_app"
+  let packages_dir = filepath.join(fixture_dir, "build/packages")
+  let out_dir = "build/test_fixtures/weather_app_mbt"
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
+  symlink_root_package("gleam_stdlib", packages_dir)
+  symlink_root_package("gleam_json", packages_dir)
+
+  assert simplifile.write(
+      to: filepath.join(packages_dir, "packages.toml"),
+      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngleam_json = \"3.1.0\"\n\n[git]\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(fixture_dir, "manifest.toml"),
+      contents: "packages = [\n"
+        <> "  { name = \"gleam_json\", version = \"3.1.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"gleam_json\", source = \"hex\", outer_checksum = \"44FDAA8847BE8FC48CA7A1C089706BD54BADCC4C45B237A992EDDF9F2CDB2836\" },\n"
+        <> "  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n"
+        <> "]\n\n[requirements]\ngleam_json = { version = \">= 3.0.0 and < 4.0.0\" }\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\n",
+    )
+    == Ok(Nil)
+
+  let expected_nyc =
+    "Zip 10001 (New York City, NY): Temp 43.0 °F | Wind 1.8 mp/h | Humidity 67% | Condition: Clear sky"
+  let expected_la =
+    "Zip 90210 (Beverly Hills, CA): Temp 57.9 °F | Wind 11.9 mp/h | Humidity 32% | Condition: Clear sky"
+
+  let assert Ok(summary) = workspace.transpile_project(fixture_dir, out_dir)
+  assert summary.project_name == "weather_app"
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "weather_app", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert string.contains(run_wasm.output, expected_nyc)
+  assert string.contains(run_wasm.output, expected_la)
+
+  let run_js =
+    cmd.run(
+      command: "moon",
+      args: ["run", "weather_app", "--target", "js"],
+      cwd: out_dir,
+    )
+  assert run_js.exit_code == 0
+  assert string.contains(run_js.output, expected_nyc)
+  assert string.contains(run_js.output, expected_la)
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
