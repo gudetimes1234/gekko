@@ -4,6 +4,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 import gleam/string
+import index/stdlib_symbols
 import project/interface.{
   type PackageInterface, type ResolvedFunction, type ResolvedType,
   type ResolvedTypeDef, FnType, NamedType, TupleType, VariableType,
@@ -124,13 +125,34 @@ pub fn index_project(
   pkg_interface: Option(PackageInterface),
   ffi_overrides: Dict(String, FfiKind),
 ) -> SymbolTable {
+  let tagged =
+    list.map(modules, fn(entry) {
+      let #(mod_name, ast_mod, pre) = entry
+      #(package_name, mod_name, ast_mod, pre)
+    })
+  index_project_with_packages(
+    package_name,
+    tagged,
+    pkg_interface,
+    ffi_overrides,
+  )
+}
+
+/// Build a project-wide `SymbolTable` where each module carries its owning package name.
+pub fn index_project_with_packages(
+  root_package_name: String,
+  package_modules: List(#(String, String, glance.Module, PrepassResult)),
+  pkg_interface: Option(PackageInterface),
+  ffi_overrides: Dict(String, FfiKind),
+) -> SymbolTable {
+  let base_modules = seed_builtin_stdlib_modules()
   let raw_modules =
-    list.fold(modules, dict.new(), fn(acc, entry) {
-      let #(mod_name, ast_mod, prepass_res) = entry
+    list.fold(package_modules, base_modules, fn(acc, entry) {
+      let #(pkg_name, mod_name, ast_mod, prepass_res) = entry
       let mod_iface = get_module_interface(pkg_interface, mod_name)
       let indexed =
         index_module(
-          package_name,
+          pkg_name,
           mod_name,
           ast_mod,
           prepass_res,
@@ -141,7 +163,65 @@ pub fn index_project(
     })
 
   let computed_modules = compute_transitive_type_flags(raw_modules)
-  SymbolTable(package_name:, modules: computed_modules)
+  SymbolTable(package_name: root_package_name, modules: computed_modules)
+}
+
+/// Return True if a top-level definition has `@target(javascript)` and should
+/// be skipped when compiling to MoonBit.
+pub fn is_excluded_target(attributes: List(glance.Attribute)) -> Bool {
+  list.any(attributes, fn(attr) {
+    case attr.name, attr.arguments {
+      "target", [glance.Variable(name: "javascript", ..)] -> True
+      _, _ -> False
+    }
+  })
+}
+
+/// Look up a function in `current_module`, resolving module qualifiers and
+/// unqualified imports.
+pub fn lookup_function(
+  table: SymbolTable,
+  current_module: String,
+  qualifier: Option(String),
+  fn_name: String,
+) -> Option(FunctionInfo) {
+  case dict.get(table.modules, current_module) {
+    Error(_) -> None
+    Ok(mod_syms) ->
+      case qualifier {
+        Some(alias) ->
+          case dict.get(mod_syms.alias_to_module, alias) {
+            Ok(target_mod) ->
+              lookup_function_in_module(table, target_mod, fn_name)
+            Error(_) -> None
+          }
+        None ->
+          case dict.get(mod_syms.functions, fn_name) {
+            Ok(info) -> Some(info)
+            Error(_) ->
+              case dict.get(mod_syms.unqualified_values, fn_name) {
+                Ok(#(target_mod, orig_name)) ->
+                  lookup_function_in_module(table, target_mod, orig_name)
+                Error(_) -> None
+              }
+          }
+      }
+  }
+}
+
+fn lookup_function_in_module(
+  table: SymbolTable,
+  module_name: String,
+  fn_name: String,
+) -> Option(FunctionInfo) {
+  case dict.get(table.modules, module_name) {
+    Ok(mod_syms) ->
+      case dict.get(mod_syms.functions, fn_name) {
+        Ok(info) -> Some(info)
+        Error(_) -> None
+      }
+    Error(_) -> None
+  }
 }
 
 /// Look up a constructor in `current_module`, respecting optional module qualifier
@@ -267,8 +347,25 @@ fn index_module(
   let #(imports, alias_to_module, unqualified_values, unqualified_types) =
     index_imports(ast_mod.imports)
 
+  let active_type_aliases =
+    list.filter(ast_mod.type_aliases, fn(def) {
+      !is_excluded_target(def.attributes)
+    })
+  let active_custom_types =
+    list.filter(ast_mod.custom_types, fn(def) {
+      !is_excluded_target(def.attributes)
+    })
+  let active_functions =
+    list.filter(ast_mod.functions, fn(def) {
+      !is_excluded_target(def.attributes)
+    })
+  let active_constants =
+    list.filter(ast_mod.constants, fn(def) {
+      !is_excluded_target(def.attributes)
+    })
+
   let type_aliases =
-    list.fold(ast_mod.type_aliases, dict.new(), fn(acc, def) {
+    list.fold(active_type_aliases, dict.new(), fn(acc, def) {
       dict.insert(acc, def.definition.name, def.definition)
     })
 
@@ -276,7 +373,7 @@ fn index_module(
     index_custom_types(
       package_name,
       mod_name,
-      ast_mod.custom_types,
+      active_custom_types,
       mod_iface,
       alias_to_module,
       unqualified_types,
@@ -286,7 +383,7 @@ fn index_module(
     index_functions(
       package_name,
       mod_name,
-      ast_mod.functions,
+      active_functions,
       prepass_res,
       mod_iface,
       ffi_overrides,
@@ -298,7 +395,7 @@ fn index_module(
     index_constants(
       package_name,
       mod_name,
-      ast_mod.constants,
+      active_constants,
       mod_iface,
       alias_to_module,
       unqualified_types,
@@ -668,37 +765,36 @@ fn build_param_infos(
   })
 }
 
-fn resolve_function_ffi(
+/// Resolve any MoonBit FFI mapping configured in `ffi_overrides` or `@external(moonbit, ...)` pragmas.
+pub fn resolve_function_ffi(
   package_name: String,
   mod_name: String,
   fn_name: String,
   prepass_res: PrepassResult,
   ffi_overrides: Dict(String, FfiKind),
 ) -> Option(FfiKind) {
-  let dotted_key = mod_name <> "." <> fn_name
-  let pkg_dotted_key = package_name <> "." <> mod_name <> "." <> fn_name
-  case dict.get(ffi_overrides, dotted_key) {
+  let candidate_keys = [
+    package_name <> ":" <> mod_name <> "." <> fn_name,
+    package_name <> "." <> mod_name <> "." <> fn_name,
+    mod_name <> "." <> fn_name,
+  ]
+  case list.find_map(candidate_keys, fn(k) { dict.get(ffi_overrides, k) }) {
     Ok(kind) -> Some(kind)
-    Error(_) ->
-      case dict.get(ffi_overrides, pkg_dotted_key) {
-        Ok(kind) -> Some(kind)
-        Error(_) -> {
-          let matching =
-            list.filter(prepass_res.ffi_entries, fn(e) {
-              e.module == mod_name && e.function_name == fn_name
-            })
-          let raw =
-            list.find(matching, fn(e) { e.source == prepass.RawAttribute })
-          case raw {
+    Error(_) -> {
+      let matching =
+        list.filter(prepass_res.ffi_entries, fn(e) {
+          e.module == mod_name && e.function_name == fn_name
+        })
+      let raw = list.find(matching, fn(e) { e.source == prepass.RawAttribute })
+      case raw {
+        Ok(e) -> Some(e.kind)
+        Error(_) ->
+          case list.last(matching) {
             Ok(e) -> Some(e.kind)
-            Error(_) ->
-              case list.last(matching) {
-                Ok(e) -> Some(e.kind)
-                Error(_) -> None
-              }
+            Error(_) -> None
           }
-        }
       }
+    }
   }
 }
 
@@ -943,9 +1039,80 @@ fn resolved_type_has_function(
         resolved_type_has_function(el, all_types, visited)
       })
     NamedType(name:, module:, parameters:, ..) ->
-      list.any(parameters, fn(p) {
-        resolved_type_has_function(p, all_types, visited)
-      })
-      || type_key_has_function_field(#(module, name), all_types, visited)
+      case module, name {
+        "gleam/dynamic/decode", "Decoder" -> True
+        _, _ ->
+          list.any(parameters, fn(p) {
+            resolved_type_has_function(p, all_types, visited)
+          })
+          || type_key_has_function_field(#(module, name), all_types, visited)
+      }
   }
+}
+
+fn seed_builtin_stdlib_modules() -> Dict(String, ModuleSymbols) {
+  let dummy_type = glance.NamedType(glance.Span(0, 0), "Unit", None, [])
+  list.fold(stdlib_symbols.builtin_module_specs(), dict.new(), fn(acc, spec) {
+    let constructors =
+      list.fold(spec.constructors, dict.new(), fn(c_acc, c) {
+        let fields =
+          list.map(c.field_labels, fn(lbl) {
+            FieldInfo(label: lbl, ast_type: dummy_type, resolved_type: None)
+          })
+        let info =
+          ConstructorInfo(
+            module: spec.module_name,
+            type_name: c.type_name,
+            variant_name: c.variant_name,
+            fields:,
+          )
+        dict.insert(c_acc, c.variant_name, info)
+      })
+
+    let functions =
+      list.fold(spec.functions, dict.new(), fn(f_acc, f) {
+        let params =
+          list.index_map(f.param_labels, fn(lbl, idx) {
+            let pname = case lbl {
+              Some(l) -> glance.Named(l)
+              None -> glance.Named("arg_" <> string.inspect(idx))
+            }
+            ParamInfo(
+              label: lbl,
+              name: pname,
+              ast_type: None,
+              resolved_type: None,
+            )
+          })
+        let info =
+          FunctionInfo(
+            module: spec.module_name,
+            name: f.name,
+            publicity: glance.Public,
+            arity: list.length(f.param_labels),
+            parameters: params,
+            return_type: None,
+            resolved: None,
+            ffi: None,
+            has_erlang_or_js_external: False,
+            has_gleam_body: True,
+          )
+        dict.insert(f_acc, f.name, info)
+      })
+
+    let mod_syms =
+      ModuleSymbols(
+        name: spec.module_name,
+        imports: [],
+        alias_to_module: dict.new(),
+        unqualified_values: dict.new(),
+        unqualified_types: dict.new(),
+        types: dict.new(),
+        type_aliases: dict.new(),
+        constructors:,
+        functions:,
+        constants: dict.new(),
+      )
+    dict.insert(acc, spec.module_name, mod_syms)
+  })
 }

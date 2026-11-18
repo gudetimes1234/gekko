@@ -49,6 +49,7 @@ fn reserved_keywords() -> Set(String) {
     "else",
     "return",
     "throw",
+    "and",
     "true",
     "false",
     "Self",

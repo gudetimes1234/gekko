@@ -69,10 +69,22 @@ pub fn desugar_module(
     |> list.reverse
     |> list.map(fn(imp) { IrImport(module: imp.module, alias: imp.alias) })
 
-  let custom_types = list.reverse(ast_mod.custom_types)
-  let ast_type_aliases = list.reverse(ast_mod.type_aliases)
-  let ast_constants = list.reverse(ast_mod.constants)
-  let ast_functions = list.reverse(ast_mod.functions)
+  let custom_types =
+    ast_mod.custom_types
+    |> list.reverse
+    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+  let ast_type_aliases =
+    ast_mod.type_aliases
+    |> list.reverse
+    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+  let ast_constants =
+    ast_mod.constants
+    |> list.reverse
+    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+  let ast_functions =
+    ast_mod.functions
+    |> list.reverse
+    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
 
   let types =
     list.filter_map(custom_types, fn(def) {
@@ -826,14 +838,6 @@ fn find_pipe_slot_label(
       }
     })
 
-  let num_positional =
-    list.count(supplied_args, fn(arg) {
-      case arg {
-        glance.UnlabelledField(_) -> True
-        _ -> False
-      }
-    })
-
   let remaining_params =
     list.filter(param_labels, fn(lbl_opt) {
       case lbl_opt {
@@ -842,7 +846,7 @@ fn find_pipe_slot_label(
       }
     })
 
-  case list.drop(remaining_params, num_positional) {
+  case remaining_params {
     [first, ..] -> option.map(first, mangle.mangle_ident)
     [] -> None
   }

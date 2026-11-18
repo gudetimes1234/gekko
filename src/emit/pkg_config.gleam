@@ -20,7 +20,7 @@ pub fn emit_moon_mod(project_name: String, version: String) -> String {
   <> "version = \""
   <> version
   <> "\"\n"
-  <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else\"\n"
+  <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else-unused_trait_bound\"\n"
 }
 
 /// Generate a declarative `moon.pkg` file for a package given `#(pkg_or_dir, alias)`

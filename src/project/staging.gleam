@@ -1,6 +1,7 @@
 import filepath
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import glexer
@@ -42,9 +43,20 @@ pub fn extract_project_interface(
   project_root: String,
   staging_dir: String,
 ) -> Result(PackageInterface, String) {
-  use _ <- result.try(prepare_staging_dir(project_root, staging_dir))
-  use _ <- result.try(stage_toml_and_deps(project_root, staging_dir))
-  use _ <- result.try(stage_sources(project_root, staging_dir))
+  extract_package_interface_with_deps(project_root, project_root, staging_dir)
+}
+
+/// Stage `pkg_root` inside `staging_dir` while resolving `manifest.toml` and
+/// `build/packages` from `deps_root` (falling back to `pkg_root`), then run
+/// `gleam export package-interface --out interface.json`.
+pub fn extract_package_interface_with_deps(
+  pkg_root: String,
+  deps_root: String,
+  staging_dir: String,
+) -> Result(PackageInterface, String) {
+  use _ <- result.try(prepare_staging_dir(staging_dir))
+  use _ <- result.try(stage_toml_and_deps(pkg_root, deps_root, staging_dir))
+  use _ <- result.try(stage_sources(pkg_root, staging_dir))
 
   let res =
     cmd.run(
@@ -75,27 +87,19 @@ pub fn extract_project_interface(
   }
 }
 
-fn prepare_staging_dir(
-  project_root: String,
-  staging_dir: String,
-) -> Result(Nil, String) {
-  let _ = project_root
+fn prepare_staging_dir(staging_dir: String) -> Result(Nil, String) {
   let staging_packages =
     staging_dir
     |> filepath.join("build")
     |> filepath.join("packages")
-  case simplifile.is_symlink(staging_packages) {
-    Ok(True) -> {
-      let _ = simplifile.delete_file(at: staging_packages)
-      Nil
-    }
-    _ -> Nil
-  }
+  let _ = simplifile.delete(file_or_dir_at: staging_packages)
 
   let staging_src = filepath.join(staging_dir, "src")
   let _ = simplifile.delete(file_or_dir_at: staging_src)
   let _ =
     simplifile.delete_file(at: filepath.join(staging_dir, "interface.json"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(staging_dir, "manifest.toml"))
 
   simplifile.create_directory_all(staging_src)
   |> result.map_error(fn(err) {
@@ -107,10 +111,11 @@ fn prepare_staging_dir(
 }
 
 fn stage_toml_and_deps(
-  project_root: String,
+  pkg_root: String,
+  deps_root: String,
   staging_dir: String,
 ) -> Result(Nil, String) {
-  let src_gleam_toml = filepath.join(project_root, "gleam.toml")
+  let src_gleam_toml = filepath.join(pkg_root, "gleam.toml")
   let dest_gleam_toml = filepath.join(staging_dir, "gleam.toml")
   use toml_content <- result.try(
     simplifile.read(src_gleam_toml)
@@ -132,23 +137,33 @@ fn stage_toml_and_deps(
     }),
   )
 
-  let src_manifest = filepath.join(project_root, "manifest.toml")
+  let src_manifest =
+    first_existing_path(
+      deps_root,
+      pkg_root,
+      "manifest.toml",
+      simplifile.is_file,
+    )
   let dest_manifest = filepath.join(staging_dir, "manifest.toml")
-  use _ <- result.try(case simplifile.is_file(src_manifest) {
-    Ok(True) ->
-      simplifile.copy_file(at: src_manifest, to: dest_manifest)
+  use _ <- result.try(case src_manifest {
+    Some(path) ->
+      simplifile.copy_file(at: path, to: dest_manifest)
       |> result.map_error(fn(err) {
         "Failed to copy manifest.toml: " <> simplifile.describe_error(err)
       })
-    _ -> Ok(Nil)
+    None -> Ok(Nil)
   })
 
-  let src_packages =
-    project_root
-    |> filepath.join("build")
-    |> filepath.join("packages")
-  case simplifile.is_directory(src_packages) {
-    Ok(True) -> {
+  let packages_rel = filepath.join("build", "packages")
+  case
+    first_existing_path(
+      deps_root,
+      pkg_root,
+      packages_rel,
+      simplifile.is_directory,
+    )
+  {
+    Some(src_packages) -> {
       let staging_build = filepath.join(staging_dir, "build")
       use _ <- result.try(
         simplifile.create_directory_all(staging_build)
@@ -159,21 +174,81 @@ fn stage_toml_and_deps(
       )
       let dest_packages = filepath.join(staging_build, "packages")
       let _ = simplifile.delete(file_or_dir_at: dest_packages)
-      let abs_src_packages =
-        simplifile.resolve(path: src_packages)
-        |> result.unwrap(src_packages)
-      case
-        simplifile.create_symlink(to: abs_src_packages, from: dest_packages)
-      {
-        Ok(Nil) -> Ok(Nil)
-        Error(_) ->
-          simplifile.copy_directory(at: src_packages, to: dest_packages)
-          |> result.map_error(fn(err) {
-            "Failed to stage build/packages: " <> simplifile.describe_error(err)
-          })
+      copy_packages_isolated(src_packages, dest_packages)
+    }
+    None -> Ok(Nil)
+  }
+}
+
+fn copy_packages_isolated(
+  src_packages: String,
+  dest_packages: String,
+) -> Result(Nil, String) {
+  use _ <- result.try(
+    simplifile.create_directory_all(dest_packages)
+    |> result.map_error(fn(err) {
+      "Failed to create staged packages dir: " <> simplifile.describe_error(err)
+    }),
+  )
+  use entries <- result.try(
+    simplifile.read_directory(at: src_packages)
+    |> result.map_error(fn(err) {
+      "Failed to read build/packages: " <> simplifile.describe_error(err)
+    }),
+  )
+  list.try_each(entries, fn(entry) {
+    let src_entry = filepath.join(src_packages, entry)
+    let dest_entry = filepath.join(dest_packages, entry)
+    let resolved =
+      simplifile.resolve(path: src_entry) |> result.unwrap(src_entry)
+    case simplifile.is_directory(resolved) {
+      Ok(True) ->
+        simplifile.copy_directory(at: resolved, to: dest_entry)
+        |> result.map_error(fn(err) {
+          "Failed to copy package dir "
+          <> entry
+          <> ": "
+          <> simplifile.describe_error(err)
+        })
+      Ok(False) ->
+        case simplifile.is_file(resolved) {
+          Ok(True) ->
+            simplifile.copy_file(at: resolved, to: dest_entry)
+            |> result.map_error(fn(err) {
+              "Failed to copy package file "
+              <> entry
+              <> ": "
+              <> simplifile.describe_error(err)
+            })
+          _ -> Ok(Nil)
+        }
+      Error(err) ->
+        Error(
+          "Failed to stat package entry "
+          <> entry
+          <> ": "
+          <> simplifile.describe_error(err),
+        )
+    }
+  })
+}
+
+fn first_existing_path(
+  primary_root: String,
+  fallback_root: String,
+  rel_path: String,
+  check: fn(String) -> Result(Bool, simplifile.FileError),
+) -> Option(String) {
+  let primary = filepath.join(primary_root, rel_path)
+  case check(primary) {
+    Ok(True) -> Some(primary)
+    _ -> {
+      let fallback = filepath.join(fallback_root, rel_path)
+      case fallback != primary, check(fallback) {
+        True, Ok(True) -> Some(fallback)
+        _, _ -> None
       }
     }
-    _ -> Ok(Nil)
   }
 }
 

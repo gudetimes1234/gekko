@@ -1,6 +1,7 @@
 import emit/moonbit
 import emit/pkg_config
 import emit/prelude_runtime
+import emit/stdlib_runtime
 import filepath
 import glance
 import gleam/dict
@@ -17,6 +18,7 @@ import lower/tco
 import project/cmd
 import project/ffi_config
 import project/interface
+import project/loader
 import project/prepass
 import project/staging
 import project/workspace
@@ -1270,9 +1272,69 @@ pub fn emit_moonbit_ffi_and_constructs_test() {
   assert string.contains(mbt, "__ffi_host_add(a, b)")
   assert string.contains(
     mbt,
-    "pub fn greet(prefix~ : String, name~ : String) -> String {\n  let p = prefix\n  let n = name",
+    "pub fn greet(p : String, n : String) -> String {",
   )
   assert string.contains(mbt, "apply(x, fn(__c_0) { Ok(__c_0) })")
+}
+
+pub fn stdlib_runtime_all_shims_moon_check_test() {
+  let out_dir = "build/shim_verify_out"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  assert simplifile.create_directory_all(filepath.join(out_dir, "gprelude"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(out_dir, "moon.mod"),
+      contents: pkg_config.emit_moon_mod("shim_verify", "0.1.0"),
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(out_dir, "gprelude/moon.pkg"),
+      contents: prelude_runtime.moon_pkg(),
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(out_dir, "gprelude/gprelude.mbt"),
+      contents: prelude_runtime.gprelude_mbt(),
+    )
+    == Ok(Nil)
+
+  let all_mod_names =
+    stdlib_runtime.all_shim_packages()
+    |> list.map(fn(pkg) { pkg.module_name })
+  assert stdlib_runtime.emit_shim_packages(
+      "shim_verify",
+      out_dir,
+      all_mod_names,
+    )
+    == Ok(Nil)
+
+  let wasm_res =
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+  assert wasm_res.exit_code == 0
+
+  let wasm_gc_res =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--target", "wasm-gc"],
+      cwd: out_dir,
+    )
+  assert wasm_gc_res.exit_code == 0
+
+  let js_res =
+    cmd.run(command: "moon", args: ["check", "--target", "js"], cwd: out_dir)
+  assert js_res.exit_code == 0
+
+  let native_res =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--target", "native"],
+      cwd: out_dir,
+    )
+  assert native_res.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
 }
 
 pub fn golden_pure_gleam_e2e_test() {
@@ -1322,6 +1384,182 @@ pub fn golden_pure_gleam_e2e_test() {
   assert test_wasm_gc.exit_code == 0
   assert string.contains(test_wasm_gc.output, "passed: 4, failed: 0")
 
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+fn symlink_root_package(pkg_name: String, dest_packages_dir: String) {
+  let assert Ok(src_abs) =
+    simplifile.resolve(filepath.join("build/packages", pkg_name))
+  let dest = filepath.join(dest_packages_dir, pkg_name)
+  let _ = simplifile.delete(file_or_dir_at: dest)
+  assert simplifile.create_symlink(to: src_abs, from: dest) == Ok(Nil)
+}
+
+pub fn loader_dependency_fallback_and_unmapped_error_test() {
+  assert loader.is_intercepted_package("gleam_stdlib")
+  assert loader.is_intercepted_package("gleam_json")
+  assert loader.is_intercepted_package("gleeunit")
+  assert !loader.is_intercepted_package("tiny_slug")
+
+  let root = "build/test_fixtures/loader_case"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let packages_dir = filepath.join(root, "build/packages")
+  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"loader_app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/loader_app.gleam"),
+      contents: "pub fn id(x: Int) -> Int { x }\n",
+    )
+    == Ok(Nil)
+
+  symlink_root_package("gleam_stdlib", packages_dir)
+
+  // Dependency with Erlang external AND pure-Gleam fallback body
+  let good_dir = filepath.join(packages_dir, "good_pkg")
+  assert simplifile.create_directory_all(filepath.join(good_dir, "src"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(good_dir, "gleam.toml"),
+      contents: "name = \"good_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(good_dir, "src/good_mod.gleam"),
+      contents: "@external(erlang, \"lists\", \"reverse\")\npub fn rev(xs: List(a)) -> List(a) { xs }\n",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(packages_dir, "packages.toml"),
+      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngood_pkg = \"0.1.0\"\n\n[git]\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "manifest.toml"),
+      contents: "packages = [\n  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n  { name = \"good_pkg\", version = \"0.1.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"good_pkg\", source = \"hex\", outer_checksum = \"00\" },\n]\n\n[requirements]\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(loaded_good) = loader.load_dependencies(root, dict.new())
+  assert list.map(loaded_good, fn(d) { d.package_name }) == ["good_pkg"]
+
+  // Dependency with bodyless Erlang external and no gekko.toml override must fail fast
+  let bad_dir = filepath.join(packages_dir, "bad_pkg")
+  assert simplifile.create_directory_all(filepath.join(bad_dir, "src"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(bad_dir, "gleam.toml"),
+      contents: "name = \"bad_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(bad_dir, "src/bad_mod.gleam"),
+      contents: "@external(erlang, \"bad_erl\", \"missing\")\npub fn missing() -> Int\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(packages_dir, "packages.toml"),
+      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngood_pkg = \"0.1.0\"\nbad_pkg = \"0.1.0\"\n\n[git]\n",
+    )
+    == Ok(Nil)
+
+  assert loader.load_dependencies(root, dict.new())
+    == Error(
+      "Unmapped external function bad_pkg:bad_mod.missing (add an override in gekko.toml)",
+    )
+
+  // Adding a gekko.toml override satisfies validation and loads both deps
+  assert simplifile.write(
+      to: filepath.join(root, "gekko.toml"),
+      contents: "[overrides.\"bad_pkg:bad_mod.missing\"]\nwasm_module = \"env\"\nimport_name = \"missing\"\n",
+    )
+    == Ok(Nil)
+  let assert Ok(overrides) = ffi_config.load_project_overrides(root)
+  let assert Ok(loaded_both) = loader.load_dependencies(root, overrides)
+  assert list.length(loaded_both) == 2
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn golden_stdlib_and_deps_e2e_test() {
+  let fixture_dir = "fixtures/golden/stdlib_and_deps"
+  let packages_dir = filepath.join(fixture_dir, "build/packages")
+  let out_dir = "build/test_fixtures/golden_stdlib_mbt"
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
+  symlink_root_package("gleam_stdlib", packages_dir)
+  symlink_root_package("gleam_json", packages_dir)
+  symlink_root_package("gleeunit", packages_dir)
+
+  assert simplifile.copy_directory(
+      at: filepath.join(fixture_dir, "vendor/tiny_slug"),
+      to: filepath.join(packages_dir, "tiny_slug"),
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(packages_dir, "packages.toml"),
+      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngleam_json = \"3.1.0\"\ngleeunit = \"1.11.0\"\ntiny_slug = \"0.1.0\"\n\n[git]\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(fixture_dir, "manifest.toml"),
+      contents: "packages = [\n"
+        <> "  { name = \"gleam_json\", version = \"3.1.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"gleam_json\", source = \"hex\", outer_checksum = \"44FDAA8847BE8FC48CA7A1C089706BD54BADCC4C45B237A992EDDF9F2CDB2836\" },\n"
+        <> "  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n"
+        <> "  { name = \"gleeunit\", version = \"1.11.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"gleeunit\", source = \"hex\", outer_checksum = \"EC31ABA74256AEA531EDF8169931D775BBB384FED0A8A1BDC4DD9354E3E21826\" },\n"
+        <> "  { name = \"tiny_slug\", version = \"0.1.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"tiny_slug\", source = \"hex\", outer_checksum = \"00\" },\n"
+        <> "]\n\n[requirements]\ngleam_json = { version = \">= 3.0.0 and < 4.0.0\" }\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\ngleeunit = { version = \">= 1.0.0 and < 2.0.0\" }\ntiny_slug = { version = \">= 0.1.0 and < 1.0.0\" }\n",
+    )
+    == Ok(Nil)
+
+  let gleam_test_res =
+    cmd.run(command: "gleam", args: ["test"], cwd: fixture_dir)
+  assert gleam_test_res.exit_code == 0
+  assert string.contains(gleam_test_res.output, "4 passed, no failures")
+
+  let assert Ok(summary) = workspace.transpile_project(fixture_dir, out_dir)
+  assert summary.project_name == "stdlib_and_deps"
+  assert list.contains(summary.emitted_modules, "tiny_slug")
+  assert simplifile.is_file(filepath.join(out_dir, "tiny_slug/tiny_slug.mbt"))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(out_dir, "gleam_json/gleam_json.mbt"))
+    == Ok(True)
+
+  let check_res =
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+  assert check_res.exit_code == 0
+
+  let test_wasm =
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
+  assert test_wasm.exit_code == 0
+  assert string.contains(test_wasm.output, "passed: 4, failed: 0")
+
+  let test_wasm_gc =
+    cmd.run(
+      command: "moon",
+      args: ["test", "--target", "wasm-gc"],
+      cwd: out_dir,
+    )
+  assert test_wasm_gc.exit_code == 0
+  assert string.contains(test_wasm_gc.output, "passed: 4, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
