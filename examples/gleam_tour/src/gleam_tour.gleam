@@ -7,12 +7,16 @@ import tour/functions
 import tour/stdlib_and_advanced
 
 pub fn build_tour_report() -> String {
+  io.println("=== Data Types: Opaque Types ===")
   let positive = new_positive(1)
   let zero = new_positive(0)
   let negative = new_positive(-1)
   assert to_int(positive) == 1
   assert to_int(zero) == 0
   assert to_int(negative) == 0
+  echo positive
+  echo to_int(zero)
+  echo to_int(negative)
 
   let s1 = "[Basics] " <> basics.run()
   let s2 = "[Functions] " <> functions.run()

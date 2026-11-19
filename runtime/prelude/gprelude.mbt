@@ -279,9 +279,248 @@ pub fn string_drop_prefix(s : String, prefix : String) -> String {
 }
 
 ///|
-pub fn[T] echo_val(val : T, msg : String) -> T {
-  if msg != "" {
-    @prelude.println(msg)
+pub(open) trait GleamInspect {
+  gleam_inspect(Self) -> String
+}
+
+///|
+fn escape_gleam_string(s : String) -> String {
+  let buf = StringBuilder()
+  buf.write_char('"')
+  for ch in s {
+    match ch {
+      '\\' => buf.write_string("\\\\")
+      '"' => buf.write_string("\\\"")
+      '\n' => buf.write_string("\\n")
+      '\r' => buf.write_string("\\r")
+      '\t' => buf.write_string("\\t")
+      _ => buf.write_char(ch)
+    }
   }
+  buf.write_char('"')
+  buf.to_string()
+}
+
+///|
+pub impl GleamInspect for Int64 with gleam_inspect(self) {
+  self.to_string()
+}
+
+///|
+pub impl GleamInspect for Double with gleam_inspect(self) {
+  let s = self.to_string()
+  if s.contains(".") || s.contains("e") || s.contains("E") {
+    s
+  } else {
+    s + ".0"
+  }
+}
+
+///|
+pub impl GleamInspect for Bool with gleam_inspect(self) {
+  if self {
+    "True"
+  } else {
+    "False"
+  }
+}
+
+///|
+pub impl GleamInspect for Unit with gleam_inspect(_) {
+  "Nil"
+}
+
+///|
+pub impl GleamInspect for String with gleam_inspect(self) {
+  escape_gleam_string(self)
+}
+
+///|
+pub impl GleamInspect for BitArray with gleam_inspect(self) {
+  let buf = StringBuilder()
+  buf.write_string("<<")
+  let mut i = 0
+  while i < self.data.length() {
+    if i > 0 {
+      buf.write_string(", ")
+    }
+    buf.write_string(self.data[i].to_int().to_string())
+    i = i + 1
+  }
+  buf.write_string(">>")
+  buf.to_string()
+}
+
+///|
+pub impl[T : GleamInspect] GleamInspect for GList[T] with gleam_inspect(self) {
+  let buf = StringBuilder()
+  buf.write_char('[')
+  for cur = self, first = true {
+    match cur {
+      Nil => break
+      Cons(head, tail) => {
+        if !first {
+          buf.write_string(", ")
+        }
+        buf.write_string(GleamInspect::gleam_inspect(head))
+        continue tail, false
+      }
+    }
+  }
+  buf.write_char(']')
+  buf.to_string()
+}
+
+///|
+pub impl[T : GleamInspect, E : GleamInspect] GleamInspect for Result[T, E] with gleam_inspect(
+  self,
+) {
+  match self {
+    Ok(v) => "Ok(" + GleamInspect::gleam_inspect(v) + ")"
+    Err(e) => "Error(" + GleamInspect::gleam_inspect(e) + ")"
+  }
+}
+
+///|
+pub impl[T : GleamInspect] GleamInspect for Option[T] with gleam_inspect(self) {
+  match self {
+    Some(v) => "Some(" + GleamInspect::gleam_inspect(v) + ")"
+    None => "None"
+  }
+}
+
+///|
+pub impl[A : GleamInspect, B : GleamInspect] GleamInspect for (A, B) with gleam_inspect(
+  self,
+) {
+  "#(" + GleamInspect::gleam_inspect(self.0) + ", " + GleamInspect::gleam_inspect(self.1) + ")"
+}
+
+///|
+pub impl[A : GleamInspect, B : GleamInspect, C : GleamInspect] GleamInspect for (
+  A,
+  B,
+  C,
+) with gleam_inspect(self) {
+  "#(" +
+  GleamInspect::gleam_inspect(self.0) +
+  ", " +
+  GleamInspect::gleam_inspect(self.1) +
+  ", " +
+  GleamInspect::gleam_inspect(self.2) +
+  ")"
+}
+
+///|
+pub impl[A : GleamInspect, B : GleamInspect, C : GleamInspect, D : GleamInspect] GleamInspect for (
+  A,
+  B,
+  C,
+  D,
+) with gleam_inspect(self) {
+  "#(" +
+  GleamInspect::gleam_inspect(self.0) +
+  ", " +
+  GleamInspect::gleam_inspect(self.1) +
+  ", " +
+  GleamInspect::gleam_inspect(self.2) +
+  ", " +
+  GleamInspect::gleam_inspect(self.3) +
+  ")"
+}
+
+///|
+pub impl[
+  A : GleamInspect,
+  B : GleamInspect,
+  C : GleamInspect,
+  D : GleamInspect,
+  E : GleamInspect,
+] GleamInspect for (A, B, C, D, E) with gleam_inspect(self) {
+  "#(" +
+  GleamInspect::gleam_inspect(self.0) +
+  ", " +
+  GleamInspect::gleam_inspect(self.1) +
+  ", " +
+  GleamInspect::gleam_inspect(self.2) +
+  ", " +
+  GleamInspect::gleam_inspect(self.3) +
+  ", " +
+  GleamInspect::gleam_inspect(self.4) +
+  ")"
+}
+
+///|
+pub impl[
+  A : GleamInspect,
+  B : GleamInspect,
+  C : GleamInspect,
+  D : GleamInspect,
+  E : GleamInspect,
+  F : GleamInspect,
+] GleamInspect for (A, B, C, D, E, F) with gleam_inspect(self) {
+  "#(" +
+  GleamInspect::gleam_inspect(self.0) +
+  ", " +
+  GleamInspect::gleam_inspect(self.1) +
+  ", " +
+  GleamInspect::gleam_inspect(self.2) +
+  ", " +
+  GleamInspect::gleam_inspect(self.3) +
+  ", " +
+  GleamInspect::gleam_inspect(self.4) +
+  ", " +
+  GleamInspect::gleam_inspect(self.5) +
+  ")"
+}
+
+///|
+pub impl GleamInspect for Dynamic with gleam_inspect(self) {
+  match self {
+    DynNull => "Nil"
+    DynBool(b) => GleamInspect::gleam_inspect(b)
+    DynInt(i) => GleamInspect::gleam_inspect(i)
+    DynFloat(f) => GleamInspect::gleam_inspect(f)
+    DynString(s) => GleamInspect::gleam_inspect(s)
+    DynBitArray(ba) => GleamInspect::gleam_inspect(ba)
+    DynList(xs) => GleamInspect::gleam_inspect(xs)
+    DynArray(arr) => {
+      let buf = StringBuilder()
+      buf.write_char('[')
+      for i = 0; i < arr.length(); i = i + 1 {
+        if i > 0 {
+          buf.write_string(", ")
+        }
+        buf.write_string(GleamInspect::gleam_inspect(arr[i]))
+      }
+      buf.write_char(']')
+      buf.to_string()
+    }
+    DynMap(m) => {
+      let buf = StringBuilder()
+      buf.write_string("dict.from_list([")
+      let mut first = true
+      m.each(fn(k, v) {
+        if !first {
+          buf.write_string(", ")
+        }
+        first = false
+        buf.write_string("#(")
+        buf.write_string(escape_gleam_string(k))
+        buf.write_string(", ")
+        buf.write_string(GleamInspect::gleam_inspect(v))
+        buf.write_char(')')
+      })
+      buf.write_string("])")
+      buf.to_string()
+    }
+  }
+}
+
+///|
+pub fn[T : GleamInspect] echo_val(val : T, loc : String, msg : String) -> T {
+  let header = if msg == "" { loc } else { loc + " " + msg }
+  @prelude.eprintln(header)
+  @prelude.eprintln(GleamInspect::gleam_inspect(val))
   val
 }

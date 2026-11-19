@@ -1791,6 +1791,35 @@ pub fn example_gleam_tour_moon_run_test() {
     )
   assert run_wasm.exit_code == 0
   assert string.contains(run_wasm.output, "Hello, Joe!")
+  assert string.contains(run_wasm.output, "=== Basics: Ints ===")
+  assert string.contains(
+    run_wasm.output,
+    "=== Functions: Generics & Pipelines ===",
+  )
+  assert string.contains(
+    run_wasm.output,
+    "=== Flow Control: Case Expressions & Variable Patterns ===",
+  )
+  assert string.contains(
+    run_wasm.output,
+    "=== Data Types: Records, Accessors & Updates ===",
+  )
+  assert string.contains(
+    run_wasm.output,
+    "=== Standard Library: Dict & Option Modules ===",
+  )
+  assert string.contains(
+    run_wasm.output,
+    "=== Advanced Features: Use, Assert & Echo ===",
+  )
+  assert string.contains(run_wasm.output, "src/tour/data_types.gleam:")
+  assert string.contains(run_wasm.output, "Person(\"Amy\", 26, True)")
+  assert string.contains(run_wasm.output, "<<24, 3>>")
+  assert string.contains(run_wasm.output, "dict.from_list([#(\"Lucy\", 13)])")
+  assert string.contains(
+    run_wasm.output,
+    "Reversed via external fallback\n[5, 4, 3, 2, 1]",
+  )
   assert string.contains(run_wasm.output, "[Basics]")
   assert string.contains(run_wasm.output, "[Functions]")
   assert string.contains(run_wasm.output, "[Flow Control]")
@@ -1802,6 +1831,129 @@ pub fn example_gleam_tour_moon_run_test() {
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn echo_exact_gleam_behavior_e2e_test() {
+  let root = "build/test_fixtures/echo_e2e"
+  let out_dir = "build/test_fixtures/echo_e2e_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"echo_e2e\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\ngleam_json = \">= 3.0.0 and < 4.0.0\"\n",
+    )
+    == Ok(Nil)
+  stage_offline_stdlib_json(root)
+
+  let src =
+    "import gleam/dict\n"
+    <> "import gleam/option.{None, Some}\n"
+    <> "import gleam/string\n\n"
+    <> "pub type Person {\n"
+    <> "  Person(name: String, age: Int, needs_glasses: Bool)\n"
+    <> "}\n\n"
+    <> "pub type Handler {\n"
+    <> "  Handler(label: String, callback: fn(Int) -> Int)\n"
+    <> "}\n\n"
+    <> "fn generic_echo(x: a) -> a {\n"
+    <> "  echo x\n"
+    <> "}\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  let x = echo 41\n"
+    <> "  assert x + 1 == 42\n"
+    <> "  echo \"bare stmt\"\n"
+    <> "  echo 3.0\n"
+    <> "  echo True\n"
+    <> "  echo False\n"
+    <> "  echo Nil\n"
+    <> "  echo \"hello \\\"world\\\"\"\n"
+    <> "  echo [1, 2, 3]\n"
+    <> "  echo #(1, 2.2, \"three\")\n"
+    <> "  echo Ok(1)\n"
+    <> "  echo Error(Nil)\n"
+    <> "  echo Some(\"Nubi\")\n"
+    <> "  echo None\n"
+    <> "  echo <<3>>\n"
+    <> "  echo <<6147:size(16)>>\n"
+    <> "  echo Person(\"Amy\", 26, True)\n"
+    <> "  echo Handler(\"cb\", fn(n) { n + 1 })\n"
+    <> "  echo dict.from_list([#(\"a\", 1)])\n"
+    <> "  echo 1 + 2 as \"sum msg\"\n"
+    <> "  let _ = [1, 2] |> echo\n"
+    <> "  let _ = generic_echo(99)\n"
+    <> "  assert string.inspect(Person(\"Amy\", 26, True))\n"
+    <> "    == \"Person(\\\"Amy\\\", 26, True)\"\n"
+    <> "  Nil\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/echo_e2e.gleam"),
+      contents: src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(summary) = workspace.transpile_project(root, out_dir)
+  assert summary.project_name == "echo_e2e"
+
+  let assert_echo_output = fn(output: String) {
+    assert string.contains(output, "src/echo_e2e.gleam:18\n41\n")
+    assert string.contains(output, "src/echo_e2e.gleam:20\n\"bare stmt\"\n")
+    assert string.contains(output, "src/echo_e2e.gleam:21\n3.0\n")
+    assert string.contains(output, "src/echo_e2e.gleam:22\nTrue\n")
+    assert string.contains(output, "src/echo_e2e.gleam:23\nFalse\n")
+    assert string.contains(output, "src/echo_e2e.gleam:24\nNil\n")
+    assert string.contains(
+      output,
+      "src/echo_e2e.gleam:25\n\"hello \\\"world\\\"\"\n",
+    )
+    assert string.contains(output, "src/echo_e2e.gleam:26\n[1, 2, 3]\n")
+    assert string.contains(
+      output,
+      "src/echo_e2e.gleam:27\n#(1, 2.2, \"three\")\n",
+    )
+    assert string.contains(output, "src/echo_e2e.gleam:28\nOk(1)\n")
+    assert string.contains(output, "src/echo_e2e.gleam:29\nError(Nil)\n")
+    assert string.contains(output, "src/echo_e2e.gleam:30\nSome(\"Nubi\")\n")
+    assert string.contains(output, "src/echo_e2e.gleam:31\nNone\n")
+    assert string.contains(output, "src/echo_e2e.gleam:32\n<<3>>\n")
+    assert string.contains(output, "src/echo_e2e.gleam:33\n<<24, 3>>\n")
+    assert string.contains(
+      output,
+      "src/echo_e2e.gleam:34\nPerson(\"Amy\", 26, True)\n",
+    )
+    assert string.contains(output, "src/echo_e2e.gleam:35\nHandler(\"cb\",")
+    assert string.contains(
+      output,
+      "src/echo_e2e.gleam:36\ndict.from_list([#(\"a\", 1)])\n",
+    )
+    assert string.contains(output, "src/echo_e2e.gleam:37 sum msg\n3\n")
+    assert string.contains(output, "src/echo_e2e.gleam:38\n[1, 2]\n")
+    assert string.contains(output, "src/echo_e2e.gleam:14\n99\n")
+  }
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "echo_e2e", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert_echo_output(run_wasm.output)
+
+  let run_js =
+    cmd.run(
+      command: "moon",
+      args: ["run", "echo_e2e", "--target", "js"],
+      cwd: out_dir,
+    )
+  assert run_js.exit_code == 0
+  assert_echo_output(run_js.output)
+
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }

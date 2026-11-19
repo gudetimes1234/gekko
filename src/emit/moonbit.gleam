@@ -206,17 +206,127 @@ fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
     [] -> "{}"
     lines -> "{\n" <> string.join(lines, "\n") <> "\n}"
   }
-  #(
+  let enum_decl =
     "///|\n"
-      <> derive_line
-      <> vis
-      <> "enum "
-      <> td.name
-      <> generics
-      <> " "
-      <> body,
-    ctx1,
-  )
+    <> derive_line
+    <> vis
+    <> "enum "
+    <> td.name
+    <> generics
+    <> " "
+    <> body
+  let #(inspect_impl, ctx2) = emit_type_inspect_impl(td, ctx1)
+  #(enum_decl <> "\n\n" <> inspect_impl, ctx2)
+}
+
+fn emit_type_inspect_impl(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
+  let ctx1 = add_gprelude_import(ctx)
+  let impl_vis = case td.publicity {
+    glance.Public -> "pub "
+    glance.Private -> ""
+  }
+  let inspectable_vars =
+    list.fold(td.variants, set.new(), fn(acc, v) {
+      list.fold(v.fields, acc, fn(inner, f) {
+        collect_non_fn_type_vars(f.field_type, inner)
+      })
+    })
+  let impl_generics = case td.type_params {
+    [] -> ""
+    tps ->
+      "["
+      <> {
+        list.map(tps, fn(tp) {
+          case set.contains(inspectable_vars, tp) {
+            True -> tp <> " : @gprelude.GleamInspect"
+            False -> tp
+          }
+        })
+        |> string.join(", ")
+      }
+      <> "]"
+  }
+  let self_ty = td.name <> format_type_params(td.type_params)
+  let body = case td.variants {
+    [] -> "  @prelude.ignore(self)\n  \"\""
+    variants -> {
+      let arms =
+        list.map(variants, fn(v) {
+          case v.fields {
+            [] -> "    " <> v.name <> " => \"" <> v.name <> "\""
+            fields -> {
+              let #(pat_parts, expr_parts) =
+                list.index_fold(fields, #([], []), fn(acc, f, idx) {
+                  let #(pats, exprs) = acc
+                  let is_fn = case f.field_type {
+                    IrTypeFn(_, _) -> True
+                    _ -> False
+                  }
+                  let bind_name = case is_fn {
+                    True -> "_"
+                    False -> "f" <> int.to_string(idx)
+                  }
+                  let pat_part = case f.label {
+                    Some(lbl) -> lbl <> "=" <> bind_name
+                    None -> bind_name
+                  }
+                  let expr_part = case is_fn {
+                    True -> "\"\\\"//fn(...) { ... }\\\"\""
+                    False ->
+                      "@gprelude.GleamInspect::gleam_inspect("
+                      <> bind_name
+                      <> ")"
+                  }
+                  #([pat_part, ..pats], [expr_part, ..exprs])
+                })
+              let pat_str =
+                list.reverse(pat_parts)
+                |> string.join(", ")
+              let joined_fields =
+                list.reverse(expr_parts)
+                |> string.join(" + \", \" + ")
+              "    "
+              <> v.name
+              <> "("
+              <> pat_str
+              <> ") => \""
+              <> v.name
+              <> "(\" + "
+              <> joined_fields
+              <> " + \")\""
+            }
+          }
+        })
+        |> string.join("\n")
+      "  match self {\n" <> arms <> "\n  }"
+    }
+  }
+  let code =
+    "///|\n"
+    <> impl_vis
+    <> "impl"
+    <> impl_generics
+    <> " @gprelude.GleamInspect for "
+    <> self_ty
+    <> " with gleam_inspect(self) {\n"
+    <> body
+    <> "\n}"
+  #(code, ctx1)
+}
+
+fn collect_non_fn_type_vars(ty: IrType, acc: Set(String)) -> Set(String) {
+  case ty {
+    IrTypeVar(v) -> set.insert(acc, v)
+    IrTypeFn(_, _) -> acc
+    IrTypeList(inner) -> collect_non_fn_type_vars(inner, acc)
+    IrTypeResult(ok_t, err_t) ->
+      collect_non_fn_type_vars(err_t, collect_non_fn_type_vars(ok_t, acc))
+    IrTypeTuple(els) ->
+      list.fold(els, acc, fn(s, e) { collect_non_fn_type_vars(e, s) })
+    IrTypeNamed(args:, ..) ->
+      list.fold(args, acc, fn(s, a) { collect_non_fn_type_vars(a, s) })
+    _ -> acc
+  }
 }
 
 fn emit_variant(v: IrVariant, ctx: EmitCtx) -> #(String, EmitCtx) {
@@ -302,8 +412,8 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
     glance.Public -> "pub "
     glance.Private -> ""
   }
-  let generics = format_function_type_params(f)
-  let #(param_strs, ctx1) = map_acc(f.params, ctx, emit_fn_param)
+  let #(generics, ctx0) = format_function_type_params(f, ctx)
+  let #(param_strs, ctx1) = map_acc(f.params, ctx0, emit_fn_param)
   let #(ret_str, ctx2) = emit_type(f.return_type, ctx1)
 
   let header =
@@ -395,10 +505,34 @@ fn emit_stmts(
   indent: String,
   ctx: EmitCtx,
 ) -> #(List(String), EmitCtx) {
-  map_acc(stmts, ctx, fn(stmt, c) { emit_stmt(stmt, indent, c) })
+  emit_stmts_loop(stmts, indent, ctx, [])
 }
 
-fn emit_stmt(stmt: IrStmt, indent: String, ctx: EmitCtx) -> #(String, EmitCtx) {
+fn emit_stmts_loop(
+  stmts: List(IrStmt),
+  indent: String,
+  ctx: EmitCtx,
+  rev_acc: List(String),
+) -> #(List(String), EmitCtx) {
+  case stmts {
+    [] -> #(list.reverse(rev_acc), ctx)
+    [last] -> {
+      let #(line, next_ctx) = emit_stmt(last, indent, True, ctx)
+      #(list.reverse([line, ..rev_acc]), next_ctx)
+    }
+    [head, ..tail] -> {
+      let #(line, next_ctx) = emit_stmt(head, indent, False, ctx)
+      emit_stmts_loop(tail, indent, next_ctx, [line, ..rev_acc])
+    }
+  }
+}
+
+fn emit_stmt(
+  stmt: IrStmt,
+  indent: String,
+  is_last: Bool,
+  ctx: EmitCtx,
+) -> #(String, EmitCtx) {
   case stmt {
     IrStmtLet(pattern:, annotation:, value:) -> {
       let #(val_str, ctx1) = emit_expr(value, ctx)
@@ -520,8 +654,18 @@ fn emit_stmt(stmt: IrStmt, indent: String, ctx: EmitCtx) -> #(String, EmitCtx) {
 
     IrStmtExpr(expr) -> {
       let #(expr_str, ctx1) = emit_expr_indented(expr, indent, ctx)
-      #(indent <> expr_str, ctx1)
+      case is_last || stmt_expr_is_control_flow(expr) {
+        True -> #(indent <> expr_str, ctx1)
+        False -> #(indent <> "@prelude.ignore(" <> expr_str <> ")", ctx1)
+      }
     }
+  }
+}
+
+fn stmt_expr_is_control_flow(expr: IrExpr) -> Bool {
+  case expr {
+    IrBreak(_) | IrContinue(_) | IrAbort(_, _) -> True
+    _ -> False
   }
 }
 
@@ -682,14 +826,29 @@ fn emit_expr_indented(
       #("@prelude.abort(" <> msg_str <> ")", ctx1)
     }
 
-    IrEcho(expr: inner, message:) -> {
+    IrEcho(expr: inner, message:, file_path:, line:) -> {
       let ctx1 = add_gprelude_import(ctx)
       let #(inner_str, ctx2) = emit_expr(inner, ctx1)
       let #(msg_str, ctx3) = case message {
         Some(m) -> emit_expr(m, ctx2)
         None -> #("\"\"", ctx2)
       }
-      #("@gprelude.echo_val(" <> inner_str <> ", " <> msg_str <> ")", ctx3)
+      let loc_str =
+        "\""
+        <> escape_string_literal(file_path)
+        <> ":"
+        <> int.to_string(line)
+        <> "\""
+      #(
+        "@gprelude.echo_val("
+          <> inner_str
+          <> ", "
+          <> loc_str
+          <> ", "
+          <> msg_str
+          <> ")",
+        ctx3,
+      )
     }
   }
 }
@@ -1382,23 +1541,50 @@ fn format_type_params(params: List(String)) -> String {
   }
 }
 
-fn format_function_type_params(f: IrFunction) -> String {
+fn format_function_type_params(
+  f: IrFunction,
+  ctx: EmitCtx,
+) -> #(String, EmitCtx) {
   case f.type_params {
-    [] -> ""
+    [] -> #("", ctx)
     tps -> {
-      let needs_eq_or_dict = stmts_use_eq_or_dict(f.body)
+      let needs_eq_or_dict = stmts_any_expr(f.body, expr_is_eq_or_dict)
+      let needs_inspect = stmts_any_expr(f.body, expr_is_inspect)
       let dict_keys = collect_dict_key_vars(f.params, f.return_type)
       let dict_vals = collect_dict_val_only_vars(f.params, f.return_type)
-      let formatted =
-        list.map(tps, fn(tp) {
-          let has_dict_key = set.contains(dict_keys, tp)
-          let is_val_only = set.contains(dict_vals, tp)
-          case has_dict_key || { needs_eq_or_dict && !is_val_only } {
-            True -> tp <> " : Eq + Hash"
-            False -> tp
+      let non_fn_vars =
+        list.append(list.map(f.params, fn(p) { p.param_type }), [f.return_type])
+        |> list.fold(set.new(), fn(acc, t) { collect_non_fn_type_vars(t, acc) })
+      let #(rev_formatted, final_ctx) =
+        list.fold(tps, #([], ctx), fn(acc, tp) {
+          let #(parts, cur_ctx) = acc
+          let has_eq =
+            set.contains(dict_keys, tp)
+            || { needs_eq_or_dict && !set.contains(dict_vals, tp) }
+          let has_inspect = needs_inspect && set.contains(non_fn_vars, tp)
+          let #(entry, next_ctx) = case has_eq, has_inspect {
+            True, True -> #(
+              tp <> " : Eq + Hash + @gprelude.GleamInspect",
+              add_gprelude_import(cur_ctx),
+            )
+            True, False -> #(tp <> " : Eq + Hash", cur_ctx)
+            False, True -> #(
+              tp <> " : @gprelude.GleamInspect",
+              add_gprelude_import(cur_ctx),
+            )
+            False, False -> #(tp, cur_ctx)
           }
+          #([entry, ..parts], next_ctx)
         })
-      "[" <> string.join(formatted, ", ") <> "]"
+      #(
+        "["
+          <> {
+          list.reverse(rev_formatted)
+          |> string.join(", ")
+        }
+          <> "]",
+        final_ctx,
+      )
     }
   }
 }
@@ -1483,60 +1669,79 @@ fn walk_type_val_vars(
   }
 }
 
-fn stmts_use_eq_or_dict(stmts: List(IrStmt)) -> Bool {
-  list.any(stmts, stmt_uses_eq_or_dict)
+fn stmts_any_expr(stmts: List(IrStmt), pred: fn(IrExpr) -> Bool) -> Bool {
+  list.any(stmts, fn(s) { stmt_any_expr(s, pred) })
 }
 
-fn stmt_uses_eq_or_dict(stmt: IrStmt) -> Bool {
+fn stmt_any_expr(stmt: IrStmt, pred: fn(IrExpr) -> Bool) -> Bool {
   case stmt {
-    IrStmtLet(value:, ..) -> expr_uses_eq_or_dict(value)
+    IrStmtLet(value:, ..) -> expr_any(value, pred)
     IrStmtGuard(value:, guard_condition:, abort_message:, post_bindings:, ..) ->
-      expr_uses_eq_or_dict(value)
-      || option.map(guard_condition, expr_uses_eq_or_dict) == Some(True)
-      || option.map(abort_message, expr_uses_eq_or_dict) == Some(True)
-      || list.any(post_bindings, fn(b) { expr_uses_eq_or_dict(b.1) })
+      expr_any(value, pred)
+      || option.map(guard_condition, fn(e) { expr_any(e, pred) }) == Some(True)
+      || option.map(abort_message, fn(e) { expr_any(e, pred) }) == Some(True)
+      || list.any(post_bindings, fn(b) { expr_any(b.1, pred) })
     IrStmtAssert(condition:, abort_message:) ->
-      expr_uses_eq_or_dict(condition)
-      || option.map(abort_message, expr_uses_eq_or_dict) == Some(True)
-    IrStmtExpr(expr) -> expr_uses_eq_or_dict(expr)
+      expr_any(condition, pred)
+      || option.map(abort_message, fn(e) { expr_any(e, pred) }) == Some(True)
+    IrStmtExpr(expr) -> expr_any(expr, pred)
   }
 }
 
-fn expr_uses_eq_or_dict(expr: IrExpr) -> Bool {
+fn expr_any(expr: IrExpr, pred: fn(IrExpr) -> Bool) -> Bool {
+  case pred(expr) {
+    True -> True
+    False ->
+      case expr {
+        IrBinOp(left:, right:, ..) ->
+          expr_any(left, pred) || expr_any(right, pred)
+        IrNegateInt(inner) | IrNegateBool(inner) | IrBreak(inner) ->
+          expr_any(inner, pred)
+        IrTuple(els) | IrContinue(els) ->
+          list.any(els, fn(e) { expr_any(e, pred) })
+        IrTupleIndex(tuple:, ..) -> expr_any(tuple, pred)
+        IrList(elements:, tail:) ->
+          list.any(elements, fn(e) { expr_any(e, pred) })
+          || option.map(tail, fn(e) { expr_any(e, pred) }) == Some(True)
+        IrBitString(segments:) ->
+          list.any(segments, fn(s) { expr_any(s.0, pred) })
+        IrCall(function:, args:) ->
+          expr_any(function, pred)
+          || list.any(args, fn(a) { expr_any(a.value, pred) })
+        IrGetterCall(receiver:, ..) -> expr_any(receiver, pred)
+        IrBlock(stmts) | IrFn(body: stmts, ..) -> stmts_any_expr(stmts, pred)
+        IrForLoop(bindings:, body:) ->
+          list.any(bindings, fn(b) { expr_any(b.1, pred) })
+          || stmts_any_expr(body, pred)
+        IrMatch(subjects:, clauses:) ->
+          list.any(subjects, fn(e) { expr_any(e, pred) })
+          || list.any(clauses, fn(c) {
+            expr_any(c.body, pred)
+            || option.map(c.guard, fn(e) { expr_any(e, pred) }) == Some(True)
+            || list.any(c.prefix_bindings, fn(b) { expr_any(b.1, pred) })
+          })
+        IrEcho(expr: inner, message:, ..) ->
+          expr_any(inner, pred)
+          || option.map(message, fn(e) { expr_any(e, pred) }) == Some(True)
+        IrAbort(message:, ..) ->
+          option.map(message, fn(e) { expr_any(e, pred) }) == Some(True)
+        _ -> False
+      }
+  }
+}
+
+fn expr_is_eq_or_dict(expr: IrExpr) -> Bool {
   case expr {
     IrBinOp(op: IrEq, ..) | IrBinOp(op: IrNotEq, ..) -> True
     IrModuleRef(target_module: "gleam/dict", ..) -> True
-    IrBinOp(left:, right:, ..) ->
-      expr_uses_eq_or_dict(left) || expr_uses_eq_or_dict(right)
-    IrNegateInt(inner) | IrNegateBool(inner) | IrBreak(inner) ->
-      expr_uses_eq_or_dict(inner)
-    IrTuple(els) | IrContinue(els) -> list.any(els, expr_uses_eq_or_dict)
-    IrTupleIndex(tuple:, ..) -> expr_uses_eq_or_dict(tuple)
-    IrList(elements:, tail:) ->
-      list.any(elements, expr_uses_eq_or_dict)
-      || option.map(tail, expr_uses_eq_or_dict) == Some(True)
-    IrBitString(segments:) ->
-      list.any(segments, fn(s) { expr_uses_eq_or_dict(s.0) })
-    IrCall(function:, args:) ->
-      expr_uses_eq_or_dict(function)
-      || list.any(args, fn(a) { expr_uses_eq_or_dict(a.value) })
-    IrGetterCall(receiver:, ..) -> expr_uses_eq_or_dict(receiver)
-    IrBlock(stmts) | IrFn(body: stmts, ..) -> stmts_use_eq_or_dict(stmts)
-    IrForLoop(bindings:, body:) ->
-      list.any(bindings, fn(b) { expr_uses_eq_or_dict(b.1) })
-      || stmts_use_eq_or_dict(body)
-    IrMatch(subjects:, clauses:) ->
-      list.any(subjects, expr_uses_eq_or_dict)
-      || list.any(clauses, fn(c) {
-        expr_uses_eq_or_dict(c.body)
-        || option.map(c.guard, expr_uses_eq_or_dict) == Some(True)
-        || list.any(c.prefix_bindings, fn(b) { expr_uses_eq_or_dict(b.1) })
-      })
-    IrEcho(expr: inner, message:) ->
-      expr_uses_eq_or_dict(inner)
-      || option.map(message, expr_uses_eq_or_dict) == Some(True)
-    IrAbort(message:, ..) ->
-      option.map(message, expr_uses_eq_or_dict) == Some(True)
+    _ -> False
+  }
+}
+
+fn expr_is_inspect(expr: IrExpr) -> Bool {
+  case expr {
+    IrEcho(_, _, _, _) -> True
+    IrModuleRef(target_module: "gleam/string", symbol: "inspect", ..) -> True
     _ -> False
   }
 }

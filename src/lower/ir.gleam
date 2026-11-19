@@ -173,7 +173,7 @@ pub type IrExpr {
   IrContinue(List(IrExpr))
   IrBreak(IrExpr)
   IrAbort(kind: IrAbortKind, message: Option(IrExpr))
-  IrEcho(expr: IrExpr, message: Option(IrExpr))
+  IrEcho(expr: IrExpr, message: Option(IrExpr), file_path: String, line: Int)
 }
 
 /// Lowered match arm.

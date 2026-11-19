@@ -1,61 +1,85 @@
 import gleam/float
 import gleam/int
+import gleam/io
 import gleam/list
 
 pub fn run() -> String {
-  // Random sanity checks (deterministic range checks only)
+  io.println("=== Flow Control: Case Expressions & Variable Patterns ===")
   let rand_i = int.random(5)
   assert rand_i >= 0 && rand_i < 5
+  echo rand_i
   let rand_f = float.random()
   assert rand_f >=. 0.0 && rand_f <. 1.0
+  echo rand_f
 
-  // Case expressions & variable patterns
   assert classify_zero_one(0) == "Zero"
   assert classify_zero_one(1) == "One"
   assert classify_zero_one(4) == "It is 4"
+  echo classify_zero_one(0)
+  echo classify_zero_one(1)
+  echo classify_zero_one(4)
 
-  // String patterns
+  io.println("=== Flow Control: String & List Patterns ===")
   assert get_name("Hello, Joe") == "Joe"
   assert get_name("Hello, Mike") == "Mike"
   assert get_name("System still working?") == "Unknown"
+  io.println(get_name("Hello, Joe"))
+  io.println(get_name("Hello, Mike"))
+  io.println(get_name("System still working?"))
 
-  // List patterns
   assert describe_list([]) == "Empty list"
   assert describe_list([1]) == "List of just 1"
   assert describe_list([4, 9, 10]) == "List starting with 4"
   assert describe_list([2, 3]) == "List of 2 elements"
   assert describe_list([7, 8, 9]) == "Some other list"
+  echo describe_list([])
+  echo describe_list([1])
+  echo describe_list([4, 9, 10])
+  echo describe_list([2, 3])
+  echo describe_list([7, 8, 9])
 
-  // Non-tail & tail recursion + list recursion
+  io.println("=== Flow Control: Recursion & Tail Calls ===")
   assert factorial(5) == 120
   assert factorial(7) == 5040
   assert factorial_tail(5) == 120
   assert factorial_tail(7) == 5040
   assert sum_list([18, 56, 35, 85, 91], 0) == 285
+  echo factorial(5)
+  echo factorial_tail(7)
+  echo sum_list([18, 56, 35, 85, 91], 0)
 
-  // Multiple subjects
+  io.println(
+    "=== Flow Control: Multi-Subject, Alternatives, Aliases & Guards ===",
+  )
   assert check_pair(0, 0) == "Both are zero"
   assert check_pair(0, 3) == "First is zero"
   assert check_pair(2, 0) == "Second is zero"
   assert check_pair(2, 3) == "Neither are zero"
+  echo check_pair(0, 0)
+  echo check_pair(2, 3)
 
-  // Alternative patterns
   assert parity_label(4) == "This is an even number"
   assert parity_label(7) == "This is an odd number"
   assert parity_label(9) == "I'm not sure"
+  echo parity_label(4)
+  echo parity_label(7)
+  echo parity_label(9)
 
-  // Pattern aliases
   assert get_first_non_empty([[], [1, 2, 3], [4, 5]]) == [1, 2, 3]
   assert get_first_non_empty([[1, 2], [3, 4, 5], []]) == [1, 2]
   assert get_first_non_empty([[], [], []]) == []
+  echo get_first_non_empty([[], [1, 2, 3], [4, 5]])
+  echo get_first_non_empty([[], [], []])
 
-  // Guards
   let numbers = [1, 2, 3, 4, 5]
   assert get_first_larger(numbers, 3) == 4
   assert get_first_larger(numbers, 5) == 0
+  echo get_first_larger(numbers, 3)
+  echo get_first_larger(numbers, 5)
 
   let repeated = list.repeat(1, times: 2)
   assert repeated == [1, 1]
+  echo repeated
 
   "fact7="
   <> int.to_string(factorial_tail(7))

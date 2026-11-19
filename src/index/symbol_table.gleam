@@ -20,6 +20,7 @@ pub type SymbolTable {
 pub type ModuleSymbols {
   ModuleSymbols(
     name: String,
+    source: String,
     imports: List(ImportInfo),
     alias_to_module: Dict(String, String),
     unqualified_values: Dict(String, #(String, String)),
@@ -403,6 +404,7 @@ fn index_module(
 
   ModuleSymbols(
     name: mod_name,
+    source: prepass_res.cleaned_source,
     imports:,
     alias_to_module:,
     unqualified_values:,
@@ -1103,6 +1105,7 @@ fn seed_builtin_stdlib_modules() -> Dict(String, ModuleSymbols) {
     let mod_syms =
       ModuleSymbols(
         name: spec.module_name,
+        source: "",
         imports: [],
         alias_to_module: dict.new(),
         unqualified_values: dict.new(),

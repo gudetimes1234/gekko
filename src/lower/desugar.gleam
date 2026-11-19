@@ -1,4 +1,5 @@
 import glance
+import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -52,6 +53,7 @@ pub fn desugar_module(
     Error(_) ->
       symbol_table.ModuleSymbols(
         name: module_name,
+        source: "",
         imports: [],
         alias_to_module: dict.new(),
         unqualified_values: dict.new(),
@@ -678,25 +680,53 @@ fn lower_expr(expr: glance.Expression, ctx: LowerCtx) -> #(IrExpr, LowerCtx) {
         }
       }
 
-    glance.Echo(expression:, message:, ..) -> {
+    glance.Echo(location:, expression:, message:) -> {
+      let #(file_path, line) =
+        echo_location(ctx.current_module, ctx.mod_syms.source, location.start)
       let #(lowered_msg, ctx1) = lower_opt_expr(message, ctx)
       case expression {
         Some(inner) -> {
           let #(lowered_inner, ctx2) = lower_expr(inner, ctx1)
-          #(IrEcho(lowered_inner, lowered_msg), ctx2)
+          #(IrEcho(lowered_inner, lowered_msg, file_path, line), ctx2)
         }
         None -> {
           let param = "__echo_" <> int.to_string(ctx1.next_id)
           let ctx2 = LowerCtx(..ctx1, next_id: ctx1.next_id + 1)
           #(
             IrFn(params: [IrFnParam(param, None)], return_type: None, body: [
-              IrStmtExpr(IrEcho(IrVar(param), lowered_msg)),
+              IrStmtExpr(IrEcho(IrVar(param), lowered_msg, file_path, line)),
             ]),
             ctx2,
           )
         }
       }
     }
+  }
+}
+
+fn echo_location(
+  module_name: String,
+  source: String,
+  byte_offset: Int,
+) -> #(String, Int) {
+  let file_path = case string.starts_with(module_name, "test/") {
+    True -> module_name <> ".gleam"
+    False -> "src/" <> module_name <> ".gleam"
+  }
+  let src_bits = bit_array.from_string(source)
+  let limit = int.min(int.max(byte_offset, 0), bit_array.byte_size(src_bits))
+  let line = case bit_array.slice(src_bits, at: 0, take: limit) {
+    Ok(prefix) -> count_newlines(prefix, 1)
+    Error(_) -> 1
+  }
+  #(file_path, line)
+}
+
+fn count_newlines(bits: BitArray, line: Int) -> Int {
+  case bits {
+    <<10, rest:bits>> -> count_newlines(rest, line + 1)
+    <<_, rest:bits>> -> count_newlines(rest, line)
+    _ -> line
   }
 }
 
@@ -720,9 +750,11 @@ fn lower_pipe(
       #(IrCall(lowered_fn, all_args), ctx4)
     }
 
-    glance.Echo(expression: None, message:, ..) -> {
+    glance.Echo(location:, expression: None, message:) -> {
+      let #(file_path, line) =
+        echo_location(ctx1.current_module, ctx1.mod_syms.source, location.start)
       let #(lowered_msg, ctx2) = lower_opt_expr(message, ctx1)
-      #(IrEcho(lowered_left, lowered_msg), ctx2)
+      #(IrEcho(lowered_left, lowered_msg, file_path, line), ctx2)
     }
 
     glance.Call(function:, arguments:, ..) -> {

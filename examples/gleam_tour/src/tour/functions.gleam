@@ -2,6 +2,7 @@
 
 import gleam/float
 import gleam/int
+import gleam/io
 import gleam/string
 
 /// A type where the value can never be constructed.
@@ -10,35 +11,47 @@ pub type Never {
 }
 
 pub fn run() -> String {
-  // Basic named functions
+  io.println("=== Functions: Named & Higher-Order ===")
   assert double(10) == 20
+  echo double(10)
 
-  // Higher order functions
   assert twice_int(1, add_one) == 3
   let my_function = add_one
   assert my_function(100) == 101
+  echo twice_int(1, add_one)
+  echo my_function(100)
 
-  // Anonymous functions & closures
+  io.println("=== Functions: Anonymous & Captures ===")
   let anon_add_one = fn(a) { a + 1 }
   assert twice_int(1, anon_add_one) == 3
   assert twice_int(1, fn(a) { a * 2 }) == 4
   let secret_number = 42
   let secret = fn() { secret_number }
   assert secret() == 42
+  echo twice_int(1, anon_add_one)
+  echo twice_int(1, fn(a) { a * 2 })
+  echo secret()
 
-  // Function captures
   let add_one_v1 = fn(x) { add(1, x) }
   let add_one_v2 = add(1, _)
   assert add_one_v1(10) == 11
   assert add_one_v2(10) == 11
+  echo add_one_v1(10)
+  echo add_one_v2(10)
 
-  // Generic functions
+  io.println("=== Functions: Generics & Pipelines ===")
   assert twice(10, fn(x) { x + 1 }) == 12
   assert twice("Hello", fn(x) { x <> "!" }) == "Hello!!"
   assert thrice(1, fn(x) { x + 2 }) == 7
+  echo twice(10, fn(x) { x + 1 })
+  echo twice("Hello", fn(x) { x <> "!" })
+  echo thrice(1, fn(x) { x + 2 })
 
-  // Pipelines & pipeline captures
-  let piped1 =
+  "Hello, Mike!"
+  |> string.drop_end(1)
+  |> string.drop_start(7)
+  |> io.println
+  let piped1_val =
     "Hello, Mike!"
     |> string.drop_end(1)
     |> string.drop_start(7)
@@ -46,15 +59,17 @@ pub fn run() -> String {
     "1"
     |> string.append("2")
     |> string.append("3", _)
-  assert piped1 == "Mike"
+    |> echo
+  assert piped1_val == "Mike"
   assert piped2 == "312"
 
-  // Labelled arguments & reordering
+  io.println("=== Functions: Labelled Arguments, Shorthand & Deprecations ===")
   assert calculate(1, 2, 3) == 5
   assert calculate(1, add: 2, multiply: 3) == 5
   assert calculate(1, multiply: 3, add: 2) == 5
+  echo calculate(1, 2, 3)
+  echo calculate(1, multiply: 3, add: 2)
 
-  // Label shorthand syntax
   let quantity = 5.0
   let unit_price = 10.0
   let discount = 0.2
@@ -67,14 +82,16 @@ pub fn run() -> String {
   let cost2 = calculate_total_cost(quantity:, unit_price:, discount:)
   assert cost1 == 40.0
   assert cost2 == 40.0
+  echo cost1
+  echo cost2
 
-  // Deprecations
   assert new_function() == "v2"
+  echo new_function()
 
   "double="
   <> int.to_string(double(10))
   <> " piped="
-  <> piped1
+  <> piped1_val
   <> "/"
   <> piped2
   <> " cost="
