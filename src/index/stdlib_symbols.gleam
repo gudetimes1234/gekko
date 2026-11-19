@@ -39,6 +39,7 @@ pub fn builtin_module_specs() -> List(BuiltinModuleSpec) {
     dict_spec(),
     io_spec(),
     string_tree_spec(),
+    bytes_tree_spec(),
     bit_array_spec(),
     dynamic_spec(),
     decode_spec(),
@@ -179,6 +180,7 @@ fn int_spec() -> BuiltinModuleSpec {
     BuiltinFnSpec("bitwise_exclusive_or", [None, None]),
     BuiltinFnSpec("bitwise_shift_left", [None, None]),
     BuiltinFnSpec("bitwise_shift_right", [None, None]),
+    BuiltinFnSpec("random", [None]),
     BuiltinFnSpec("range", [Some("from"), Some("to"), Some("with"), Some("run")]),
   ])
 }
@@ -208,6 +210,7 @@ fn float_spec() -> BuiltinModuleSpec {
     BuiltinFnSpec("add", [None, None]),
     BuiltinFnSpec("multiply", [None, None]),
     BuiltinFnSpec("subtract", [None, None]),
+    BuiltinFnSpec("random", []),
   ])
 }
 
@@ -377,6 +380,29 @@ fn string_tree_spec() -> BuiltinModuleSpec {
       BuiltinFnSpec("replace", [Some("in"), Some("each"), Some("with")]),
       BuiltinFnSpec("is_equal", [None, None]),
       BuiltinFnSpec("is_empty", [None]),
+    ],
+  )
+}
+
+fn bytes_tree_spec() -> BuiltinModuleSpec {
+  BuiltinModuleSpec(
+    module_name: "gleam/bytes_tree",
+    constructors: [],
+    functions: [
+      BuiltinFnSpec("new", []),
+      BuiltinFnSpec("prepend", [Some("to"), Some("prefix")]),
+      BuiltinFnSpec("append", [Some("to"), Some("suffix")]),
+      BuiltinFnSpec("prepend_tree", [Some("to"), Some("prefix")]),
+      BuiltinFnSpec("append_tree", [Some("to"), Some("suffix")]),
+      BuiltinFnSpec("prepend_string", [Some("to"), Some("prefix")]),
+      BuiltinFnSpec("append_string", [Some("to"), Some("suffix")]),
+      BuiltinFnSpec("concat", [None]),
+      BuiltinFnSpec("concat_bit_arrays", [None]),
+      BuiltinFnSpec("from_string", [None]),
+      BuiltinFnSpec("from_string_tree", [None]),
+      BuiltinFnSpec("from_bit_array", [None]),
+      BuiltinFnSpec("to_bit_array", [None]),
+      BuiltinFnSpec("byte_size", [None]),
     ],
   )
 }

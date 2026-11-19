@@ -33,7 +33,8 @@ type EmitCtx {
     current_module: String,
     local_ctors: dict.Dict(String, List(Option(String))),
     table: Option(SymbolTable),
-    imports: Set(#(String, String)),
+    pkg_to_alias: dict.Dict(String, String),
+    used_aliases: Set(String),
   )
 }
 
@@ -76,7 +77,8 @@ fn emit_module_inner(
       current_module: module.module_name,
       local_ctors:,
       table:,
-      imports: set.new(),
+      pkg_to_alias: dict.new(),
+      used_aliases: set.from_list(["gprelude"]),
     )
 
   let #(type_blocks, ctx1) = map_acc(module.types, ctx0, emit_type_def)
@@ -111,15 +113,18 @@ fn emit_module_inner(
   }
 
   let import_list =
-    ctx5.imports
-    |> set.to_list
+    ctx5.pkg_to_alias
+    |> dict.to_list
     |> list.sort(fn(a, b) { string.compare(a.1, b.1) })
 
   #(source, import_list)
 }
 
 fn add_gprelude_import(ctx: EmitCtx) -> EmitCtx {
-  EmitCtx(..ctx, imports: set.insert(ctx.imports, #("gprelude", "gprelude")))
+  EmitCtx(
+    ..ctx,
+    pkg_to_alias: dict.insert(ctx.pkg_to_alias, "gprelude", "gprelude"),
+  )
 }
 
 fn add_module_import(
@@ -131,15 +136,50 @@ fn add_module_import(
     "gprelude" -> #("gprelude", add_gprelude_import(ctx))
     _ -> {
       let pkg_dir = pkg_config.module_to_pkg_dir(target_module)
-      let alias = case alias_opt {
+      let full_fallback = mangle.module_to_alias(target_module)
+      let preferred = case alias_opt {
         Some(a) -> safe_alias(a)
-        None -> mangle.module_to_alias(target_module)
+        None -> full_fallback
+      }
+      register_import(ctx, pkg_dir, preferred, full_fallback)
+    }
+  }
+}
+
+fn register_import(
+  ctx: EmitCtx,
+  pkg_key: String,
+  preferred: String,
+  fallback: String,
+) -> #(String, EmitCtx) {
+  case dict.get(ctx.pkg_to_alias, pkg_key) {
+    Ok(existing) -> #(existing, ctx)
+    Error(_) -> {
+      let chosen = case set.contains(ctx.used_aliases, preferred) {
+        False -> preferred
+        True ->
+          case set.contains(ctx.used_aliases, fallback) {
+            False -> fallback
+            True -> pick_unique_alias(fallback, 2, ctx.used_aliases)
+          }
       }
       #(
-        alias,
-        EmitCtx(..ctx, imports: set.insert(ctx.imports, #(pkg_dir, alias))),
+        chosen,
+        EmitCtx(
+          ..ctx,
+          pkg_to_alias: dict.insert(ctx.pkg_to_alias, pkg_key, chosen),
+          used_aliases: set.insert(ctx.used_aliases, chosen),
+        ),
       )
     }
+  }
+}
+
+fn pick_unique_alias(base: String, idx: Int, used: Set(String)) -> String {
+  let candidate = base <> "_" <> int.to_string(idx)
+  case set.contains(used, candidate) {
+    True -> pick_unique_alias(base, idx + 1, used)
+    False -> candidate
   }
 }
 
@@ -279,9 +319,9 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
 
   let #(fn_block, ctx3) = case f.ffi {
     Some(PackageCall(pkg, target_fn)) -> {
-      let ffi_alias = mangle.module_to_alias(pkg)
-      let ctx_imp =
-        EmitCtx(..ctx2, imports: set.insert(ctx2.imports, #(pkg, ffi_alias)))
+      let default_alias = mangle.module_to_alias(pkg)
+      let #(ffi_alias, ctx_imp) =
+        register_import(ctx2, pkg, default_alias, default_alias)
       let call_args =
         list.map(f.params, fn(p) { p.name })
         |> string.join(", ")
@@ -1555,8 +1595,11 @@ fn align_pat_args(
 }
 
 fn escape_string_literal(raw: String) -> String {
-  // Replace unescaped `\{` interpolation sequence if somehow present
-  string.replace(raw, "\\{", "\\\\{")
+  // Replace unescaped `\{` interpolation sequence and raw CR/LF inside multiline strings
+  raw
+  |> string.replace("\\{", "\\\\{")
+  |> string.replace("\r", "\\r")
+  |> string.replace("\n", "\\n")
 }
 
 fn map_acc(
