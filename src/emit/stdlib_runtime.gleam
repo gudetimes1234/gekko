@@ -2034,7 +2034,7 @@ fn dict_pkg() -> ShimPackage {
         "}",
         "",
         "///|",
-        "pub fn[K, V] new() -> Dict[K, V] { { inner: Map::new() } }",
+        "pub fn[K, V] new() -> Dict[K, V] { { inner: Default::default() } }",
         "",
         "///|",
         "pub fn[K, V] size(d : Dict[K, V]) -> Int64 { d.inner.length().to_int64() }",

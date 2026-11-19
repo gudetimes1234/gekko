@@ -1323,25 +1323,33 @@ pub fn stdlib_runtime_all_shims_moon_check_test() {
     == Ok(Nil)
 
   let wasm_res =
-    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
   assert wasm_res.exit_code == 0
 
   let wasm_gc_res =
     cmd.run(
       command: "moon",
-      args: ["check", "--target", "wasm-gc"],
+      args: ["check", "--deny-warn", "--target", "wasm-gc"],
       cwd: out_dir,
     )
   assert wasm_gc_res.exit_code == 0
 
   let js_res =
-    cmd.run(command: "moon", args: ["check", "--target", "js"], cwd: out_dir)
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "js"],
+      cwd: out_dir,
+    )
   assert js_res.exit_code == 0
 
   let native_res =
     cmd.run(
       command: "moon",
-      args: ["check", "--target", "native"],
+      args: ["check", "--deny-warn", "--target", "native"],
       cwd: out_dir,
     )
   assert native_res.exit_code == 0
