@@ -1,0 +1,293 @@
+import gleam/dict.{type Dict}
+import gleam/list
+import gleam/option.{type Option}
+import gleam/set
+import gleam/string
+
+/// Package identifier in a WIT document, e.g. `demo:greeter@0.1.0`.
+pub type WitPackageId {
+  WitPackageId(namespace: String, name: String, version: Option(String))
+}
+
+/// Core WIT type expressions (primitives, generics, tuples, named refs).
+pub type WitType {
+  WitBool
+  WitS8
+  WitS16
+  WitS32
+  WitS64
+  WitU8
+  WitU16
+  WitU32
+  WitU64
+  WitF32
+  WitF64
+  WitChar
+  WitString
+  WitList(WitType)
+  WitOption(WitType)
+  WitResult(ok: Option(WitType), err: Option(WitType))
+  WitTuple(List(WitType))
+  WitNamed(String)
+}
+
+/// Type definitions declared inside a WIT interface.
+pub type WitTypeDef {
+  WitRecord(name: String, fields: List(#(String, WitType)))
+  WitEnum(name: String, cases: List(String))
+  WitVariant(name: String, cases: List(#(String, Option(WitType))))
+  WitFlags(name: String, flags: List(String))
+  WitAlias(name: String, target: WitType)
+}
+
+/// Function signature inside a WIT interface or world.
+pub type WitFunc {
+  WitFunc(
+    name: String,
+    params: List(#(String, WitType)),
+    result: Option(WitType),
+  )
+}
+
+/// Reference to either a local interface (`logger`) or external package
+/// interface (`wasi:io/streams@0.2.0`).
+pub type WitIfaceRef {
+  LocalIface(name: String)
+  PkgIface(pkg: WitPackageId, name: String)
+}
+
+/// `use` statement importing named types (with optional `as` rename).
+pub type WitUse {
+  WitUse(target: WitIfaceRef, names: List(#(String, Option(String))))
+}
+
+/// A named WIT interface within a package.
+pub type WitInterface {
+  WitInterface(
+    pkg: WitPackageId,
+    name: String,
+    uses: List(WitUse),
+    types: List(WitTypeDef),
+    funcs: List(WitFunc),
+  )
+}
+
+/// Individual declaration inside a WIT `world`.
+pub type WitWorldItem {
+  WorldImportIface(WitIfaceRef)
+  WorldExportIface(WitIfaceRef)
+  WorldImportFunc(WitFunc)
+  WorldExportFunc(WitFunc)
+  WorldUse(WitUse)
+}
+
+/// A WIT `world` declaration specifying host imports and component exports.
+pub type WitWorld {
+  WitWorld(pkg: WitPackageId, name: String, items: List(WitWorldItem))
+}
+
+/// Parsed single `.wit` file representation.
+pub type WitDocument {
+  WitDocument(
+    pkg: WitPackageId,
+    interfaces: List(WitInterface),
+    worlds: List(WitWorld),
+  )
+}
+
+/// Resolved WIT package directory centered around one selected `world`.
+pub type ResolvedWit {
+  ResolvedWit(
+    root_pkg: WitPackageId,
+    world: WitWorld,
+    interfaces: Dict(String, WitInterface),
+  )
+}
+
+/// Canonical package-qualified interface key omitting semver, e.g.
+/// `"demo:greeter/api"`.
+pub fn iface_key(pkg: WitPackageId, name: String) -> String {
+  pkg.namespace <> ":" <> pkg.name <> "/" <> name
+}
+
+/// Resolve an interface reference relative to `default_pkg`.
+pub fn resolve_iface_ref(
+  default_pkg: WitPackageId,
+  ref: WitIfaceRef,
+) -> String {
+  case ref {
+    LocalIface(name) -> iface_key(default_pkg, name)
+    PkgIface(pkg, name) -> iface_key(pkg, name)
+  }
+}
+
+/// Compare two package IDs by namespace and name (ignoring version).
+pub fn is_root_pkg(root_pkg: WitPackageId, pkg: WitPackageId) -> Bool {
+  root_pkg.namespace == pkg.namespace && root_pkg.name == pkg.name
+}
+
+/// Convert WIT `kebab-case` to Gleam/MoonBit `snake_case`.
+pub fn kebab_to_snake(name: String) -> String {
+  string.replace(name, "-", "_")
+}
+
+/// Convert WIT `kebab-case` to `PascalCase`.
+pub fn kebab_to_pascal(name: String) -> String {
+  name
+  |> string.replace("-", "_")
+  |> string.split("_")
+  |> list.filter(fn(part) { part != "" })
+  |> list.map(uppercase_first)
+  |> string.concat
+}
+
+/// Convert WIT `kebab-case` to `SCREAMING_SNAKE_CASE`.
+pub fn kebab_to_screaming(name: String) -> String {
+  name
+  |> string.replace("-", "_")
+  |> string.uppercase
+}
+
+/// Append `_` if `name` is a reserved Gleam keyword.
+pub fn escape_gleam_ident(name: String) -> String {
+  let keywords =
+    set.from_list([
+      "as", "assert", "auto", "case", "const", "delegate", "derive", "echo",
+      "else", "fn", "if", "implement", "import", "let", "macro", "opaque",
+      "panic", "pub", "test", "todo", "type", "use",
+    ])
+  case set.contains(keywords, name) {
+    True -> name <> "_"
+    False -> name
+  }
+}
+
+/// Map a WIT value/function/field/parameter name to a valid Gleam identifier.
+pub fn gleam_value_ident(wit_name: String) -> String {
+  wit_name
+  |> kebab_to_snake
+  |> escape_gleam_ident
+}
+
+/// Map a WIT type name to a Gleam `PascalCase` type name.
+pub fn gleam_type_name(wit_name: String) -> String {
+  kebab_to_pascal(wit_name)
+}
+
+/// Map a WIT enum/variant constructor name to a Gleam `PascalCase` variant name.
+pub fn gleam_variant_name(wit_name: String) -> String {
+  kebab_to_pascal(wit_name)
+}
+
+/// Gleam module path holding type definitions for an interface.
+pub fn gleam_types_module(
+  root_pkg: WitPackageId,
+  iface: WitInterface,
+) -> String {
+  case is_root_pkg(root_pkg, iface.pkg) {
+    True -> "wit/" <> kebab_to_snake(iface.name) <> "_types"
+    False ->
+      "wit/"
+      <> kebab_to_snake(iface.pkg.namespace)
+      <> "/"
+      <> kebab_to_snake(iface.pkg.name)
+      <> "/"
+      <> kebab_to_snake(iface.name)
+      <> "_types"
+  }
+}
+
+/// Gleam module path holding `@external(moonbit, ...)` import functions.
+pub fn gleam_import_module(
+  root_pkg: WitPackageId,
+  iface: WitInterface,
+) -> String {
+  case is_root_pkg(root_pkg, iface.pkg) {
+    True -> "wit/" <> kebab_to_snake(iface.name)
+    False ->
+      "wit/"
+      <> kebab_to_snake(iface.pkg.namespace)
+      <> "/"
+      <> kebab_to_snake(iface.pkg.name)
+      <> "/"
+      <> kebab_to_snake(iface.name)
+  }
+}
+
+/// Gleam module path where user code implements an exported interface.
+pub fn gleam_export_module(
+  root_pkg: WitPackageId,
+  iface: WitInterface,
+) -> String {
+  case is_root_pkg(root_pkg, iface.pkg) {
+    True -> kebab_to_snake(iface.name)
+    False ->
+      kebab_to_snake(iface.pkg.namespace)
+      <> "/"
+      <> kebab_to_snake(iface.pkg.name)
+      <> "/"
+      <> kebab_to_snake(iface.name)
+  }
+}
+
+/// Gleam module path holding top-level `world` import functions.
+pub fn gleam_world_import_module(world: WitWorld) -> String {
+  "wit/" <> kebab_to_snake(world.name) <> "_imports"
+}
+
+/// Gleam module path where user code implements top-level `world` exports.
+pub fn gleam_world_export_module(world: WitWorld) -> String {
+  kebab_to_snake(world.name)
+}
+
+/// Single-segment MoonBit package directory for an imported interface adapter.
+pub fn moonbit_imp_adapter_pkg(iface: WitInterface) -> String {
+  "wit_imp_"
+  <> kebab_to_snake(iface.pkg.namespace)
+  <> "_"
+  <> kebab_to_snake(iface.pkg.name)
+  <> "_"
+  <> kebab_to_snake(iface.name)
+}
+
+/// Single-segment MoonBit package directory for world-level import adapters.
+pub fn moonbit_world_imp_adapter_pkg(world: WitWorld) -> String {
+  "wit_imp_world_" <> kebab_to_snake(world.name)
+}
+
+/// Directory generated by `wit-bindgen moonbit` for an interface package.
+pub fn wit_bindgen_iface_raw_dir(iface: WitInterface) -> String {
+  "interface/"
+  <> iface.pkg.namespace
+  <> "/"
+  <> iface.pkg.name
+  <> "/"
+  <> iface.name
+}
+
+/// Directory generated by `wit-bindgen moonbit` for an exported interface stub.
+pub fn wit_bindgen_iface_gen_dir(iface: WitInterface) -> String {
+  "gen/interface/"
+  <> iface.pkg.namespace
+  <> "/"
+  <> iface.pkg.name
+  <> "/"
+  <> iface.name
+}
+
+/// Directory generated by `wit-bindgen moonbit` for world-level imports.
+pub fn wit_bindgen_world_raw_dir(world: WitWorld) -> String {
+  "world/" <> world.name
+}
+
+/// Directory generated by `wit-bindgen moonbit` for world-level export stubs.
+pub fn wit_bindgen_world_gen_dir(world: WitWorld) -> String {
+  "gen/world/" <> world.name
+}
+
+fn uppercase_first(segment: String) -> String {
+  case string.pop_grapheme(segment) {
+    Ok(#(first, rest)) -> string.uppercase(first) <> rest
+    Error(_) -> ""
+  }
+}

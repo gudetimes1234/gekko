@@ -1,5 +1,6 @@
 import argv
 import emit/pkg_config
+import emit/wit_bridge
 import filepath
 import gleam/io
 import gleam/list
@@ -7,13 +8,39 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import project/cmd
 import project/workspace
+import wit/gleam_gen
+import wit/parser as wit_parser
 
 type CliAction {
   CheckAction(root: String, out: Option(String), target: Option(String))
   BuildAction(root: String, out: Option(String), target: String)
   TestAction(root: String, out: Option(String), target: Option(String))
   RunAction(root: String, out: Option(String), target: Option(String))
+  WitGenAction(root: String, wit_dir: Option(String), world: Option(String))
+  WitCheckAction(
+    root: String,
+    wit_dir: Option(String),
+    world: Option(String),
+    out: Option(String),
+  )
+  WitBuildAction(
+    root: String,
+    wit_dir: Option(String),
+    world: Option(String),
+    out: Option(String),
+    output: Option(String),
+  )
   HelpAction
+}
+
+type WitFlags {
+  WitFlags(
+    root: String,
+    wit_dir: Option(String),
+    world: Option(String),
+    out: Option(String),
+    output: Option(String),
+  )
 }
 
 pub fn main() -> Nil {
@@ -39,6 +66,12 @@ pub fn main() -> Nil {
         Some(pkg_config.module_to_pkg_dir),
         target,
       )
+    Ok(WitGenAction(root:, wit_dir:, world:)) ->
+      run_wit_gen(root, wit_dir, world)
+    Ok(WitCheckAction(root:, wit_dir:, world:, out:)) ->
+      run_wit_check(root, wit_dir, world, out)
+    Ok(WitBuildAction(root:, wit_dir:, world:, out:, output:)) ->
+      run_wit_build(root, wit_dir, world, out, output)
   }
 }
 
@@ -49,10 +82,7 @@ fn run_moon_workflow(
   pkg_arg_fn: Option(fn(String) -> String),
   target: Option(String),
 ) -> Nil {
-  let out_dir = case out {
-    Some(custom_out) -> custom_out
-    None -> filepath.join(root, "build/moonbit")
-  }
+  let out_dir = option.unwrap(out, filepath.join(root, "build/moonbit"))
   case workspace.transpile_project(root, out_dir) {
     Error(err) -> {
       io.println_error("gekko error: " <> err)
@@ -80,6 +110,92 @@ fn run_moon_workflow(
   }
 }
 
+fn run_wit_gen(
+  root: String,
+  wit_dir_opt: Option(String),
+  world: Option(String),
+) -> Nil {
+  let wit_dir = option.unwrap(wit_dir_opt, filepath.join(root, "wit"))
+  let res = {
+    use resolved <- result.try(wit_parser.load_wit_dir(wit_dir, world))
+    gleam_gen.generate_project_bindings(resolved, root)
+  }
+  case res {
+    Error(err) -> {
+      io.println_error("gekko wit gen error: " <> err)
+      halt(1)
+    }
+    Ok(report) -> {
+      list.each(report.written_files, fn(p) { io.println("Generated " <> p) })
+      list.each(report.skipped_existing_stubs, fn(p) {
+        io.println("Kept existing stub " <> p)
+      })
+    }
+  }
+}
+
+fn run_wit_check(
+  root: String,
+  wit_dir_opt: Option(String),
+  world: Option(String),
+  out: Option(String),
+) -> Nil {
+  let wit_dir = option.unwrap(wit_dir_opt, filepath.join(root, "wit"))
+  let out_dir = option.unwrap(out, filepath.join(root, "build/moonbit"))
+  let res = {
+    use summary <- result.try(wit_bridge.bridge_wit_workspace(
+      root,
+      out_dir,
+      wit_dir,
+      world,
+    ))
+    wit_bridge.check_wit_workspace(summary)
+  }
+  case res {
+    Error(err) -> {
+      io.println_error("gekko wit check error: " <> err)
+      halt(1)
+    }
+    Ok(output) ->
+      case output {
+        "" -> Nil
+        text -> io.print(text)
+      }
+  }
+}
+
+fn run_wit_build(
+  root: String,
+  wit_dir_opt: Option(String),
+  world: Option(String),
+  out: Option(String),
+  output_opt: Option(String),
+) -> Nil {
+  let wit_dir = option.unwrap(wit_dir_opt, filepath.join(root, "wit"))
+  let out_dir = option.unwrap(out, filepath.join(root, "build/moonbit"))
+  let res = {
+    use summary <- result.try(wit_bridge.bridge_wit_workspace(
+      root,
+      out_dir,
+      wit_dir,
+      world,
+    ))
+    let output_wasm =
+      option.unwrap(
+        output_opt,
+        filepath.join(root, "dist/" <> summary.world_name <> ".wasm"),
+      )
+    wit_bridge.bundle_component(summary, world, output_wasm)
+  }
+  case res {
+    Error(err) -> {
+      io.println_error("gekko wit build error: " <> err)
+      halt(1)
+    }
+    Ok(out_wasm) -> io.println("Built Wasm component: " <> out_wasm)
+  }
+}
+
 fn parse_args(args: List(String)) -> Result(CliAction, String) {
   case args {
     [] | ["--help"] | ["-h"] | ["help"] -> Ok(HelpAction)
@@ -99,7 +215,54 @@ fn parse_args(args: List(String)) -> Result(CliAction, String) {
       use #(root, out, target) <- result.try(parse_flags(rest, ".", None, None))
       Ok(RunAction(root:, out:, target:))
     }
+    ["wit", "gen", ..rest] -> {
+      use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
+      Ok(WitGenAction(root: f.root, wit_dir: f.wit_dir, world: f.world))
+    }
+    ["wit", "check", ..rest] -> {
+      use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
+      Ok(WitCheckAction(
+        root: f.root,
+        wit_dir: f.wit_dir,
+        world: f.world,
+        out: f.out,
+      ))
+    }
+    ["wit", "build", ..rest] -> {
+      use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
+      Ok(WitBuildAction(
+        root: f.root,
+        wit_dir: f.wit_dir,
+        world: f.world,
+        out: f.out,
+        output: f.output,
+      ))
+    }
+    ["wit", ..] -> Error("Expected `gekko wit <gen|check|build> [flags]`")
     [unknown, ..] -> Error("Unknown subcommand: " <> unknown)
+  }
+}
+
+fn default_wit_flags() -> WitFlags {
+  WitFlags(root: ".", wit_dir: None, world: None, out: None, output: None)
+}
+
+fn parse_wit_flags(
+  args: List(String),
+  acc: WitFlags,
+) -> Result(WitFlags, String) {
+  case args {
+    [] -> Ok(acc)
+    ["--root", val, ..rest] -> parse_wit_flags(rest, WitFlags(..acc, root: val))
+    ["--wit", val, ..rest] ->
+      parse_wit_flags(rest, WitFlags(..acc, wit_dir: Some(val)))
+    ["--world", val, ..rest] ->
+      parse_wit_flags(rest, WitFlags(..acc, world: Some(val)))
+    ["--out", val, ..rest] ->
+      parse_wit_flags(rest, WitFlags(..acc, out: Some(val)))
+    ["--output", val, ..rest] | ["-o", val, ..rest] ->
+      parse_wit_flags(rest, WitFlags(..acc, output: Some(val)))
+    [flag, ..] -> Error("Unknown or incomplete flag: " <> flag)
   }
 }
 
@@ -130,13 +293,16 @@ fn parse_flags(
 
 fn print_usage() -> Nil {
   let lines = [
-    "gekko - Gleam-to-MoonBit transpiler",
+    "gekko - Gleam-to-MoonBit & Wasm Component transpiler",
     "",
     "Usage:",
-    "  gekko check [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
-    "  gekko build [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
-    "  gekko test  [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
-    "  gekko run   [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
+    "  gekko check     [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
+    "  gekko build     [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
+    "  gekko test      [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
+    "  gekko run       [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
+    "  gekko wit gen   [--root <dir>] [--wit <dir>] [--world <name>]",
+    "  gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]",
+    "  gekko wit build [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>] [--output <file.wasm>]",
   ]
   list.each(lines, io.println)
 }

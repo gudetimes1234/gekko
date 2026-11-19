@@ -2,6 +2,7 @@ import emit/moonbit
 import emit/pkg_config
 import emit/prelude_runtime
 import emit/stdlib_runtime
+import emit/wit_bridge
 import filepath
 import glance
 import gleam/dict
@@ -23,6 +24,9 @@ import project/prepass
 import project/staging
 import project/workspace
 import simplifile
+import wit/ast as wit_ast
+import wit/gleam_gen
+import wit/parser as wit_parser
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -1962,6 +1966,236 @@ pub fn echo_exact_gleam_behavior_e2e_test() {
   assert_echo_output(run_js.output)
 
   let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+fn stage_offline_stdlib(fixture_dir: String) {
+  let packages_dir = filepath.join(fixture_dir, "build/packages")
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
+  symlink_root_package("gleam_stdlib", packages_dir)
+  assert simplifile.write(
+      to: filepath.join(packages_dir, "packages.toml"),
+      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\n\n[git]\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(fixture_dir, "manifest.toml"),
+      contents: "packages = [\n"
+        <> "  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n"
+        <> "]\n\n[requirements]\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\n",
+    )
+    == Ok(Nil)
+}
+
+pub fn wit_parser_and_deps_unit_test() {
+  assert wit_ast.kebab_to_snake("my-greeting-error") == "my_greeting_error"
+  assert wit_ast.kebab_to_pascal("my-greeting-error") == "MyGreetingError"
+  assert wit_ast.kebab_to_screaming("debug-info") == "DEBUG_INFO"
+  assert wit_ast.escape_gleam_ident("type") == "type_"
+  assert wit_ast.escape_gleam_ident("greet") == "greet"
+
+  let wit_dir = "build/test_fixtures/wit_parse_test"
+  let deps_dir = filepath.join(wit_dir, "deps/ext-log")
+  let _ = simplifile.delete(file_or_dir_at: wit_dir)
+  assert simplifile.create_directory_all(deps_dir) == Ok(Nil)
+
+  let dep_src =
+    "package ext-ns:ext-pkg@0.2.0;\n\n"
+    <> "interface ext-logger {\n"
+    <> "  enum log-level { debug-info, fatal-err, }\n"
+    <> "  write-line: func(lvl: log-level, msg: string);\n"
+    <> "}\n"
+  let root_src =
+    "// Comment header\n"
+    <> "/* block /* nested */ comment */\n"
+    <> "package my-ns:my-pkg@0.1.0;\n\n"
+    <> "interface my-api {\n"
+    <> "  use ext-ns:ext-pkg/ext-logger@0.2.0.{log-level};\n"
+    <> "  flags access-flags { read-only, write-all }\n"
+    <> "  type id-alias = u64;\n"
+    <> "  record my-rec {\n"
+    <> "    %type: string,\n"
+    <> "    flags: access-flags,\n"
+    <> "    pair: tuple<string, u32>,\n"
+    <> "    raw: list<u8>,\n"
+    <> "    note: option<string>,\n"
+    <> "  }\n"
+    <> "  variant api-err {\n"
+    <> "    empty,\n"
+    <> "    bad-id(id-alias),\n"
+    <> "  }\n"
+    <> "  run-ok: func(r: my-rec, lvl: log-level) -> result<my-rec, api-err>;\n"
+    <> "  fail-only: func() -> result<_, string>;\n"
+    <> "  void-res: func() -> result;\n"
+    <> "}\n\n"
+    <> "world my-world {\n"
+    <> "  import ext-ns:ext-pkg/ext-logger@0.2.0;\n"
+    <> "  import host-clock: func() -> u64;\n"
+    <> "  export my-api;\n"
+    <> "  export ping: func(x: s32) -> s32;\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(deps_dir, "log.wit"),
+      contents: dep_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(wit_dir, "world.wit"),
+      contents: root_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(resolved) = wit_parser.load_wit_dir(wit_dir, None)
+  assert resolved.root_pkg.namespace == "my-ns"
+  assert resolved.root_pkg.name == "my-pkg"
+  assert resolved.world.name == "my-world"
+  assert list.length(resolved.world.items) == 4
+  assert dict.has_key(resolved.interfaces, "my-ns:my-pkg/my-api")
+  assert dict.has_key(resolved.interfaces, "ext-ns:ext-pkg/ext-logger")
+
+  let _ = simplifile.delete(file_or_dir_at: wit_dir)
+  Nil
+}
+
+pub fn wit_gleam_gen_idempotent_stubs_test() {
+  let root = "build/test_fixtures/wit_gen_test"
+  let wit_dir = filepath.join(root, "wit")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(wit_dir) == Ok(Nil)
+
+  let world_wit =
+    "package demo:sample@0.1.0;\n\n"
+    <> "interface host-log {\n"
+    <> "  record entry { tag: string, count: u32 }\n"
+    <> "  emit: func(e: entry);\n"
+    <> "}\n\n"
+    <> "interface svc {\n"
+    <> "  use host-log.{entry};\n"
+    <> "  echo-entry: func(e: entry) -> option<string>;\n"
+    <> "}\n\n"
+    <> "world sample-world {\n"
+    <> "  import host-log;\n"
+    <> "  import world-tick: func() -> u32;\n"
+    <> "  export svc;\n"
+    <> "  export ping: func(n: s32) -> s32;\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(wit_dir, "world.wit"),
+      contents: world_wit,
+    )
+    == Ok(Nil)
+  let assert Ok(resolved) = wit_parser.load_wit_dir(wit_dir, None)
+
+  let assert Ok(rep1) = gleam_gen.generate_project_bindings(resolved, root)
+  assert list.contains(rep1.written_files, "src/wit/host_log_types.gleam")
+  assert list.contains(rep1.written_files, "src/wit/host_log.gleam")
+  assert list.contains(rep1.written_files, "src/wit/sample_world_imports.gleam")
+  assert list.contains(rep1.created_stubs, "src/svc.gleam")
+  assert list.contains(rep1.created_stubs, "src/sample_world.gleam")
+
+  let assert Ok(imp_src) =
+    simplifile.read(from: filepath.join(root, "src/wit/host_log.gleam"))
+  assert string.contains(
+    imp_src,
+    "/// @external(moonbit, \"wit_imp_demo_sample_host_log\", \"emit\")",
+  )
+
+  // Customize starter stub; second generation must regenerate `src/wit/` and
+  // preserve the user's edited `src/svc.gleam` and `src/sample_world.gleam`.
+  let custom_stub =
+    "// custom user implementation\npub fn ping(n: Int) -> Int { n + 42 }\n"
+  assert simplifile.write(
+      to: filepath.join(root, "src/sample_world.gleam"),
+      contents: custom_stub,
+    )
+    == Ok(Nil)
+
+  let assert Ok(rep2) = gleam_gen.generate_project_bindings(resolved, root)
+  assert list.contains(rep2.written_files, "src/wit/host_log.gleam")
+  assert list.contains(rep2.skipped_existing_stubs, "src/svc.gleam")
+  assert list.contains(rep2.skipped_existing_stubs, "src/sample_world.gleam")
+  let assert Ok(preserved) =
+    simplifile.read(from: filepath.join(root, "src/sample_world.gleam"))
+  assert preserved == custom_stub
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn wit_greeter_gleam_check_test() {
+  let fixture_dir = "examples/wit_greeter"
+  stage_offline_stdlib(fixture_dir)
+
+  let check_res = cmd.run(command: "gleam", args: ["check"], cwd: fixture_dir)
+  assert check_res.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  Nil
+}
+
+pub fn wit_greeter_e2e_wasm_build_test() {
+  let fixture_dir = "examples/wit_greeter"
+  let wit_dir = filepath.join(fixture_dir, "wit")
+  let out_dir = "build/test_fixtures/wit_greeter_mbt"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  stage_offline_stdlib(fixture_dir)
+
+  let assert Ok(summary) =
+    wit_bridge.bridge_wit_workspace(fixture_dir, out_dir, wit_dir, None)
+  assert summary.project_name == "wit_greeter"
+  assert summary.world_name == "greeter"
+
+  let check_res =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_res.exit_code == 0
+
+  let assert Ok(imp_adapter) =
+    simplifile.read(from: filepath.join(
+      out_dir,
+      "wit_imp_demo_greeter_logger/wit_imp_demo_greeter_logger.mbt",
+    ))
+  assert string.contains(imp_adapter, "@wit_raw.log(")
+
+  let assert Ok(api_stub) =
+    simplifile.read(from: filepath.join(
+      out_dir,
+      "gen/interface/demo/greeter/api/stub.mbt",
+    ))
+  assert string.contains(api_stub, "@gleam_export.greet(")
+  assert string.contains(api_stub, "@gleam_export.sum_bytes(")
+
+  let assert Ok(world_stub) =
+    simplifile.read(from: filepath.join(out_dir, "gen/world/greeter/stub.mbt"))
+  assert string.contains(world_stub, "@gleam_export.ping(")
+
+  let comp_path = filepath.join(out_dir, "dist/greeter.wasm")
+  case wit_bridge.bundle_component(summary, None, comp_path) {
+    Ok(built) -> {
+      assert built == comp_path
+      assert simplifile.is_file(comp_path) == Ok(True)
+    }
+    Error(msg) -> {
+      assert string.contains(msg, "wasm-tools")
+      assert string.contains(msg, "gen.wasm")
+      assert simplifile.is_file(summary.core_wasm_path) == Ok(True)
+    }
+  }
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
