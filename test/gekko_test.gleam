@@ -1997,6 +1997,8 @@ pub fn wit_parser_and_deps_unit_test() {
   assert wit_ast.kebab_to_screaming("debug-info") == "DEBUG_INFO"
   assert wit_ast.escape_gleam_ident("type") == "type_"
   assert wit_ast.escape_gleam_ident("greet") == "greet"
+  assert wit_ast.escape_erlang_reserved_module("logger") == "logger_export"
+  assert wit_ast.escape_erlang_reserved_module("api") == "api"
 
   let wit_dir = "build/test_fixtures/wit_parse_test"
   let deps_dir = filepath.join(wit_dir, "deps/ext-log")
@@ -2196,6 +2198,72 @@ pub fn wit_greeter_e2e_wasm_build_test() {
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn wit_wasmtime_runtime_e2e_test() {
+  let root = "build/test_fixtures/wit_runtime_test"
+  let out_dir = "build/test_fixtures/wit_runtime_mbt"
+  let wit_dir = filepath.join(root, "wit")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  assert simplifile.create_directory_all(wit_dir) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"wit_runtime\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(wit_dir, "world.wit"),
+      contents: "package demo:runtime@0.1.0;\n\nworld app {\n  export add: func(a: s32, b: s32) -> s32;\n  export echo-str: func(s: string) -> string;\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(resolved) = wit_parser.load_wit_dir(wit_dir, None)
+  let assert Ok(_) = gleam_gen.generate_project_bindings(resolved, root)
+  assert simplifile.write(
+      to: filepath.join(root, "src/app.gleam"),
+      contents: "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn echo_str(s: String) -> String {\n  \"Hello, \" <> s\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(summary) =
+    wit_bridge.bridge_wit_workspace(root, out_dir, wit_dir, None)
+  let comp_path = filepath.join(out_dir, "dist/app.wasm")
+  case wit_bridge.bundle_component(summary, None, comp_path) {
+    Ok(built) -> {
+      let wt_probe = cmd.run(command: "wasmtime", args: ["--version"], cwd: ".")
+      case wt_probe.exit_code {
+        0 -> {
+          let r_add =
+            cmd.run(
+              command: "wasmtime",
+              args: ["run", "--invoke", "add(20, 22)", built],
+              cwd: ".",
+            )
+          assert r_add.exit_code == 0
+          assert string.trim(r_add.output) == "42"
+
+          let r_str =
+            cmd.run(
+              command: "wasmtime",
+              args: ["run", "--invoke", "echo-str(\"Gleam! 🌙\")", built],
+              cwd: ".",
+            )
+          assert r_str.exit_code == 0
+          assert string.trim(r_str.output) == "\"Hello, Gleam! 🌙\""
+        }
+        _ -> Nil
+      }
+    }
+    Error(msg) -> {
+      assert string.contains(msg, "wasm-tools")
+    }
+  }
+
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }

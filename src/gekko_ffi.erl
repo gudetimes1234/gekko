@@ -2,16 +2,16 @@
 -export([run_command/3]).
 
 run_command(Command, Args, Cwd) ->
-    CmdStr = binary_to_list(Command),
+    CmdStr = unicode:characters_to_list(Command, utf8),
     case resolve_executable(CmdStr) of
         false ->
             {127, <<"Executable not found: ", Command/binary>>};
         Exe ->
-            ArgStrs = [binary_to_list(A) || A <- Args],
+            ArgStrs = [unicode:characters_to_list(A, utf8) || A <- Args],
             BaseOpts = [exit_status, stderr_to_stdout, binary, {args, ArgStrs}],
             Opts = case Cwd of
                 <<>> -> BaseOpts;
-                _ -> [{cd, binary_to_list(Cwd)} | BaseOpts]
+                _ -> [{cd, unicode:characters_to_list(Cwd, utf8)} | BaseOpts]
             end,
             try
                 Port = open_port({spawn_executable, Exe}, Opts),

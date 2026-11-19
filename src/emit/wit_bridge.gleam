@@ -265,6 +265,8 @@ pub fn bundle_component(
   let base_embed = [
     "component",
     "embed",
+    "--encoding",
+    "utf16",
     summary.wit_dir,
     summary.core_wasm_path,
     "-o",
