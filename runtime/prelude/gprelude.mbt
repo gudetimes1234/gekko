@@ -130,7 +130,7 @@ pub fn BitArray::int_segment(
       buf.write_int64_le(val)
     }
   } else {
-    abort("unsupported non-byte-aligned bit segment width in Tier 1 BitArray")
+    @prelude.abort("unsupported non-byte-aligned bit segment width in Tier 1 BitArray")
   }
   { data: buf.to_bytes() }
 }
@@ -156,7 +156,7 @@ pub fn BitArray::float_segment(
       buf.write_double_le(val)
     }
   } else {
-    abort("unsupported float bit segment width in BitArray")
+    @prelude.abort("unsupported float bit segment width in BitArray")
   }
   { data: buf.to_bytes() }
 }
@@ -281,7 +281,7 @@ pub fn string_drop_prefix(s : String, prefix : String) -> String {
 ///|
 pub fn[T] echo_val(val : T, msg : String) -> T {
   if msg != "" {
-    println(msg)
+    @prelude.println(msg)
   }
   val
 }

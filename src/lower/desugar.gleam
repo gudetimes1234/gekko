@@ -100,7 +100,7 @@ pub fn desugar_module(
       let ta = def.definition
       let type_params = list.map(ta.parameters, mangle.mangle_type_param)
       IrTypeAlias(
-        name: mangle.mangle_ident(ta.name),
+        name: mangle.mangle_type_name(ta.name),
         publicity: ta.publicity,
         type_params:,
         aliased: lower_ast_type(ta.aliased, mod_syms, table.package_name),
@@ -163,7 +163,7 @@ fn lower_type_def(type_info: TypeInfo, mod_syms: ModuleSymbols) -> IrTypeDef {
     })
 
   IrTypeDef(
-    name: type_info.name,
+    name: mangle.mangle_type_name(type_info.name),
     unmangled_name: type_info.name,
     publicity: type_info.publicity,
     opaque_: type_info.opaque_,
@@ -185,7 +185,7 @@ fn synthesize_getters(
   |> list.map(fn(entry) {
     let #(field_name, resolved_ty) = entry
     IrGetter(
-      type_name: type_info.name,
+      type_name: mangle.mangle_type_name(type_info.name),
       type_params:,
       publicity: type_info.publicity,
       field_name: mangle.mangle_ident(field_name),
@@ -1413,7 +1413,7 @@ pub fn resolved_type_to_ir(
             module_alias: alias,
             package:,
             module:,
-            name:,
+            name: mangle_referenced_type_name(module, name),
             args: lowered_args,
           )
         }
@@ -1477,7 +1477,7 @@ pub fn lower_ast_type(
             module_alias: Some(alias),
             package: package_name,
             module: target_mod,
-            name:,
+            name: mangle_referenced_type_name(target_mod, name),
             args:,
           )
         }
@@ -1488,7 +1488,7 @@ pub fn lower_ast_type(
                 module_alias: Some(find_import_alias(mod_syms, target_mod)),
                 package: package_name,
                 module: target_mod,
-                name: orig_name,
+                name: mangle_referenced_type_name(target_mod, orig_name),
                 args:,
               )
             Error(_) ->
@@ -1496,7 +1496,7 @@ pub fn lower_ast_type(
                 module_alias: None,
                 package: package_name,
                 module: mod_syms.name,
-                name:,
+                name: mangle_referenced_type_name(mod_syms.name, name),
                 args:,
               )
           }
@@ -1518,6 +1518,14 @@ pub fn lower_ast_type(
 
     glance.VariableType(name:, ..) | glance.HoleType(name:, ..) ->
       IrTypeVar(mangle.mangle_type_param(name))
+  }
+}
+
+fn mangle_referenced_type_name(module: String, name: String) -> String {
+  case module, name {
+    "gleam/option", "Option" -> name
+    "gleam", _ -> name
+    _, _ -> mangle.mangle_type_name(name)
   }
 }
 

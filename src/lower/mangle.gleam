@@ -59,16 +59,54 @@ fn reserved_keywords() -> Set(String) {
     "where",
     "with",
     "readonly",
+    // Additional MoonBit hard & reserved contextual keywords
+    "declare",
+    "extern",
+    "module",
+    "abstract",
+    "assert",
+    "assume",
+    "await",
+    "comptime",
+    "do",
+    "export",
+    "final",
+    "macro",
+    "move",
+    "namespace",
+    "opaque",
+    "override",
+    "package",
+    "protected",
+    "ref",
+    "static",
+    "typeof",
+    "unreachable",
+    "unsafe",
+    "use",
+    "var",
+    "virtual",
+    "void",
+    "volatile",
+    "yield",
+    // MoonBit @prelude runtime functions (prevent shadowing MoonBit test driver & builtins)
+    "abort",
+    "eprintln",
+    "ignore",
+    "panic",
+    "println",
   ])
 }
 
-fn builtin_moonbit_types() -> Set(String) {
+fn reserved_type_names() -> Set(String) {
   set.from_list([
     "Int",
     "Int16",
+    "Int32",
     "Int64",
     "UInt",
     "UInt16",
+    "UInt32",
     "UInt64",
     "Double",
     "Float",
@@ -78,17 +116,21 @@ fn builtin_moonbit_types() -> Set(String) {
     "Bytes",
     "Byte",
     "Char",
-    "Array",
-    "ArrayView",
     "FixedArray",
     "ReadOnlyArray",
     "Result",
     "Option",
     "Error",
-    "Json",
-    "Map",
     "Self",
+    "FuncRef",
   ])
+}
+
+fn builtin_moonbit_types() -> Set(String) {
+  set.union(
+    reserved_type_names(),
+    set.from_list(["Array", "ArrayView", "Json", "Map"]),
+  )
 }
 
 /// Return True if `name` collides with a MoonBit reserved keyword.
@@ -96,9 +138,22 @@ pub fn is_reserved_keyword(name: String) -> Bool {
   set.contains(reserved_keywords(), name)
 }
 
+/// Return True if `name` collides with a MoonBit reserved type name (`Error [4003]`).
+pub fn is_reserved_type_name(name: String) -> Bool {
+  set.contains(reserved_type_names(), name)
+}
+
 /// Escape MoonBit reserved keywords by appending `_`.
 pub fn mangle_ident(name: String) -> String {
   case is_reserved_keyword(name) {
+    True -> name <> "_"
+    False -> name
+  }
+}
+
+/// Escape MoonBit reserved type names by appending `_`.
+pub fn mangle_type_name(name: String) -> String {
+  case is_reserved_type_name(name) {
     True -> name <> "_"
     False -> name
   }

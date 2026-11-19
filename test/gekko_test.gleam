@@ -599,7 +599,20 @@ pub fn mangle_keywords_and_type_params_test() {
   assert mangle.mangle_ident("match") == "match_"
   assert mangle.mangle_ident("loop") == "loop_"
   assert mangle.mangle_ident("guard") == "guard_"
+  assert mangle.mangle_ident("module") == "module_"
+  assert mangle.mangle_ident("extern") == "extern_"
+  assert mangle.mangle_ident("declare") == "declare_"
+  assert mangle.mangle_ident("dyn") == "dyn_"
+  assert mangle.mangle_ident("ignore") == "ignore_"
+  assert mangle.mangle_ident("println") == "println_"
   assert mangle.mangle_ident("normal_var") == "normal_var"
+
+  assert mangle.is_reserved_type_name("Error") == True
+  assert mangle.is_reserved_type_name("Option") == True
+  assert mangle.is_reserved_type_name("User") == False
+  assert mangle.mangle_type_name("Error") == "Error_"
+  assert mangle.mangle_type_name("Option") == "Option_"
+  assert mangle.mangle_type_name("User") == "User"
 
   assert mangle.mangle_type_param("item") == "Item"
   assert mangle.mangle_type_param("key_value") == "KeyValue"
@@ -1623,6 +1636,139 @@ pub fn example_weather_app_moon_run_test() {
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+fn assert_no_unqualified_prelude_calls(source: String) {
+  let forbidden = [
+    " println(",
+    " eprintln(",
+    " abort(",
+    " ignore(",
+    "{ println(",
+    "{ eprintln(",
+    "{ abort(",
+    "{ ignore(",
+  ]
+  string.split(source, "\n")
+  |> list.each(fn(line) {
+    let trimmed = string.trim(line)
+    let is_decl =
+      string.starts_with(trimmed, "pub fn ")
+      || string.starts_with(trimmed, "pub fn[")
+      || string.starts_with(trimmed, "fn ")
+      || string.starts_with(trimmed, "fn[")
+    let scan_line = case is_decl {
+      True ->
+        case string.split_once(line, "{") {
+          Ok(#(_, body_part)) -> "{" <> body_part
+          Error(_) -> ""
+        }
+      False -> line
+    }
+    list.each(forbidden, fn(pat) {
+      assert !string.contains(scan_line, pat)
+      assert !string.starts_with(trimmed, string.trim_start(pat))
+    })
+  })
+}
+
+pub fn runtime_no_unqualified_prelude_calls_test() {
+  assert_no_unqualified_prelude_calls(prelude_runtime.gprelude_mbt())
+  stdlib_runtime.all_shim_packages()
+  |> list.each(fn(pkg) { assert_no_unqualified_prelude_calls(pkg.source) })
+}
+
+pub fn prelude_shadowing_and_reserved_names_e2e_test() {
+  let root = "build/test_fixtures/prelude_hardening"
+  let out_dir = "build/test_fixtures/prelude_hardening_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"prelude_hardening\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let lib_src =
+    "pub type Error {\n"
+    <> "  NotFound\n"
+    <> "  Invalid(String)\n"
+    <> "}\n\n"
+    <> "pub fn abort(msg: String) -> String {\n"
+    <> "  \"abort:\" <> msg\n"
+    <> "}\n\n"
+    <> "pub fn ignore(x: Int) -> Int {\n"
+    <> "  x + 1\n"
+    <> "}\n\n"
+    <> "pub fn println(s: String) -> String {\n"
+    <> "  \"println:\" <> s\n"
+    <> "}\n\n"
+    <> "pub fn module(declare: Int, extern: Int, yield: Int) -> Int {\n"
+    <> "  declare + extern + yield\n"
+    <> "}\n\n"
+    <> "pub fn wrap_err(flag: Bool) -> Result(Int, Error) {\n"
+    <> "  case flag {\n"
+    <> "    True -> Ok(42)\n"
+    <> "    False -> Error(NotFound)\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let test_src =
+    "import prelude_hardening.{Invalid, NotFound}\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  let _ = prelude_hardening.println(\"ok\")\n"
+    <> "  Nil\n"
+    <> "}\n\n"
+    <> "pub fn shadowing_and_reserved_test() {\n"
+    <> "  assert prelude_hardening.abort(\"x\") == \"abort:x\"\n"
+    <> "  assert prelude_hardening.ignore(10) == 11\n"
+    <> "  assert prelude_hardening.println(\"y\") == \"println:y\"\n"
+    <> "  assert prelude_hardening.module(1, 2, 3) == 6\n"
+    <> "  let assert Ok(v) = prelude_hardening.wrap_err(True)\n"
+    <> "  assert v == 42\n"
+    <> "  assert prelude_hardening.wrap_err(False) == Error(NotFound)\n"
+    <> "  let e = Invalid(\"bad\")\n"
+    <> "  assert e != NotFound\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/prelude_hardening.gleam"),
+      contents: lib_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/prelude_hardening_test.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(summary) = workspace.transpile_project(root, out_dir)
+  assert summary.project_name == "prelude_hardening"
+
+  let check_res =
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+  assert check_res.exit_code == 0
+
+  let test_wasm =
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
+  assert test_wasm.exit_code == 0
+  assert string.contains(test_wasm.output, "passed: 1, failed: 0")
+
+  let test_wasm_gc =
+    cmd.run(
+      command: "moon",
+      args: ["test", "--target", "wasm-gc"],
+      cwd: out_dir,
+    )
+  assert test_wasm_gc.exit_code == 0
+  assert string.contains(test_wasm_gc.output, "passed: 1, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }

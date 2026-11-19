@@ -91,7 +91,7 @@ fn emit_module_inner(
   let #(fn_blocks, ctx5) = map_acc(module.functions, ctx4, emit_function)
 
   let main_blocks = case module_has_main(module) {
-    True -> ["///|\nfn main {\n  main_() |> ignore\n}"]
+    True -> ["///|\nfn main {\n  @prelude.ignore(main_())\n}"]
     False -> []
   }
 
@@ -336,9 +336,9 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
     True ->
       "\n\n///|\ntest \""
       <> escape_string_literal(f.unmangled_name)
-      <> "\" {\n  "
+      <> "\" {\n  @prelude.ignore("
       <> f.name
-      <> "() |> ignore\n}"
+      <> "())\n}"
     False -> ""
   }
 
@@ -380,7 +380,7 @@ fn emit_stmt(stmt: IrStmt, indent: String, ctx: EmitCtx) -> #(String, EmitCtx) {
             <> val_str
             <> " is "
             <> pat_str
-            <> " else { abort(\"let pattern match failed\") }",
+            <> " else { @prelude.abort(\"let pattern match failed\") }",
           ctx2,
         )
       }
@@ -411,14 +411,17 @@ fn emit_stmt(stmt: IrStmt, indent: String, ctx: EmitCtx) -> #(String, EmitCtx) {
               <> indent
               <> "guard "
               <> cond_str
-              <> " else { abort("
+              <> " else { @prelude.abort("
               <> msg_str
               <> ") }",
             c,
           )
         }
         IrPatVar(v), None -> #(indent <> "let " <> v <> " = " <> val_str, ctx2)
-        IrPatDiscard, None -> #(indent <> "ignore(" <> val_str <> ")", ctx2)
+        IrPatDiscard, None -> #(
+          indent <> "@prelude.ignore(" <> val_str <> ")",
+          ctx2,
+        )
         _, _ -> {
           let #(pat_str, c1) = emit_pattern(pattern, ctx2)
           let #(cond_suffix, c2) = case guard_condition {
@@ -435,7 +438,7 @@ fn emit_stmt(stmt: IrStmt, indent: String, ctx: EmitCtx) -> #(String, EmitCtx) {
               <> " is "
               <> pat_str
               <> cond_suffix
-              <> " else { abort("
+              <> " else { @prelude.abort("
               <> msg_str
               <> ") }",
             c2,
@@ -466,7 +469,7 @@ fn emit_stmt(stmt: IrStmt, indent: String, ctx: EmitCtx) -> #(String, EmitCtx) {
           <> cond_str
           <> ") {\n"
           <> indent
-          <> "  abort("
+          <> "  @prelude.abort("
           <> msg_str
           <> ")\n"
           <> indent
@@ -636,7 +639,7 @@ fn emit_expr_indented(
         Some(m) -> emit_expr(m, ctx)
         None -> #(default_msg, ctx)
       }
-      #("abort(" <> msg_str <> ")", ctx1)
+      #("@prelude.abort(" <> msg_str <> ")", ctx1)
     }
 
     IrEcho(expr: inner, message:) -> {
