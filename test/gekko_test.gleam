@@ -2905,3 +2905,92 @@ pub fn moonbit_bindgen_local_pkg_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: info_out)
   Nil
 }
+
+pub fn moonbit_deps_config_and_moon_mod_emission_test() {
+  let gleam_toml =
+    "name = \"dep_demo\"\nversion = \"0.1.0\"\n\n"
+    <> "[gekko.moonbit.deps]\n"
+    <> "\"moonbitlang/x\" = \"0.4.5\"\n"
+    <> "\"alice/json_ext\" = \"0.1.0\"\n"
+  let gekko_toml =
+    "[moonbit.deps]\n"
+    <> "\"moonbitlang/x\" = \"0.4.6\"\n"
+    <> "\"bob/regex\" = \"0.2.1\"\n"
+
+  assert ffi_config.parse_moonbit_deps_gleam_toml(gleam_toml)
+    == Ok([#("alice/json_ext", "0.1.0"), #("moonbitlang/x", "0.4.5")])
+  assert ffi_config.parse_moonbit_deps_gekko_toml(gekko_toml)
+    == Ok([#("bob/regex", "0.2.1"), #("moonbitlang/x", "0.4.6")])
+
+  let bad_toml = "[moonbit.deps]\n\"moonbitlang/x\" = 42\n"
+  let assert Error(bad_err) = ffi_config.parse_moonbit_deps_gekko_toml(bad_toml)
+  assert string.contains(bad_err, "version must be a string")
+
+  assert pkg_config.emit_moon_mod_with_deps("demo", "0.1.0", [])
+    == pkg_config.emit_moon_mod("demo", "0.1.0")
+
+  let rendered =
+    pkg_config.emit_moon_mod_with_deps("demo", "0.1.0", [
+      #("bob/regex", "0.2.1"),
+      #("moonbitlang/x@0.4.6", ""),
+    ])
+  assert string.contains(
+    rendered,
+    "import {\n  \"bob/regex@0.2.1\",\n  \"moonbitlang/x@0.4.6\",\n}\n",
+  )
+
+  let root = "build/test_fixtures/moonbit_deps_cfg"
+  let out_dir = "build/test_fixtures/moonbit_deps_cfg_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: gleam_toml,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gekko.toml"),
+      contents: gekko_toml,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/dep_demo.gleam"),
+      contents: "pub fn main() -> Nil {\n  Nil\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(merged_deps) = ffi_config.load_project_moonbit_deps(root)
+  assert merged_deps
+    == [
+      #("alice/json_ext", "0.1.0"),
+      #("bob/regex", "0.2.1"),
+      #("moonbitlang/x", "0.4.6"),
+    ]
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  let moon_mod_path = filepath.join(out_dir, "moon.mod")
+  let assert Ok(moon_mod_src) = simplifile.read(from: moon_mod_path)
+  assert string.contains(
+    moon_mod_src,
+    "import {\n  \"alice/json_ext@0.1.0\",\n  \"bob/regex@0.2.1\",\n  \"moonbitlang/x@0.4.6\",\n}\n",
+  )
+
+  let fmt_probe = cmd.run(command: "moonfmt", args: ["--help"], cwd: ".")
+  case fmt_probe.exit_code {
+    0 -> {
+      let fmt_res =
+        cmd.run(
+          command: "moonfmt",
+          args: ["-file-type", "mod", moon_mod_path],
+          cwd: ".",
+        )
+      assert fmt_res.exit_code == 0
+    }
+    _ -> Nil
+  }
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}

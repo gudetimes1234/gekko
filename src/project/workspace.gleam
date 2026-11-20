@@ -43,6 +43,9 @@ pub fn transpile_project(
   use ffi_overrides <- result.try(ffi_config.load_project_overrides(
     project_root,
   ))
+  use moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
+    project_root,
+  ))
   use loaded_deps <- result.try(loader.load_dependencies(
     project_root,
     ffi_overrides,
@@ -102,7 +105,7 @@ pub fn transpile_project(
 
   use _ <- result.try(write_text_file(
     filepath.join(out_dir, "moon.mod"),
-    pkg_config.emit_moon_mod(project_name, version),
+    pkg_config.emit_moon_mod_with_deps(project_name, version, moonbit_deps),
   ))
 
   let gprelude_dir = filepath.join(out_dir, "gprelude")

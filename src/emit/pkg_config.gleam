@@ -14,13 +14,41 @@ pub fn module_to_pkg_dir(module_name: String) -> String {
 
 /// Generate the root `moon.mod` file for the transpiled MoonBit workspace.
 pub fn emit_moon_mod(project_name: String, version: String) -> String {
-  "name = \""
-  <> project_name
-  <> "\"\n"
-  <> "version = \""
-  <> version
-  <> "\"\n"
-  <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else-unused_trait_bound-deprecated_syntax\"\n"
+  emit_moon_mod_with_deps(project_name, version, [])
+}
+
+/// Generate the root `moon.mod` file including third-party `[moonbit.deps]`
+/// entries as an `import { ... }` block.
+pub fn emit_moon_mod_with_deps(
+  project_name: String,
+  version: String,
+  deps: List(#(String, String)),
+) -> String {
+  let base =
+    "name = \""
+    <> project_name
+    <> "\"\n"
+    <> "version = \""
+    <> version
+    <> "\"\n"
+    <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else-unused_trait_bound-deprecated_syntax\"\n"
+
+  case deps {
+    [] -> base
+    _ -> {
+      let dep_lines =
+        list.map(deps, fn(entry) {
+          let #(pkg, ver) = entry
+          let spec = case ver == "" || string.contains(pkg, "@") {
+            True -> pkg
+            False -> pkg <> "@" <> ver
+          }
+          "  \"" <> spec <> "\","
+        })
+        |> string.join("\n")
+      base <> "\nimport {\n" <> dep_lines <> "\n}\n"
+    }
+  }
 }
 
 /// Generate a declarative `moon.pkg` file for a package given `#(pkg_or_dir, alias)`
