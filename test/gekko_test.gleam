@@ -1788,7 +1788,7 @@ fn stage_offline_stdlib_json(fixture_dir: String) {
 }
 
 pub fn example_weather_app_moon_run_test() {
-  let fixture_dir = "examples/weather_app"
+  let fixture_dir = "fixtures/weather_app"
   let out_dir = "build/test_fixtures/weather_app_mbt"
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
@@ -2086,7 +2086,7 @@ pub fn record_update_e2e_test() {
 }
 
 pub fn example_gleam_tour_moon_run_test() {
-  let fixture_dir = "examples/gleam_tour"
+  let fixture_dir = "fixtures/gleam_tour"
   let out_dir = "build/test_fixtures/gleam_tour_mbt"
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
@@ -2405,7 +2405,7 @@ pub fn wit_gleam_gen_idempotent_stubs_test() {
 }
 
 pub fn wit_greeter_gleam_check_test() {
-  let fixture_dir = "examples/wit_greeter"
+  let fixture_dir = "fixtures/wit_greeter"
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
@@ -2420,7 +2420,7 @@ pub fn wit_greeter_gleam_check_test() {
 }
 
 pub fn wit_greeter_e2e_wasm_build_test() {
-  let fixture_dir = "examples/wit_greeter"
+  let fixture_dir = "fixtures/wit_greeter"
   let wit_dir = filepath.join(fixture_dir, "wit")
   let out_dir = "build/test_fixtures/wit_greeter_mbt"
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
@@ -2622,7 +2622,7 @@ pub fn moonbit_ffi_collision_and_loose_file_error_test() {
 }
 
 pub fn example_moonbit_ffi_e2e_test() {
-  let fixture_dir = "examples/moonbit_ffi"
+  let fixture_dir = "fixtures/moonbit_ffi"
   let out_dir = "build/test_fixtures/moonbit_ffi_mbt"
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
@@ -3196,7 +3196,7 @@ pub fn moonbit_deps_config_and_moon_mod_emission_test() {
 }
 
 pub fn example_file_io_moonbit_deps_e2e_test() {
-  let fixture_dir = "examples/file_io"
+  let fixture_dir = "fixtures/file_io"
   let out_dir = "build/test_fixtures/file_io_mbt"
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =

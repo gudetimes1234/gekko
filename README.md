@@ -125,17 +125,21 @@ function = "read_to_string"
 
 ---
 
+## Supported Gleam Version
+
+`gekko` targets **Gleam 1.19.x** (verified with `gleam 1.19.2`) and parses Gleam syntax via `glance >= 7.0.0 and < 8.0.0` / `glexer >= 2.5.0 and < 3.0.0`, delegating type-checking and package-interface extraction to the installed `gleam` compiler.
+
+---
+
 ## Examples
 
-Each example includes its own `README.md` with setup, generation commands (where applicable), and run instructions:
+Standalone example projects have moved to [`gekko_examples`](../gekko_examples) (`https://github.com/spiral-nights/gekko_examples`):
 
-| Example | What It Shows | Guide |
-| --- | --- | --- |
-| **Gleam Tour** | Pure Gleam language tour (basics, TCO loops, records, `echo`, stdlib) | [`examples/gleam_tour/README.md`](./examples/gleam_tour/README.md) |
-| **Weather App** | `gleam/json` & `gleam/dynamic/decode` with custom records and pipelines | [`examples/weather_app/README.md`](./examples/weather_app/README.md) |
-| **WIT Greeter** | Wasm Component (`wit/world.wit`, `gekko wit gen`, `wit check`, `wit build`) | [`examples/wit_greeter/README.md`](./examples/wit_greeter/README.md) |
-| **MoonBit FFI** | Local `moonbit/` packages, `moonbitlang/core/math`, and `@external_type` | [`examples/moonbit_ffi/README.md`](./examples/moonbit_ffi/README.md) |
-| **File I/O** | Reading/writing files via `moonbit/moon.mod` (`moonbitlang/x/fs`) + `gekko moonbit bind` | [`examples/file_io/README.md`](./examples/file_io/README.md) |
+- **Gleam Tour** — Pure Gleam language tour (basics, TCO loops, records, `echo`, stdlib)
+- **Weather App** — `gleam/json` & `gleam/dynamic/decode` with custom records and pipelines
+- **WIT Greeter** — Wasm Component (`wit/world.wit`, `gekko wit gen`, `wit check`, `wit build`)
+- **MoonBit FFI** — Local `moonbit/` packages, `moonbitlang/core/math`, and `@external_type`
+- **File I/O** — Reading/writing files via `moonbit/moon.mod` (`moonbitlang/x/fs`) + `gekko moonbit bind`
 
 ---
 
