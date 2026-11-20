@@ -180,7 +180,11 @@ fn synthesize_getters(
   mod_syms: ModuleSymbols,
 ) -> List(IrGetter) {
   let type_params = list.map(type_info.parameters, mangle.mangle_type_param)
-  let variants = list.map(type_info.variants, fn(v) { v.name })
+  let variants =
+    list.map(type_info.variants, fn(v) {
+      let positional = list.count(v.fields, fn(f) { option.is_none(f.label) })
+      #(v.name, positional)
+    })
   type_info.shared_fields
   |> dict.to_list
   |> list.sort(fn(a, b) { string.compare(a.0, b.0) })

@@ -66,7 +66,9 @@ pub type IrGetter {
     publicity: glance.Publicity,
     field_name: String,
     return_type: IrType,
-    variants: List(String),
+    /// Variant name and number of leading unlabelled fields (each needs a
+    /// `_` placeholder in the MoonBit pattern).
+    variants: List(#(String, Int)),
   )
 }
 

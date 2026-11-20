@@ -370,8 +370,13 @@ fn emit_getter(g: IrGetter, ctx: EmitCtx) -> #(String, EmitCtx) {
   let self_ty = g.type_name <> generics
   let #(ret_str, ctx1) = emit_type(g.return_type, ctx)
   let arms =
-    list.map(g.variants, fn(v_name) {
-      "    " <> v_name <> "(" <> g.field_name <> "~, ..) => " <> g.field_name
+    list.map(g.variants, fn(v) {
+      let #(v_name, positional) = v
+      let placeholders = list.repeat("_", positional)
+      let pat_args =
+        list.append(placeholders, [g.field_name <> "~", ".."])
+        |> string.join(", ")
+      "    " <> v_name <> "(" <> pat_args <> ") => " <> g.field_name
     })
     |> string.join("\n")
   let code =
@@ -1267,8 +1272,10 @@ fn emit_bin_op_expr(
   right: IrExpr,
   ctx: EmitCtx,
 ) -> #(String, EmitCtx) {
-  let #(l_str, ctx1) = emit_expr(left, ctx)
-  let #(r_str, ctx2) = emit_expr(right, ctx1)
+  let #(l_raw, ctx1) = emit_expr(left, ctx)
+  let #(r_raw, ctx2) = emit_expr(right, ctx1)
+  let l_str = paren_if_match(left, l_raw)
+  let r_str = paren_if_match(right, r_raw)
 
   case op {
     IrDivInt -> {
@@ -1303,13 +1310,26 @@ fn emit_bin_op_expr(
   }
 }
 
+/// A `match` used as an operand or as another match's subject must be
+/// parenthesised for MoonBit to parse it.
+fn paren_if_match(expr: IrExpr, emitted: String) -> String {
+  case expr {
+    IrMatch(_, _) -> "(" <> emitted <> ")"
+    _ -> emitted
+  }
+}
+
 fn emit_match_expr(
   subjects: List(IrExpr),
   clauses: List(IrClause),
   indent: String,
   ctx: EmitCtx,
 ) -> #(String, EmitCtx) {
-  let #(subj_strs, ctx1) = map_acc(subjects, ctx, emit_expr)
+  let #(subj_strs, ctx1) =
+    map_acc(subjects, ctx, fn(s, c) {
+      let #(str, c1) = emit_expr(s, c)
+      #(paren_if_match(s, str), c1)
+    })
   let is_multi = list.length(subjects) > 1
   let subj_header = case is_multi {
     True -> "(" <> string.join(subj_strs, ", ") <> ")"

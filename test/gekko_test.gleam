@@ -1786,6 +1786,117 @@ pub fn prelude_shadowing_and_reserved_names_e2e_test() {
   Nil
 }
 
+pub fn record_update_e2e_test() {
+  let root = "build/test_fixtures/record_update"
+  let out_dir = "build/test_fixtures/record_update_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"record_update\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let types_src =
+    "pub type Person {\n"
+    <> "  Person(name: String, age: Int, tags: List(String))\n"
+    <> "}\n\n"
+    <> "pub type Shape {\n"
+    <> "  Circle(radius: Int, label: String)\n"
+    <> "  Rect(w: Int, h: Int, label: String)\n"
+    <> "}\n\n"
+    <> "pub type Pair {\n"
+    <> "  Pair(Int, second: String)\n"
+    <> "}\n"
+
+  let lib_src =
+    "import record_update/types.{type Person, type Shape, Circle, Person, Rect}\n\n"
+    <> "pub fn rename(p: Person, name: String) -> Person {\n"
+    <> "  Person(..p, name:)\n"
+    <> "}\n\n"
+    <> "pub fn birthday(p: Person) -> Person {\n"
+    <> "  Person(..p, age: p.age + 1)\n"
+    <> "}\n\n"
+    <> "pub fn make() -> Person {\n"
+    <> "  Person(\"ann\", 30, [\"a\"])\n"
+    <> "}\n\n"
+    <> "pub fn relabel(s: Shape, label: String) -> Shape {\n"
+    <> "  case s {\n"
+    <> "    Circle(..) -> Circle(..s, label: label)\n"
+    <> "    Rect(..) -> Rect(..s, label: label)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn from_call() -> Person {\n"
+    <> "  Person(..make(), name: \"bob\", tags: [])\n"
+    <> "}\n"
+
+  let test_src =
+    "import record_update\n"
+    <> "import record_update/types.{Circle, Pair, Person, Rect}\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn record_update_test() {\n"
+    <> "  let p = record_update.make()\n"
+    <> "  assert record_update.rename(p, \"zed\") == Person(\"zed\", 30, [\"a\"])\n"
+    <> "  assert record_update.birthday(p) == Person(\"ann\", 31, [\"a\"])\n"
+    <> "  assert p == Person(\"ann\", 30, [\"a\"])\n"
+    <> "  assert record_update.from_call() == Person(\"bob\", 30, [])\n"
+    <> "  let chained = Person(..Person(..p, age: 1), name: \"c\")\n"
+    <> "  assert chained == Person(\"c\", 1, [\"a\"])\n"
+    <> "  assert record_update.relabel(Circle(2, \"x\"), \"y\") == Circle(2, \"y\")\n"
+    <> "  assert record_update.relabel(Rect(1, 2, \"x\"), \"y\") == Rect(1, 2, \"y\")\n"
+    <> "  let pr = Pair(7, \"a\")\n"
+    <> "  assert Pair(..pr, second: \"b\") == Pair(7, \"b\")\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/record_update.gleam"),
+      contents: lib_src,
+    )
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      root,
+      "src/record_update",
+    ))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/record_update/types.gleam"),
+      contents: types_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/record_update_test.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  let check_res =
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+  assert check_res.exit_code == 0
+
+  let test_wasm =
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
+  assert test_wasm.exit_code == 0
+  assert string.contains(test_wasm.output, "passed: 1, failed: 0")
+
+  let test_gc =
+    cmd.run(
+      command: "moon",
+      args: ["test", "--target", "wasm-gc"],
+      cwd: out_dir,
+    )
+  assert test_gc.exit_code == 0
+  assert string.contains(test_gc.output, "passed: 1, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
 pub fn example_gleam_tour_moon_run_test() {
   let fixture_dir = "examples/gleam_tour"
   let out_dir = "build/test_fixtures/gleam_tour_mbt"
