@@ -8,12 +8,14 @@ import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
+import gleam/set
 import index/symbol_table
 import lower/desugar
 import lower/tco
 import project/ffi_config
 import project/interface.{type PackageInterface, PackageInterface}
 import project/loader.{type LoadedDependency}
+import project/moonbit_ffi
 import project/prepass.{type PrepassResult}
 import project/staging
 import simplifile
@@ -25,6 +27,7 @@ pub type TranspileSummary {
     version: String,
     out_dir: String,
     emitted_modules: List(String),
+    local_moonbit_packages: List(String),
   )
 }
 
@@ -157,11 +160,28 @@ pub fn transpile_project(
     rev_refs,
   ))
 
+  let emitted_shim_dirs =
+    stdlib_runtime.resolve_shim_packages(rev_refs)
+    |> list.map(fn(shim) { shim.pkg_dir })
+  let module_pkg_dirs =
+    list.map(all_modules, fn(entry) { pkg_config.module_to_pkg_dir(entry.1) })
+  let reserved_pkg_dirs =
+    ["gprelude", ..list.append(module_pkg_dirs, emitted_shim_dirs)]
+    |> set.from_list
+
+  use local_moonbit_packages <- result.try(moonbit_ffi.copy_local_packages(
+    project_root,
+    project_name,
+    out_dir,
+    reserved_pkg_dirs,
+  ))
+
   Ok(TranspileSummary(
     project_name:,
     version:,
     out_dir:,
     emitted_modules: list.reverse(rev_emitted),
+    local_moonbit_packages:,
   ))
 }
 

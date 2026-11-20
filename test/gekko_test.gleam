@@ -8,6 +8,7 @@ import glance
 import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/set
 import gleam/string
 import gleeunit
 import index/symbol_table
@@ -20,6 +21,7 @@ import project/cmd
 import project/ffi_config
 import project/interface
 import project/loader
+import project/moonbit_ffi
 import project/prepass
 import project/staging
 import project/workspace
@@ -2375,6 +2377,138 @@ pub fn wit_wasmtime_runtime_e2e_test() {
   }
 
   let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn moonbit_ffi_collision_and_loose_file_error_test() {
+  let root = "build/test_fixtures/mbt_ffi_errors"
+  let out_dir = "build/test_fixtures/mbt_ffi_errors_out"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  // 1. Loose .mbt file in moonbit/ root must fail clearly.
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/stray.mbt"),
+      contents: "pub fn x() -> Int { 1 }\n",
+    )
+    == Ok(Nil)
+  let assert Error(loose_err) =
+    moonbit_ffi.copy_local_packages(
+      root,
+      "demo",
+      out_dir,
+      set.from_list(["gprelude"]),
+    )
+  assert string.contains(loose_err, "Loose MoonBit file 'stray.mbt'")
+
+  // 2. Package colliding with gprelude must fail clearly.
+  let _ = simplifile.delete_file(at: filepath.join(root, "moonbit/stray.mbt"))
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/gprelude"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/gprelude/bad.mbt"),
+      contents: "pub fn x() -> Int { 1 }\n",
+    )
+    == Ok(Nil)
+  let assert Error(prelude_err) =
+    moonbit_ffi.copy_local_packages(
+      root,
+      "demo",
+      out_dir,
+      set.from_list(["gprelude"]),
+    )
+  assert string.contains(
+    prelude_err,
+    "collides with generated package directory 'gprelude'",
+  )
+
+  // 3. Package colliding with a Gleam module directory in workspace.transpile_project must fail.
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/demo"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/demo.gleam"),
+      contents: "pub fn main() -> Nil { Nil }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/demo/extra.mbt"),
+      contents: "pub fn x() -> Int { 1 }\n",
+    )
+    == Ok(Nil)
+  let assert Error(mod_err) = workspace.transpile_project(root, out_dir)
+  assert string.contains(
+    mod_err,
+    "collides with generated package directory 'demo'",
+  )
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn example_moonbit_ffi_e2e_test() {
+  let fixture_dir = "examples/moonbit_ffi"
+  let out_dir = "build/test_fixtures/moonbit_ffi_mbt"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  stage_offline_stdlib(fixture_dir)
+
+  let assert Ok(summary) = workspace.transpile_project(fixture_dir, out_dir)
+  assert summary.project_name == "moonbit_ffi"
+  assert summary.local_moonbit_packages == ["byte_ffi", "text_ffi"]
+
+  // Verify auto-generated moon.pkg for text_ffi and verbatim copy for byte_ffi.
+  let assert Ok(gen_pkg) =
+    simplifile.read(from: filepath.join(out_dir, "text_ffi/moon.pkg"))
+  assert string.contains(gen_pkg, "\"moonbit_ffi/gprelude\" @gprelude")
+  let assert Ok(copied_pkg) =
+    simplifile.read(from: filepath.join(out_dir, "byte_ffi/moon.pkg"))
+  assert string.contains(copied_pkg, "\"moonbitlang/core/buffer\" @buffer")
+
+  let check_res =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_res.exit_code == 0
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "moonbit_ffi", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert string.contains(run_wasm.output, "shout=HELLO MOONBIT!")
+  assert string.contains(run_wasm.output, "upper=GLEAM,FFI")
+  assert string.contains(run_wasm.output, "sum_squares=29")
+  assert string.contains(run_wasm.output, "utf8_bytes=12")
+  assert string.contains(run_wasm.output, "pow=1024.0")
+  assert string.contains(run_wasm.output, "sin0=0.0,cos0=1.0")
+
+  let run_js =
+    cmd.run(
+      command: "moon",
+      args: ["run", "moonbit_ffi", "--target", "js"],
+      cwd: out_dir,
+    )
+  assert run_js.exit_code == 0
+  assert string.contains(run_js.output, "shout=HELLO MOONBIT!")
+  assert string.contains(run_js.output, "pow=1024.0")
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
