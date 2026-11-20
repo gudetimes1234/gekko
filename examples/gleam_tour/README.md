@@ -1,14 +1,13 @@
 # `gleam_tour` Example
 
-A complete, runnable translation of the official Gleam Language Tour compiled through `gekko` to MoonBit.
+An original Orbital Station Simulator written in pure Gleam to exercise Gleam's language features—primitives, closures, pipelines, pattern matching, tail-recursive loops, custom types, record updates, opaque types, and standard library modules—compiled through `gekko` to MoonBit.
 
 ## What It Demonstrates
 
-- **Basics (`src/tour/basics.gleam`):** 64-bit integers (`Int64`), floats (`Double`), booleans, strings, assignments, and blocks.
-- **Functions (`src/tour/functions.gleam`):** Higher-order functions, generics, anonymous closures, captures, and pipelines (`|>`).
-- **Flow Control (`src/tour/flow_control.gleam`):** `case` pattern matching, guards, list/tuple destructuring, and tail-recursive loops (lowered by `gekko` to MoonBit functional `for` loops).
-- **Data Types (`src/tour/data_types.gleam`):** Custom types, multi-variant enums, uniform field accessors, immutable record updates (`Type(..val, field: new)`), and opaque types (`Positive`).
-- **Standard Library & Advanced Features (`src/tour/stdlib_and_advanced.gleam`):** `gleam/list`, `gleam/dict`, `gleam/option`, `gleam/result`, `use` expressions, `let assert`, `assert`, `echo` (with `<file>:<line>` stderr formatting), and `string.inspect`.
+- **Telemetry (`src/station/telemetry.gleam`):** Constants (`const`), 64-bit integers (`Int64`), floats (`Double`), booleans, string concatenation and escapes, shadowing, block expressions, and tuples.
+- **Commands (`src/station/commands.gleam`):** Labelled arguments, anonymous functions, function captures (`_`), generic higher-order functions, pipelines (`|>`), and `use` expressions.
+- **Navigation (`src/station/navigation.gleam`):** `case` pattern matching with guards (`if`), tuple/list destructuring, and tail-recursive loops (lowered by `gekko` to MoonBit functional `for` loops).
+- **Manifest (`src/station/manifest.gleam`):** Multi-variant custom types, record types with uniform field accessors and immutable record updates (`Thruster(..t, fuel_kg: ...)`), `opaque type` (`DockingCode`), `Option`, `Result`, `let assert`, `assert`, `list`, `dict`, `string.inspect`, and `echo`.
 
 ## Project Layout
 
@@ -16,13 +15,12 @@ A complete, runnable translation of the official Gleam Language Tour compiled th
 examples/gleam_tour/
 ├── gleam.toml                       # Declares gleam_stdlib and gleam_json dependencies
 └── src/
-    ├── gleam_tour.gleam             # Entrypoint (`main`) and opaque type checks
-    └── tour/
-        ├── basics.gleam
-        ├── data_types.gleam
-        ├── flow_control.gleam
-        ├── functions.gleam
-        └── stdlib_and_advanced.gleam
+    ├── gleam_tour.gleam             # Entrypoint (`main`)
+    └── station/
+        ├── commands.gleam
+        ├── manifest.gleam
+        ├── navigation.gleam
+        └── telemetry.gleam
 ```
 
 ## How It Was Created

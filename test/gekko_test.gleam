@@ -1917,43 +1917,16 @@ pub fn example_gleam_tour_moon_run_test() {
       cwd: out_dir,
     )
   assert run_wasm.exit_code == 0
-  assert string.contains(run_wasm.output, "Hello, Joe!")
-  assert string.contains(run_wasm.output, "=== Basics: Ints ===")
   assert string.contains(
     run_wasm.output,
-    "=== Functions: Generics & Pipelines ===",
+    "=== Orbital Station Simulator (gleam_tour) ===",
   )
-  assert string.contains(
-    run_wasm.output,
-    "=== Flow Control: Case Expressions & Variable Patterns ===",
-  )
-  assert string.contains(
-    run_wasm.output,
-    "=== Data Types: Records, Accessors & Updates ===",
-  )
-  assert string.contains(
-    run_wasm.output,
-    "=== Standard Library: Dict & Option Modules ===",
-  )
-  assert string.contains(
-    run_wasm.output,
-    "=== Advanced Features: Use, Assert & Echo ===",
-  )
-  assert string.contains(run_wasm.output, "src/tour/data_types.gleam:")
-  assert string.contains(run_wasm.output, "Person(\"Amy\", 26, True)")
-  assert string.contains(run_wasm.output, "<<24, 3>>")
-  assert string.contains(run_wasm.output, "dict.from_list([#(\"Lucy\", 13)])")
-  assert string.contains(
-    run_wasm.output,
-    "Reversed via external fallback\n[5, 4, 3, 2, 1]",
-  )
-  assert string.contains(run_wasm.output, "[Basics]")
-  assert string.contains(run_wasm.output, "[Functions]")
-  assert string.contains(run_wasm.output, "[Flow Control]")
-  assert string.contains(run_wasm.output, "[Data Types]")
-  assert string.contains(run_wasm.output, "[Standard Library]")
-  assert string.contains(run_wasm.output, "[Advanced Features]")
-  assert string.contains(run_wasm.output, "[Gleam Tour Complete]")
+  assert string.contains(run_wasm.output, "[Station Telemetry]")
+  assert string.contains(run_wasm.output, "[Station Commands]")
+  assert string.contains(run_wasm.output, "[Station Navigation]")
+  assert string.contains(run_wasm.output, "[Station Manifest]")
+  assert string.contains(run_wasm.output, "=== All station checks passed ===")
+  assert string.contains(run_wasm.output, "src/station/manifest.gleam:")
 
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
