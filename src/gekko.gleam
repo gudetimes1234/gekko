@@ -6,6 +6,7 @@ import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import moonbit/bindgen
 import project/cmd
 import project/workspace
 import wit/gleam_gen
@@ -30,7 +31,22 @@ type CliAction {
     out: Option(String),
     output: Option(String),
   )
+  MoonbitBindAction(
+    root: String,
+    package: String,
+    module: Option(String),
+    out: Option(String),
+  )
   HelpAction
+}
+
+type BindFlags {
+  BindFlags(
+    root: String,
+    package: Option(String),
+    module: Option(String),
+    out: Option(String),
+  )
 }
 
 type WitFlags {
@@ -72,6 +88,8 @@ pub fn main() -> Nil {
       run_wit_check(root, wit_dir, world, out)
     Ok(WitBuildAction(root:, wit_dir:, world:, out:, output:)) ->
       run_wit_build(root, wit_dir, world, out, output)
+    Ok(MoonbitBindAction(root:, package:, module:, out:)) ->
+      run_moonbit_bind(root, package, module, out)
   }
 }
 
@@ -196,6 +214,33 @@ fn run_wit_build(
   }
 }
 
+fn run_moonbit_bind(
+  root: String,
+  package: String,
+  module: Option(String),
+  out: Option(String),
+) -> Nil {
+  let out_dir = option.unwrap(out, filepath.join(root, "build/moonbit"))
+  case bindgen.bind_package(root, package, module, out_dir) {
+    Error(err) -> {
+      io.println_error("gekko moonbit bind error: " <> err)
+      halt(1)
+    }
+    Ok(res) -> {
+      io.println(
+        "Generated Gleam module: src/" <> res.gleam_module_path <> ".gleam",
+      )
+      case res.adapter_pkg_dir {
+        Some(dir) -> io.println("Generated MoonBit adapter: moonbit/" <> dir)
+        None -> Nil
+      }
+      list.each(res.skipped_items, fn(s) {
+        io.println_error("Warning (skipped " <> s.0 <> "): " <> s.1)
+      })
+    }
+  }
+}
+
 fn parse_args(args: List(String)) -> Result(CliAction, String) {
   case args {
     [] | ["--help"] | ["-h"] | ["help"] -> Ok(HelpAction)
@@ -239,7 +284,44 @@ fn parse_args(args: List(String)) -> Result(CliAction, String) {
       ))
     }
     ["wit", ..] -> Error("Expected `gekko wit <gen|check|build> [flags]`")
+    ["moonbit", "bind", ..rest] -> {
+      use f <- result.try(parse_bind_flags(
+        rest,
+        BindFlags(root: ".", package: None, module: None, out: None),
+      ))
+      case f.package {
+        Some(pkg) ->
+          Ok(MoonbitBindAction(
+            root: f.root,
+            package: pkg,
+            module: f.module,
+            out: f.out,
+          ))
+        None -> Error("Expected `<pkg>` after `gekko moonbit bind`")
+      }
+    }
+    ["moonbit", ..] -> Error("Expected `gekko moonbit bind <pkg> [flags]`")
     [unknown, ..] -> Error("Unknown subcommand: " <> unknown)
+  }
+}
+
+fn parse_bind_flags(
+  args: List(String),
+  acc: BindFlags,
+) -> Result(BindFlags, String) {
+  case args {
+    [] -> Ok(acc)
+    ["--root", val, ..rest] ->
+      parse_bind_flags(rest, BindFlags(..acc, root: val))
+    ["--module", val, ..rest] ->
+      parse_bind_flags(rest, BindFlags(..acc, module: Some(val)))
+    ["--out", val, ..rest] ->
+      parse_bind_flags(rest, BindFlags(..acc, out: Some(val)))
+    [val, ..rest] ->
+      case acc.package {
+        None -> parse_bind_flags(rest, BindFlags(..acc, package: Some(val)))
+        Some(_) -> Error("Unknown or unexpected argument: " <> val)
+      }
   }
 }
 
@@ -300,9 +382,10 @@ fn print_usage() -> Nil {
     "  gekko build     [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
     "  gekko test      [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
     "  gekko run       [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
-    "  gekko wit gen   [--root <dir>] [--wit <dir>] [--world <name>]",
-    "  gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]",
-    "  gekko wit build [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>] [--output <file.wasm>]",
+    "  gekko wit gen      [--root <dir>] [--wit <dir>] [--world <name>]",
+    "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]",
+    "  gekko wit build    [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>] [--output <file.wasm>]",
+    "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--out <dir>]",
   ]
   list.each(lines, io.println)
 }

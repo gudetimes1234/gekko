@@ -17,6 +17,8 @@ import lower/ir
 import lower/mangle
 import lower/pattern
 import lower/tco
+import moonbit/bindgen
+import moonbit/mbti
 import project/cmd
 import project/ffi_config
 import project/interface
@@ -2656,5 +2658,250 @@ pub fn external_type_opaque_alias_and_record_embedding_e2e_test() {
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn mbti_parser_stdlib_math_and_buffer_test() {
+  let moon_home = case cmd.get_env("MOON_HOME") {
+    Ok(v) if v != "" -> v
+    _ -> {
+      let assert Ok(h) = cmd.get_env("HOME")
+      filepath.join(h, ".moon")
+    }
+  }
+
+  let math_path = filepath.join(moon_home, "lib/core/math/pkg.generated.mbti")
+  let assert Ok(math_src) = simplifile.read(from: math_path)
+  let assert Ok(math_pkg) = mbti.parse_mbti(math_src)
+  assert math_pkg.package_name == "moonbitlang/core/math"
+  assert list.contains(math_pkg.imports, #("moonbitlang/core/bigint", "bigint"))
+  assert list.contains(math_pkg.imports, #("moonbitlang/core/random", "random"))
+  assert list.any(math_pkg.constants, fn(c) { c.name == "PI" })
+  assert list.any(math_pkg.functions, fn(f) {
+    f.name == "sin" && !f.is_deprecated
+  })
+  assert list.any(math_pkg.functions, fn(f) {
+    f.name == "is_probable_prime" && list.length(f.params) == 3
+  })
+  assert list.any(math_pkg.functions, fn(f) {
+    f.name == "maximum" && f.is_deprecated
+  })
+
+  let buf_path = filepath.join(moon_home, "lib/core/buffer/pkg.generated.mbti")
+  let assert Ok(buf_src) = simplifile.read(from: buf_path)
+  let assert Ok(buf_pkg) = mbti.parse_mbti(buf_src)
+  assert buf_pkg.package_name == "moonbitlang/core/buffer"
+  assert list.any(buf_pkg.functions, fn(f) {
+    f.owner_type == Some("Buffer") && f.name == "Buffer"
+  })
+  assert list.any(buf_pkg.functions, fn(f) {
+    f.owner_type == Some("Buffer") && f.name == "write_string_utf8"
+  })
+  assert list.any(buf_pkg.functions, fn(f) {
+    f.name == "new" && f.is_deprecated
+  })
+
+  // Inline complex fixture covering pub(all) struct, enum, private-fields struct, tuple, and bounds.
+  let inline_mbti =
+    "// Generated\n"
+    <> "package \"demo/sample\"\n\n"
+    <> "pub(all) struct Summary {\n  count : Int32\n  total : Int64\n}\n\n"
+    <> "pub struct Hidden {\n  tag : String\n  // private fields\n}\n\n"
+    <> "pub(all) enum Mode {\n  Fast\n  Exact(Int32)\n}\n\n"
+    <> "pub fn summarize(Array[Int32], scale? : Int32) -> Summary\n"
+    <> "pub fn[T : Show] debug_str(T) -> String\n"
+  let assert Ok(parsed_inline) = mbti.parse_mbti(inline_mbti)
+  assert parsed_inline.package_name == "demo/sample"
+  assert list.length(parsed_inline.types) == 3
+  assert list.length(parsed_inline.functions) == 2
+  Nil
+}
+
+pub fn moonbit_bindgen_stdlib_buffer_e2e_test() {
+  let root = "build/test_fixtures/bindgen_buffer_e2e"
+  let out_dir = "build/test_fixtures/bindgen_buffer_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  stage_offline_stdlib(root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"bindgen_buf\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(res) =
+    bindgen.bind_package(
+      root,
+      "moonbitlang/core/buffer",
+      Some("ffi/buffer"),
+      out_dir,
+    )
+  assert res.gleam_module_path == "ffi/buffer"
+  assert res.adapter_pkg_dir == Some("buffer_adapter")
+
+  let main_src =
+    "import ffi/buffer\n"
+    <> "import gleam/int\n"
+    <> "import gleam/io\n"
+    <> "import gleam/option.{None, Some}\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  let b1 = buffer.new_buffer(None)\n"
+    <> "  buffer.write_string_utf16le(b1, \"hello \")\n"
+    <> "  buffer.write_string_utf16le(b1, \"moonbit\")\n"
+    <> "  let len1 = buffer.length(b1)\n"
+    <> "  let s1 = buffer.to_string(b1)\n"
+    <> "  assert s1 == \"hello moonbit\"\n"
+    <> "  assert len1 == 26\n"
+    <> "  let b2 = buffer.new_buffer(Some(32))\n"
+    <> "  buffer.write_byte(b2, 65)\n"
+    <> "  assert buffer.length(b2) == 1\n"
+    <> "  assert buffer.to_bytes(b2) == <<65>>\n"
+    <> "  io.println(\"buf=\" <> s1 <> \",len=\" <> int.to_string(len1))\n"
+    <> "}\n"
+  assert simplifile.write(
+      to: filepath.join(root, "src/bindgen_buf.gleam"),
+      contents: main_src,
+    )
+    == Ok(Nil)
+
+  let check_gleam = cmd.run(command: "gleam", args: ["check"], cwd: root)
+  assert check_gleam.exit_code == 0
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  let check_moon =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_moon.exit_code == 0
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "bindgen_buf", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert string.contains(run_wasm.output, "buf=hello moonbit,len=26")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn moonbit_bindgen_local_pkg_e2e_test() {
+  let root = "build/test_fixtures/bindgen_local_e2e"
+  let out_dir = "build/test_fixtures/bindgen_local_mbt"
+  let info_out = "build/test_fixtures/bindgen_local_info_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  let _ = simplifile.delete(file_or_dir_at: info_out)
+
+  stage_offline_stdlib(root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/stats"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"bindgen_local\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/bindgen_local.gleam"),
+      contents: "pub fn main() -> Nil {\n  Nil\n}\n",
+    )
+    == Ok(Nil)
+
+  let stats_mbt =
+    "///|\n"
+    <> "pub(all) struct Summary {\n  count : Int\n  total : Int64\n}\n\n"
+    <> "///|\n"
+    <> "pub(all) enum Mode {\n  Fast\n  Exact(Int)\n}\n\n"
+    <> "///|\n"
+    <> "pub fn summarize(xs : Array[Int], scale~ : Int = 1) -> Summary {\n"
+    <> "  let mut sum = 0L\n"
+    <> "  for x in xs {\n"
+    <> "    sum = sum + (x * scale).to_int64()\n"
+    <> "  }\n"
+    <> "  { count: xs.length(), total: sum }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn apply_mode(m : Mode, base : Int) -> Int {\n"
+    <> "  match m {\n"
+    <> "    Fast => base * 2\n"
+    <> "    Exact(k) => base + k\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn checked_div(a : Int, b : Int) -> Int raise {\n"
+    <> "  if b == 0 {\n"
+    <> "    raise Failure::Failure(\"div by zero\")\n"
+    <> "  }\n"
+    <> "  a / b\n"
+    <> "}\n"
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/stats/stats.mbt"),
+      contents: stats_mbt,
+    )
+    == Ok(Nil)
+
+  let assert Ok(res) =
+    bindgen.bind_package(root, "moonbit/stats", Some("ffi/stats"), info_out)
+  assert res.gleam_module_path == "ffi/stats"
+  assert res.adapter_pkg_dir == Some("stats_adapter")
+
+  let main_src =
+    "import ffi/stats\n"
+    <> "import gleam/int\n"
+    <> "import gleam/io\n"
+    <> "import gleam/option.{None, Some}\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  let s1 = stats.summarize([2, 3, 5], None)\n"
+    <> "  assert stats.summary_count(s1) == 3\n"
+    <> "  assert stats.summary_total(s1) == 10\n"
+    <> "  let s2 = stats.summarize([2, 3], Some(10))\n"
+    <> "  assert stats.summary_total(s2) == 50\n"
+    <> "  let s3 = stats.make_summary(4, 99)\n"
+    <> "  assert stats.summary_count(s3) == 4 && stats.summary_total(s3) == 99\n"
+    <> "  assert stats.apply_mode(stats.mode_fast(), 6) == 12\n"
+    <> "  assert stats.apply_mode(stats.mode_exact(7), 6) == 13\n"
+    <> "  assert stats.checked_div(12, 3) == Ok(4)\n"
+    <> "  let div_err = stats.checked_div(12, 0)\n"
+    <> "  let assert Error(_) = div_err\n"
+    <> "  io.println(\"stats=\" <> int.to_string(stats.summary_total(s2)))\n"
+    <> "}\n"
+  assert simplifile.write(
+      to: filepath.join(root, "src/bindgen_local.gleam"),
+      contents: main_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  let check_moon =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_moon.exit_code == 0
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "bindgen_local", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert string.contains(run_wasm.output, "stats=50")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  let _ = simplifile.delete(file_or_dir_at: info_out)
   Nil
 }

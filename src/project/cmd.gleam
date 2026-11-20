@@ -10,6 +10,14 @@ fn ffi_run_command(
   cwd: String,
 ) -> #(Int, String)
 
+@external(erlang, "gekko_ffi", "get_env")
+fn ffi_get_env(name: String) -> Result(String, Nil)
+
+/// Read an OS environment variable as UTF-8, returning `Error(Nil)` if unset.
+pub fn get_env(name: String) -> Result(String, Nil) {
+  ffi_get_env(name)
+}
+
 /// Run an external executable with arguments in `cwd` (or current directory if `""`).
 pub fn run(
   command command: String,

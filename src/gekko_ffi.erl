@@ -1,5 +1,5 @@
 -module(gekko_ffi).
--export([run_command/3]).
+-export([run_command/3, get_env/1]).
 
 run_command(Command, Args, Cwd) ->
     CmdStr = unicode:characters_to_list(Command, utf8),
@@ -40,4 +40,12 @@ collect_port(Port, Acc) ->
             collect_port(Port, [Data | Acc]);
         {Port, {exit_status, Status}} ->
             {Status, iolist_to_binary(lists:reverse(Acc))}
+    end.
+
+
+get_env(Name) ->
+    NameStr = unicode:characters_to_list(Name, utf8),
+    case os:getenv(NameStr) of
+        false -> {error, nil};
+        Val -> {ok, unicode:characters_to_binary(Val)}
     end.
