@@ -17,8 +17,8 @@ pub fn emit_moon_mod(project_name: String, version: String) -> String {
   emit_moon_mod_with_deps(project_name, version, [])
 }
 
-/// Generate the root `moon.mod` file including third-party `[moonbit.deps]`
-/// entries as an `import { ... }` block.
+/// Generate the root `moon.mod` file including third-party `moonbit/moon.mod`
+/// dependency entries as an `import { ... }` block.
 pub fn emit_moon_mod_with_deps(
   project_name: String,
   version: String,

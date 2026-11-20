@@ -379,7 +379,7 @@ fn read_mbti_from_registry_cache(
       let #(dep_mod, _) = entry
       rel_pkg == dep_mod || string.starts_with(rel_pkg, dep_mod <> "/")
     })
-    |> result.map_error(fn(_) { "not found in [moonbit.deps]" }),
+    |> result.map_error(fn(_) { "not found in moonbit/moon.mod" }),
   )
   use moon_home <- result.try(resolve_moon_home())
   let zip_path =

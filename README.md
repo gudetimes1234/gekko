@@ -87,34 +87,38 @@ pub fn read_counter(c: Counter) -> Int {
 
 ### 2. Automatic Binding Generation (`gekko moonbit bind`)
 
-Generate Gleam stubs (`src/ffi/<pkg>.gleam`) and any needed MoonBit adapter (`moonbit/<pkg>_adapter/`) directly from a standard-library, local, or `[moonbit.deps]` package:
+Generate Gleam stubs (`src/ffi/<pkg>.gleam`) and any needed MoonBit adapter (`moonbit/<pkg>_adapter/`) directly from a standard-library, local, or `moonbit/moon.mod` dependency package:
 
 ```bash
 gekko moonbit bind moonbitlang/x/fs --root examples/file_io
 ```
 
-### 3. Third-Party MoonBit Dependencies (`[moonbit.deps]`)
+### 3. Third-Party MoonBit Dependencies (`moonbit/moon.mod`)
 
-Declare registry dependencies in `gekko.toml` (or `[gekko.moonbit.deps]` in `gleam.toml`):
+Declare registry dependencies in `<project_root>/moonbit/moon.mod` using MoonBit's native manifest format (you can also manage it with `moon -C moonbit add <pkg>`):
 
-```toml
-# gekko.toml
-[moonbit.deps]
-"moonbitlang/x" = "0.5.7"
+```moonbit
+// moonbit/moon.mod
+name = "file_io"
+version = "0.1.0"
+
+import {
+  "moonbitlang/x@0.5.7",
+}
 ```
 
-### 4. Raw `@external(moonbit, ...)` & Sidecar Overrides (`gekko.toml`)
+### 4. Raw `@external(moonbit, ...)` & Dependency Overrides
 
 ```gleam
 @external(moonbit, "my_org/math", "fast_sqrt")
 pub fn fast_sqrt(x: Float) -> Float
 ```
 
-Or override functions in third-party Hex dependencies without modifying `build/packages/`:
+Or override functions in third-party Hex dependencies in `gleam.toml` (`[tools.gekko.overrides."..."]`) without modifying `build/packages/`:
 
 ```toml
-# gekko.toml
-[overrides."simplifile.read"]
+# gleam.toml
+[tools.gekko.overrides."simplifile.read"]
 package = "wasi/filesystem"
 function = "read_to_string"
 ```
@@ -131,7 +135,7 @@ Each example includes its own `README.md` with setup, generation commands (where
 | **Weather App** | `gleam/json` & `gleam/dynamic/decode` with custom records and pipelines | [`examples/weather_app/README.md`](./examples/weather_app/README.md) |
 | **WIT Greeter** | Wasm Component (`wit/world.wit`, `gekko wit gen`, `wit check`, `wit build`) | [`examples/wit_greeter/README.md`](./examples/wit_greeter/README.md) |
 | **MoonBit FFI** | Local `moonbit/` packages, `moonbitlang/core/math`, and `@external_type` | [`examples/moonbit_ffi/README.md`](./examples/moonbit_ffi/README.md) |
-| **File I/O** | Reading/writing files via `[moonbit.deps]` (`moonbitlang/x/fs`) + `gekko moonbit bind` | [`examples/file_io/README.md`](./examples/file_io/README.md) |
+| **File I/O** | Reading/writing files via `moonbit/moon.mod` (`moonbitlang/x/fs`) + `gekko moonbit bind` | [`examples/file_io/README.md`](./examples/file_io/README.md) |
 
 ---
 
