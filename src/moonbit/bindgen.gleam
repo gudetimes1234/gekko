@@ -12,6 +12,7 @@ import moonbit/mbti.{
   MbtiStruct, MbtiTraitObject, MbtiTuple,
 }
 import project/cmd
+import project/ffi_config
 import project/loader
 import project/workspace
 import simplifile
@@ -306,47 +307,100 @@ fn locate_mbti_source(
             True -> string.drop_start(pkg, 8)
             False -> pkg
           }
-          use _ <- result.try(workspace.transpile_project(project_root, out_dir))
-          let info_res = cmd.run(command: "moon", args: ["info"], cwd: out_dir)
-          case info_res.exit_code {
-            0 -> {
-              let local_mbti =
-                filepath.join(out_dir, rel_pkg <> "/pkg.generated.mbti")
-              let cake_mbti =
-                filepath.join(
-                  out_dir,
-                  ".mooncakes/" <> rel_pkg <> "/pkg.generated.mbti",
-                )
-              case simplifile.is_file(local_mbti) {
-                Ok(True) -> {
-                  use src <- result.try(read_file_err(local_mbti))
-                  Ok(#(src, "ffi/" <> last_segment_snake(rel_pkg)))
-                }
-                _ ->
-                  case simplifile.is_file(cake_mbti) {
+          let is_local_dir =
+            simplifile.is_directory(filepath.join(
+              project_root,
+              "moonbit/" <> rel_pkg,
+            ))
+            == Ok(True)
+          case
+            !is_local_dir,
+            read_mbti_from_registry_cache(project_root, rel_pkg)
+          {
+            True, Ok(found) -> Ok(found)
+            _, _ -> {
+              use _ <- result.try(workspace.transpile_project(
+                project_root,
+                out_dir,
+              ))
+              let info_res =
+                cmd.run(command: "moon", args: ["info"], cwd: out_dir)
+              case info_res.exit_code {
+                0 -> {
+                  let local_mbti =
+                    filepath.join(out_dir, rel_pkg <> "/pkg.generated.mbti")
+                  let cake_mbti =
+                    filepath.join(
+                      out_dir,
+                      ".mooncakes/" <> rel_pkg <> "/pkg.generated.mbti",
+                    )
+                  case simplifile.is_file(local_mbti) {
                     Ok(True) -> {
-                      use src <- result.try(read_file_err(cake_mbti))
+                      use src <- result.try(read_file_err(local_mbti))
                       Ok(#(src, "ffi/" <> last_segment_snake(rel_pkg)))
                     }
                     _ ->
-                      Error(
-                        "Could not find pkg.generated.mbti for package '"
-                        <> pkg
-                        <> "' after `moon info`",
-                      )
+                      case simplifile.is_file(cake_mbti) {
+                        Ok(True) -> {
+                          use src <- result.try(read_file_err(cake_mbti))
+                          Ok(#(src, "ffi/" <> last_segment_snake(rel_pkg)))
+                        }
+                        _ ->
+                          Error(
+                            "Could not find pkg.generated.mbti for package '"
+                            <> pkg
+                            <> "' after `moon info`",
+                          )
+                      }
                   }
+                }
+                _ ->
+                  Error(
+                    "`moon info` failed while inspecting package '"
+                    <> pkg
+                    <> "':\n"
+                    <> info_res.output,
+                  )
               }
             }
-            _ ->
-              Error(
-                "`moon info` failed while inspecting package '"
-                <> pkg
-                <> "':\n"
-                <> info_res.output,
-              )
           }
         }
       }
+  }
+}
+
+fn read_mbti_from_registry_cache(
+  project_root: String,
+  rel_pkg: String,
+) -> Result(#(String, String), String) {
+  use deps <- result.try(ffi_config.load_project_moonbit_deps(project_root))
+  use #(dep_mod, dep_ver) <- result.try(
+    list.find(deps, fn(entry) {
+      let #(dep_mod, _) = entry
+      rel_pkg == dep_mod || string.starts_with(rel_pkg, dep_mod <> "/")
+    })
+    |> result.map_error(fn(_) { "not found in [moonbit.deps]" }),
+  )
+  use moon_home <- result.try(resolve_moon_home())
+  let zip_path =
+    filepath.join(
+      moon_home,
+      "registry/cache/" <> dep_mod <> "/" <> dep_ver <> ".zip",
+    )
+  let inner_mbti = case rel_pkg == dep_mod {
+    True -> "pkg.generated.mbti"
+    False ->
+      string.drop_start(rel_pkg, string.length(dep_mod) + 1)
+      <> "/pkg.generated.mbti"
+  }
+  let unzip_res =
+    cmd.run(command: "unzip", args: ["-p", zip_path, inner_mbti], cwd: ".")
+  case unzip_res.exit_code == 0 && unzip_res.output != "" {
+    True -> Ok(#(unzip_res.output, "ffi/" <> last_segment_snake(rel_pkg)))
+    False ->
+      Error(
+        "failed to read '" <> inner_mbti <> "' from cached archive " <> zip_path,
+      )
   }
 }
 
@@ -1140,7 +1194,7 @@ fn build_adapter_fn(
         <> raw_call
         <> "\n    Ok("
         <> ok_expr
-        <> ")\n  } catch {\n    __err => Err(__err.to_string())\n  }"
+        <> ")\n  } catch {\n    __err => Err(Error::to_string(__err))\n  }"
       #(body_str, hk_final)
     }
   }

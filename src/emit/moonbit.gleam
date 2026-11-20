@@ -1513,7 +1513,7 @@ fn emit_pattern(pat: IrPattern, ctx: EmitCtx) -> #(String, EmitCtx) {
     IrPatString(val) -> #("\"" <> escape_string_literal(val) <> "\"", ctx)
     IrPatBool(True) -> #("true", ctx)
     IrPatBool(False) -> #("false", ctx)
-    IrPatUnit -> #("()", ctx)
+    IrPatUnit -> #("_", ctx)
     IrPatDiscard -> #("_", ctx)
     IrPatVar(name) -> #(name, ctx)
 

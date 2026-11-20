@@ -2994,3 +2994,83 @@ pub fn moonbit_deps_config_and_moon_mod_emission_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
+
+pub fn example_file_io_moonbit_deps_e2e_test() {
+  let fixture_dir = "examples/file_io"
+  let out_dir = "build/test_fixtures/file_io_mbt"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  stage_offline_stdlib(fixture_dir)
+
+  // Verify `gekko moonbit bind moonbitlang/x/fs` works against `[moonbit.deps]`
+  let assert Ok(bind_res) =
+    bindgen.bind_package(
+      fixture_dir,
+      "moonbitlang/x/fs",
+      Some("ffi/fs"),
+      out_dir,
+    )
+  assert bind_res.gleam_module_path == "ffi/fs"
+  assert bind_res.adapter_pkg_dir == Some("fs_adapter")
+  let fmt_ffi =
+    cmd.run(
+      command: "gleam",
+      args: ["format", "src/ffi/fs.gleam"],
+      cwd: fixture_dir,
+    )
+  assert fmt_ffi.exit_code == 0
+
+  let assert Ok(_) = workspace.transpile_project(fixture_dir, out_dir)
+
+  let assert Ok(moon_mod) =
+    simplifile.read(from: filepath.join(out_dir, "moon.mod"))
+  assert string.contains(moon_mod, "\"moonbitlang/x@0.5.7\"")
+
+  let assert Ok(sample_bits) =
+    simplifile.read_bits(from: filepath.join(fixture_dir, "sample.txt"))
+  assert simplifile.write_bits(
+      to: filepath.join(out_dir, "sample.txt"),
+      bits: sample_bits,
+    )
+    == Ok(Nil)
+
+  let check_res =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_res.exit_code == 0
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "file_io", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert string.contains(
+    run_wasm.output,
+    "first_line=Hello from Gleam + MoonBit file I/O!",
+  )
+  assert string.contains(run_wasm.output, "roundtrip=roundtrip-ok")
+  assert string.contains(run_wasm.output, "missing_is_err=True")
+
+  let run_js =
+    cmd.run(
+      command: "moon",
+      args: ["run", "file_io", "--target", "js"],
+      cwd: out_dir,
+    )
+  assert run_js.exit_code == 0
+  assert string.contains(
+    run_js.output,
+    "first_line=Hello from Gleam + MoonBit file I/O!",
+  )
+  assert string.contains(run_js.output, "roundtrip=roundtrip-ok")
+
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
+  let _ =
+    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}

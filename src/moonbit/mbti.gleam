@@ -247,7 +247,7 @@ fn take_until_closing_brace(
   case lines {
     [] -> #(list.reverse(rev_acc), [])
     [line, ..rest] ->
-      case string.trim(line) == "}" {
+      case string.starts_with(string.trim(line), "}") {
         True -> #(list.reverse(rev_acc), rest)
         False -> take_until_closing_brace(rest, [line, ..rev_acc])
       }
