@@ -4,7 +4,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 import gleam/string
-import index/stdlib_symbols
 import project/interface.{
   type PackageInterface, type ResolvedFunction, type ResolvedType,
   type ResolvedTypeDef, FnType, NamedType, TupleType, VariableType,
@@ -147,9 +146,8 @@ pub fn index_project_with_packages(
   pkg_interface: Option(PackageInterface),
   ffi_overrides: Dict(String, FfiKind),
 ) -> SymbolTable {
-  let base_modules = seed_builtin_stdlib_modules()
   let raw_modules =
-    list.fold(package_modules, base_modules, fn(acc, entry) {
+    list.fold(package_modules, dict.new(), fn(acc, entry) {
       let #(pkg_name, mod_name, ast_mod, prepass_res) = entry
       let mod_iface = get_module_interface(pkg_interface, mod_name)
       let indexed =
@@ -1015,6 +1013,23 @@ fn compute_transitive_type_flags(
   })
 }
 
+/// Return True for built-in standard/JSON external types whose MoonBit runtime
+/// representations implement `Eq`, `Debug`, `Hash`, and `@gprelude.GleamInspect`.
+pub fn is_builtin_inspectable_external(module: String, name: String) -> Bool {
+  case module, name {
+    "gleam/dict", "Dict"
+    | "gleam/dynamic", "Dynamic"
+    | "gleam/dynamic/decode", "Dynamic"
+    | "gleam/string_tree", "StringTree"
+    | "gleam/json", "Json"
+    | "gleam/option", "Option"
+    | "gleam", "Dynamic"
+    | "gleam", "UtfCodepoint"
+    -> True
+    _, _ -> False
+  }
+}
+
 fn type_key_has_function_field(
   key: #(String, String),
   all_types: Dict(#(String, String), #(Option(ExternalType), List(VariantInfo))),
@@ -1025,7 +1040,7 @@ fn type_key_has_function_field(
     False ->
       case dict.get(all_types, key) {
         Error(_) -> False
-        Ok(#(Some(_), _)) -> True
+        Ok(#(Some(_), _)) -> !is_builtin_inspectable_external(key.0, key.1)
         Ok(#(None, variants)) -> {
           let next_visited = set.insert(visited, key)
           list.any(variants, fn(variant) {
@@ -1066,70 +1081,293 @@ fn resolved_type_has_function(
   }
 }
 
-fn seed_builtin_stdlib_modules() -> Dict(String, ModuleSymbols) {
-  let dummy_type = glance.NamedType(glance.Span(0, 0), "Unit", None, [])
-  list.fold(stdlib_symbols.builtin_module_specs(), dict.new(), fn(acc, spec) {
-    let constructors =
-      list.fold(spec.constructors, dict.new(), fn(c_acc, c) {
-        let fields =
-          list.map(c.field_labels, fn(lbl) {
-            FieldInfo(label: lbl, ast_type: dummy_type, resolved_type: None)
-          })
-        let info =
-          ConstructorInfo(
-            module: spec.module_name,
-            type_name: c.type_name,
-            variant_name: c.variant_name,
-            fields:,
-          )
-        dict.insert(c_acc, c.variant_name, info)
-      })
+/// Compute the set of function names in `ast_mod` that are reachable from
+/// public functions, `main`, `*_test` tests, and public constants, stopping at
+/// functions mapped to a MoonBit FFI target.
+pub fn reachable_private_functions(
+  ast_mod: glance.Module,
+  functions: Dict(String, FunctionInfo),
+) -> Set(String) {
+  let active_fns =
+    ast_mod.functions
+    |> list.filter(fn(def) { !is_excluded_target(def.attributes) })
+    |> list.map(fn(def) { def.definition })
 
-    let functions =
-      list.fold(spec.functions, dict.new(), fn(f_acc, f) {
-        let params =
-          list.index_map(f.param_labels, fn(lbl, idx) {
-            let pname = case lbl {
-              Some(l) -> glance.Named(l)
-              None -> glance.Named("arg_" <> string.inspect(idx))
-            }
-            ParamInfo(
-              label: lbl,
-              name: pname,
-              ast_type: None,
-              resolved_type: None,
-            )
-          })
-        let info =
-          FunctionInfo(
-            module: spec.module_name,
-            name: f.name,
-            publicity: glance.Public,
-            arity: list.length(f.param_labels),
-            parameters: params,
-            return_type: None,
-            resolved: None,
-            ffi: None,
-            has_erlang_or_js_external: False,
-            has_gleam_body: True,
-          )
-        dict.insert(f_acc, f.name, info)
-      })
+  let fn_map =
+    list.fold(active_fns, dict.new(), fn(acc, f) { dict.insert(acc, f.name, f) })
 
-    let mod_syms =
-      ModuleSymbols(
-        name: spec.module_name,
-        source: "",
-        imports: [],
-        alias_to_module: dict.new(),
-        unqualified_values: dict.new(),
-        unqualified_types: dict.new(),
-        types: dict.new(),
-        type_aliases: dict.new(),
-        constructors:,
-        functions:,
-        constants: dict.new(),
-      )
-    dict.insert(acc, spec.module_name, mod_syms)
+  let active_consts =
+    ast_mod.constants
+    |> list.filter(fn(def) { !is_excluded_target(def.attributes) })
+    |> list.map(fn(def) { def.definition })
+
+  let const_map =
+    list.fold(active_consts, dict.new(), fn(acc, c) {
+      dict.insert(acc, c.name, c.value)
+    })
+
+  let fn_roots =
+    list.filter_map(active_fns, fn(f) {
+      let is_root =
+        f.publicity == glance.Public
+        || f.name == "main"
+        || string.ends_with(f.name, "_test")
+      case is_root {
+        True -> Ok(f.name)
+        False -> Error(Nil)
+      }
+    })
+
+  let const_roots =
+    list.filter_map(active_consts, fn(c) {
+      case c.publicity {
+        glance.Public -> Ok(c.name)
+        glance.Private -> Error(Nil)
+      }
+    })
+
+  bfs_reachable_fns(
+    fn_roots,
+    const_roots,
+    set.from_list(fn_roots),
+    set.from_list(const_roots),
+    fn_map,
+    const_map,
+    functions,
+  )
+}
+
+fn bfs_reachable_fns(
+  fn_queue: List(String),
+  const_queue: List(String),
+  visited_fns: Set(String),
+  visited_consts: Set(String),
+  fn_map: Dict(String, glance.Function),
+  const_map: Dict(String, glance.Expression),
+  functions: Dict(String, FunctionInfo),
+) -> Set(String) {
+  case fn_queue, const_queue {
+    [], [] -> visited_fns
+    [fn_name, ..rest_fns], _ -> {
+      let has_ffi = case dict.get(functions, fn_name) {
+        Ok(info) -> info.ffi != None
+        Error(_) -> False
+      }
+      case has_ffi, dict.get(fn_map, fn_name) {
+        False, Ok(f) -> {
+          let refs = collect_stmts_var_refs(f.body, set.new())
+          enqueue_refs(
+            refs,
+            rest_fns,
+            const_queue,
+            visited_fns,
+            visited_consts,
+            fn_map,
+            const_map,
+            functions,
+          )
+        }
+        _, _ ->
+          bfs_reachable_fns(
+            rest_fns,
+            const_queue,
+            visited_fns,
+            visited_consts,
+            fn_map,
+            const_map,
+            functions,
+          )
+      }
+    }
+    [], [const_name, ..rest_consts] ->
+      case dict.get(const_map, const_name) {
+        Ok(expr) -> {
+          let refs = collect_expr_var_refs(expr, set.new())
+          enqueue_refs(
+            refs,
+            [],
+            rest_consts,
+            visited_fns,
+            visited_consts,
+            fn_map,
+            const_map,
+            functions,
+          )
+        }
+        Error(_) ->
+          bfs_reachable_fns(
+            [],
+            rest_consts,
+            visited_fns,
+            visited_consts,
+            fn_map,
+            const_map,
+            functions,
+          )
+      }
+  }
+}
+
+fn enqueue_refs(
+  refs: Set(String),
+  fn_queue: List(String),
+  const_queue: List(String),
+  visited_fns: Set(String),
+  visited_consts: Set(String),
+  fn_map: Dict(String, glance.Function),
+  const_map: Dict(String, glance.Expression),
+  functions: Dict(String, FunctionInfo),
+) -> Set(String) {
+  let #(next_fn_q, next_const_q, next_vfns, next_vconsts) =
+    set.fold(
+      refs,
+      #(fn_queue, const_queue, visited_fns, visited_consts),
+      fn(acc, name) {
+        let #(fq, cq, vf, vc) = acc
+        let #(fq1, vf1) = case
+          dict.has_key(fn_map, name) && !set.contains(vf, name)
+        {
+          True -> #([name, ..fq], set.insert(vf, name))
+          False -> #(fq, vf)
+        }
+        case dict.has_key(const_map, name) && !set.contains(vc, name) {
+          True -> #(fq1, [name, ..cq], vf1, set.insert(vc, name))
+          False -> #(fq1, cq, vf1, vc)
+        }
+      },
+    )
+  bfs_reachable_fns(
+    next_fn_q,
+    next_const_q,
+    next_vfns,
+    next_vconsts,
+    fn_map,
+    const_map,
+    functions,
+  )
+}
+
+fn collect_stmts_var_refs(
+  stmts: List(glance.Statement),
+  acc: Set(String),
+) -> Set(String) {
+  list.fold(stmts, acc, collect_stmt_var_refs)
+}
+
+fn collect_stmt_var_refs(
+  acc: Set(String),
+  stmt: glance.Statement,
+) -> Set(String) {
+  case stmt {
+    glance.Expression(expr) -> collect_expr_var_refs(expr, acc)
+    glance.Use(function:, ..) -> collect_expr_var_refs(function, acc)
+    glance.Assignment(kind:, value:, ..) -> {
+      let acc1 = collect_expr_var_refs(value, acc)
+      case kind {
+        glance.LetAssert(message: Some(msg)) -> collect_expr_var_refs(msg, acc1)
+        _ -> acc1
+      }
+    }
+    glance.Assert(expression:, message:, ..) -> {
+      let acc1 = collect_expr_var_refs(expression, acc)
+      case message {
+        Some(msg) -> collect_expr_var_refs(msg, acc1)
+        None -> acc1
+      }
+    }
+  }
+}
+
+fn collect_field_var_refs(
+  fields: List(glance.Field(glance.Expression)),
+  acc: Set(String),
+) -> Set(String) {
+  list.fold(fields, acc, fn(a, f) {
+    case f {
+      glance.LabelledField(item:, ..) | glance.UnlabelledField(item:) ->
+        collect_expr_var_refs(item, a)
+      glance.ShorthandField(label:, ..) -> set.insert(a, label)
+    }
   })
+}
+
+fn collect_expr_var_refs(
+  expr: glance.Expression,
+  acc: Set(String),
+) -> Set(String) {
+  case expr {
+    glance.Int(..) | glance.Float(..) | glance.String(..) -> acc
+    glance.Variable(name:, ..) -> set.insert(acc, name)
+    glance.NegateInt(value:, ..) | glance.NegateBool(value:, ..) ->
+      collect_expr_var_refs(value, acc)
+    glance.Block(statements:, ..) -> collect_stmts_var_refs(statements, acc)
+    glance.Panic(message:, ..) | glance.Todo(message:, ..) ->
+      case message {
+        Some(msg) -> collect_expr_var_refs(msg, acc)
+        None -> acc
+      }
+    glance.Tuple(elements:, ..) ->
+      list.fold(elements, acc, fn(a, e) { collect_expr_var_refs(e, a) })
+    glance.List(elements:, rest:, ..) -> {
+      let acc1 =
+        list.fold(elements, acc, fn(a, e) { collect_expr_var_refs(e, a) })
+      case rest {
+        Some(r) -> collect_expr_var_refs(r, acc1)
+        None -> acc1
+      }
+    }
+    glance.Fn(body:, ..) -> collect_stmts_var_refs(body, acc)
+    glance.RecordUpdate(record:, fields:, ..) -> {
+      let acc1 = collect_expr_var_refs(record, acc)
+      list.fold(fields, acc1, fn(a, f) {
+        case f.item {
+          Some(item) -> collect_expr_var_refs(item, a)
+          None -> set.insert(a, f.label)
+        }
+      })
+    }
+    glance.FieldAccess(container:, ..) -> collect_expr_var_refs(container, acc)
+    glance.Call(function:, arguments:, ..) ->
+      collect_field_var_refs(arguments, collect_expr_var_refs(function, acc))
+    glance.TupleIndex(tuple:, ..) -> collect_expr_var_refs(tuple, acc)
+    glance.FnCapture(function:, arguments_before:, arguments_after:, ..) ->
+      collect_expr_var_refs(function, acc)
+      |> collect_field_var_refs(arguments_before, _)
+      |> collect_field_var_refs(arguments_after, _)
+    glance.BitString(segments:, ..) ->
+      list.fold(segments, acc, fn(a, seg) {
+        let #(inner, opts) = seg
+        let a1 = collect_expr_var_refs(inner, a)
+        list.fold(opts, a1, fn(a2, opt) {
+          case opt {
+            glance.SizeValueOption(size_expr) ->
+              collect_expr_var_refs(size_expr, a2)
+            _ -> a2
+          }
+        })
+      })
+    glance.Case(subjects:, clauses:, ..) -> {
+      let acc1 =
+        list.fold(subjects, acc, fn(a, s) { collect_expr_var_refs(s, a) })
+      list.fold(clauses, acc1, fn(a, clause) {
+        let a1 = case clause.guard {
+          Some(g) -> collect_expr_var_refs(g, a)
+          None -> a
+        }
+        collect_expr_var_refs(clause.body, a1)
+      })
+    }
+    glance.BinaryOperator(left:, right:, ..) ->
+      collect_expr_var_refs(right, collect_expr_var_refs(left, acc))
+    glance.Echo(expression:, message:, ..) -> {
+      let acc1 = case expression {
+        Some(e) -> collect_expr_var_refs(e, acc)
+        None -> acc
+      }
+      case message {
+        Some(m) -> collect_expr_var_refs(m, acc1)
+        None -> acc1
+      }
+    }
+  }
 }

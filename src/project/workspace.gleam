@@ -1,7 +1,6 @@
 import emit/moonbit
 import emit/pkg_config
 import emit/prelude_runtime
-import emit/stdlib_runtime
 import filepath
 import glance
 import gleam/dict
@@ -9,6 +8,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/set
+import gleam/string
 import index/symbol_table
 import lower/desugar
 import lower/tco
@@ -43,13 +43,26 @@ pub fn transpile_project(
   use ffi_overrides <- result.try(ffi_config.load_project_overrides(
     project_root,
   ))
-  use moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
+  use root_moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
     project_root,
   ))
   use loaded_deps <- result.try(loader.load_dependencies(
     project_root,
     ffi_overrides,
   ))
+  use dep_moonbit_deps <- result.try(
+    list.try_map(loaded_deps, fn(dep) {
+      ffi_config.load_project_moonbit_deps(dep.package_root)
+    }),
+  )
+  let moonbit_deps =
+    list.flatten(dep_moonbit_deps)
+    |> list.append(root_moonbit_deps)
+    |> list.fold(dict.new(), fn(acc, entry) {
+      dict.insert(acc, entry.0, entry.1)
+    })
+    |> dict.to_list
+    |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
 
   let staging_dir = filepath.join(project_root, "build/.gekko_staging")
   use root_iface <- result.try(staging.extract_project_interface(
@@ -118,18 +131,9 @@ pub fn transpile_project(
     prelude_runtime.gprelude_mbt(),
   ))
 
-  let shim_by_dir =
-    stdlib_runtime.all_shim_packages()
-    |> list.fold(dict.new(), fn(acc, shim) {
-      dict.insert(acc, shim.pkg_dir, shim.module_name)
-    })
-
-  use #(rev_emitted, rev_refs) <- result.try(
-    list.try_fold(all_modules, #([], []), fn(acc, entry) {
-      let #(names_acc, refs_acc) = acc
+  use rev_emitted <- result.try(
+    list.try_fold(all_modules, [], fn(names_acc, entry) {
       let #(_, mod_name, ast_mod, _) = entry
-      let ast_imports =
-        list.map(ast_mod.imports, fn(def) { def.definition.module })
       let ir_mod =
         desugar.desugar_module(ast_mod, table, mod_name)
         |> tco.optimize_module
@@ -137,13 +141,6 @@ pub fn transpile_project(
       let is_main = moonbit.module_has_main(ir_mod)
       let pkg_dir = pkg_config.module_to_pkg_dir(mod_name)
       let target_dir = filepath.join(out_dir, pkg_dir)
-
-      let emitted_shim_mods =
-        list.filter_map(imports, fn(imp) { dict.get(shim_by_dir, imp.0) })
-      let next_refs =
-        refs_acc
-        |> list.append(ast_imports, _)
-        |> list.append(emitted_shim_mods, _)
 
       use _ <- result.try(write_text_file(
         filepath.join(target_dir, "moon.pkg"),
@@ -153,31 +150,40 @@ pub fn transpile_project(
         filepath.join(target_dir, pkg_dir <> ".mbt"),
         mbt_src,
       ))
-      Ok(#([mod_name, ..names_acc], next_refs))
+      Ok([mod_name, ..names_acc])
     }),
   )
 
-  use _ <- result.try(stdlib_runtime.emit_shim_packages(
-    project_name,
-    out_dir,
-    rev_refs,
-  ))
-
-  let emitted_shim_dirs =
-    stdlib_runtime.resolve_shim_packages(rev_refs)
-    |> list.map(fn(shim) { shim.pkg_dir })
   let module_pkg_dirs =
     list.map(all_modules, fn(entry) { pkg_config.module_to_pkg_dir(entry.1) })
-  let reserved_pkg_dirs =
-    ["gprelude", ..list.append(module_pkg_dirs, emitted_shim_dirs)]
+  let base_reserved =
+    ["gprelude", ..module_pkg_dirs]
     |> set.from_list
 
-  use local_moonbit_packages <- result.try(moonbit_ffi.copy_local_packages(
+  use #(copied_dep_pkgs, reserved_after_deps) <- result.try(
+    list.try_fold(loaded_deps, #([], base_reserved), fn(acc, dep) {
+      let #(pkgs_acc, cur_reserved) = acc
+      use dep_pkgs <- result.try(moonbit_ffi.copy_local_packages_for_package(
+        dep.package_root,
+        dep.package_name,
+        project_name,
+        out_dir,
+        cur_reserved,
+      ))
+      let next_reserved = list.fold(dep_pkgs, cur_reserved, set.insert)
+      Ok(#(list.append(pkgs_acc, dep_pkgs), next_reserved))
+    }),
+  )
+
+  use root_moonbit_packages <- result.try(moonbit_ffi.copy_local_packages(
     project_root,
     project_name,
     out_dir,
-    reserved_pkg_dirs,
+    reserved_after_deps,
   ))
+  let local_moonbit_packages =
+    list.append(copied_dep_pkgs, root_moonbit_packages)
+    |> list.sort(string.compare)
 
   Ok(TranspileSummary(
     project_name:,

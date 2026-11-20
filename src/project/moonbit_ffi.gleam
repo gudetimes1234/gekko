@@ -18,7 +18,26 @@ pub fn copy_local_packages(
   out_dir: String,
   reserved_pkg_dirs: Set(String),
 ) -> Result(List(String), String) {
-  let moonbit_root = filepath.join(project_root, "moonbit")
+  copy_local_packages_for_package(
+    project_root,
+    project_name,
+    project_name,
+    out_dir,
+    reserved_pkg_dirs,
+  )
+}
+
+/// Copy local MoonBit FFI packages from `<pkg_root>/moonbit/` into `<out_dir>/`,
+/// rewriting `"<source_pkg_name>/..."` module imports in copied `moon.pkg`
+/// manifests to `"<project_name>/..."` when `source_pkg_name != project_name`.
+pub fn copy_local_packages_for_package(
+  pkg_root: String,
+  source_pkg_name: String,
+  project_name: String,
+  out_dir: String,
+  reserved_pkg_dirs: Set(String),
+) -> Result(List(String), String) {
+  let moonbit_root = filepath.join(pkg_root, "moonbit")
   case simplifile.is_directory(moonbit_root) {
     Ok(True) -> {
       use entries <- result.try(read_sorted_dir(moonbit_root))
@@ -27,6 +46,7 @@ pub fn copy_local_packages(
         walk_root_subdirs(
           moonbit_root,
           entries,
+          source_pkg_name,
           project_name,
           out_dir,
           reserved_pkg_dirs,
@@ -82,6 +102,7 @@ fn check_no_loose_root_files(
 fn walk_root_subdirs(
   moonbit_root: String,
   entries: List(String),
+  source_pkg_name: String,
   project_name: String,
   out_dir: String,
   reserved_pkg_dirs: Set(String),
@@ -97,6 +118,7 @@ fn walk_root_subdirs(
             visit_package_dir(
               full_path,
               entry,
+              source_pkg_name,
               project_name,
               out_dir,
               reserved_pkg_dirs,
@@ -112,6 +134,7 @@ fn walk_root_subdirs(
 fn visit_package_dir(
   cur_dir: String,
   rel_pkg: String,
+  source_pkg_name: String,
   project_name: String,
   out_dir: String,
   reserved_pkg_dirs: Set(String),
@@ -168,7 +191,18 @@ fn visit_package_dir(
       )
       use _ <- result.try(
         list.try_each(files, fn(file) {
-          copy_file(filepath.join(cur_dir, file), filepath.join(dest_dir, file))
+          let src_file = filepath.join(cur_dir, file)
+          let dst_file = filepath.join(dest_dir, file)
+          case file == "moon.pkg" && source_pkg_name != project_name {
+            True ->
+              rewrite_and_copy_moon_pkg(
+                src_file,
+                dst_file,
+                source_pkg_name,
+                project_name,
+              )
+            False -> copy_file(src_file, dst_file)
+          }
         }),
       )
       use _ <- result.try(case list.contains(files, "moon.pkg") {
@@ -200,11 +234,42 @@ fn visit_package_dir(
     visit_package_dir(
       filepath.join(cur_dir, sub),
       rel_pkg <> "/" <> sub,
+      source_pkg_name,
       project_name,
       out_dir,
       reserved_pkg_dirs,
       cur_acc,
     )
+  })
+}
+
+fn rewrite_and_copy_moon_pkg(
+  src: String,
+  dst: String,
+  source_pkg_name: String,
+  project_name: String,
+) -> Result(Nil, String) {
+  use content <- result.try(
+    simplifile.read(from: src)
+    |> result.map_error(fn(err) {
+      "Failed to read local moon.pkg "
+      <> src
+      <> ": "
+      <> simplifile.describe_error(err)
+    }),
+  )
+  let updated =
+    string.replace(
+      content,
+      "\"" <> source_pkg_name <> "/",
+      "\"" <> project_name <> "/",
+    )
+  simplifile.write(to: dst, contents: updated)
+  |> result.map_error(fn(err) {
+    "Failed to write local moon.pkg "
+    <> dst
+    <> ": "
+    <> simplifile.describe_error(err)
   })
 }
 

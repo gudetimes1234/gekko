@@ -587,26 +587,64 @@ fn parse_doc_directive(
   doc_text: String,
   directive_name: String,
 ) -> Option(#(String, String)) {
-  let trimmed = string.trim(doc_text)
-  case string.starts_with(trimmed, "@" <> directive_name) {
-    False -> None
-    True -> {
-      let tokens =
-        glexer.new(trimmed)
-        |> glexer.lex
-      case tokens {
-        [#(token.At, _), ..after_at] ->
-          case match_raw_moonbit_directive(directive_name, after_at) {
-            Some(#(arg1, arg2, _, remaining)) ->
-              case skip_trivia(remaining) {
-                [] -> Some(#(arg1, arg2))
-                _ -> None
+  string.split(doc_text, "\n")
+  |> scan_doc_directive_lines(directive_name, False, None)
+}
+
+fn scan_doc_directive_lines(
+  lines: List(String),
+  directive_name: String,
+  in_fence: Bool,
+  found: Option(#(String, String)),
+) -> Option(#(String, String)) {
+  case lines {
+    [] -> found
+    [line, ..rest] -> {
+      let trimmed = string.trim(line)
+      case string.starts_with(trimmed, "```") {
+        True -> scan_doc_directive_lines(rest, directive_name, !in_fence, found)
+        False ->
+          case !in_fence && string.starts_with(trimmed, "@" <> directive_name) {
+            True -> {
+              let next_found = case
+                parse_single_doc_directive(trimmed, directive_name)
+              {
+                Some(_) as hit -> hit
+                None -> found
               }
-            None -> None
+              scan_doc_directive_lines(
+                rest,
+                directive_name,
+                in_fence,
+                next_found,
+              )
+            }
+            False ->
+              scan_doc_directive_lines(rest, directive_name, in_fence, found)
           }
-        _ -> None
       }
     }
+  }
+}
+
+fn parse_single_doc_directive(
+  trimmed: String,
+  directive_name: String,
+) -> Option(#(String, String)) {
+  let tokens =
+    glexer.new(trimmed)
+    |> glexer.lex
+  case tokens {
+    [#(token.At, _), ..after_at] ->
+      case match_raw_moonbit_directive(directive_name, after_at) {
+        Some(#(arg1, arg2, _, remaining)) ->
+          case skip_trivia(remaining) {
+            [] -> Some(#(arg1, arg2))
+            _ -> None
+          }
+        None -> None
+      }
+    _ -> None
   }
 }
 
@@ -681,7 +719,7 @@ fn match_trailing_close_paren(
   }
 }
 
-fn find_fn_signature_end(
+pub fn find_fn_signature_end(
   tokens: List(#(Token, glexer.Position)),
 ) -> Option(#(Int, Bool, List(#(Token, glexer.Position)))) {
   case tokens {

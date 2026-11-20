@@ -9,23 +9,26 @@ import gleam/string
 import index/symbol_table.{type SymbolTable}
 import lower/ir.{
   type IrBinOp, type IrCallArg, type IrClause, type IrConstant, type IrExpr,
-  type IrFunction, type IrGetter, type IrModule, type IrParam, type IrPatArg,
-  type IrPattern, type IrStmt, type IrType, type IrTypeAlias, type IrTypeDef,
-  type IrVariant, type IrVariantField, AssertAbort, IrAbort, IrAddFloat,
-  IrAddInt, IrAnd, IrBinOp, IrBitString, IrBlock, IrBool, IrBreak, IrCall,
-  IrCallArg, IrConstructor, IrContinue, IrDivFloat, IrDivInt, IrEcho, IrEq,
-  IrFloat, IrFn, IrForLoop, IrGetterCall, IrGtEqFloat, IrGtEqInt, IrGtFloat,
-  IrGtInt, IrInt, IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch,
-  IrModuleRef, IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt, IrNotEq, IrOr,
-  IrPatArg, IrPatAs, IrPatBitString, IrPatBool, IrPatDiscard, IrPatFloat,
-  IrPatInt, IrPatString, IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrRemInt,
-  IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet, IrString, IrStringConcat,
-  IrSubFloat, IrSubInt, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool,
-  IrTypeDouble, IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult,
-  IrTypeString, IrTypeTuple, IrTypeUnit, IrTypeVar, IrUnit, IrVar,
-  LetAssertAbort, PanicAbort, TodoAbort,
+  type IrFnParam, type IrFunction, type IrGetter, type IrModule, type IrParam,
+  type IrPatArg, type IrPattern, type IrStmt, type IrType, type IrTypeAlias,
+  type IrTypeDef, type IrVariant, type IrVariantField, AssertAbort, IrAbort,
+  IrAddFloat, IrAddInt, IrAnd, IrBinOp, IrBitString, IrBlock, IrBool, IrBreak,
+  IrCall, IrCallArg, IrConstructor, IrContinue, IrDivFloat, IrDivInt, IrEcho,
+  IrEq, IrFloat, IrFn, IrForLoop, IrGetterCall, IrGtEqFloat, IrGtEqInt,
+  IrGtFloat, IrGtInt, IrInt, IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt,
+  IrMatch, IrModuleRef, IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt,
+  IrNotEq, IrOr, IrParam, IrPatArg, IrPatAs, IrPatBitString, IrPatBool,
+  IrPatDiscard, IrPatFloat, IrPatInt, IrPatString, IrPatTuple, IrPatUnit,
+  IrPatVar, IrPatVariant, IrRemInt, IrStmtAssert, IrStmtExpr, IrStmtGuard,
+  IrStmtLet, IrString, IrStringConcat, IrSubFloat, IrSubInt, IrTuple,
+  IrTupleIndex, IrTypeBitArray, IrTypeBool, IrTypeDouble, IrTypeFn, IrTypeInt64,
+  IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString, IrTypeTuple, IrTypeUnit,
+  IrTypeVar, IrUnit, IrVar, LetAssertAbort, PanicAbort, TodoAbort,
 }
 import lower/mangle
+import project/interface.{
+  type ResolvedType, FnType, NamedType, TupleType, VariableType,
+}
 import project/prepass.{ExternalType, PackageCall, WasmImport}
 
 type EmitCtx {
@@ -36,6 +39,7 @@ type EmitCtx {
     table: Option(SymbolTable),
     pkg_to_alias: dict.Dict(String, String),
     used_aliases: Set(String),
+    fn_eq_bounds: dict.Dict(String, Set(String)),
   )
 }
 
@@ -90,18 +94,27 @@ fn emit_module_inner(
       table:,
       pkg_to_alias: dict.new(),
       used_aliases: set.from_list(["gprelude"]),
+      fn_eq_bounds: dict.new(),
     )
 
-  let #(type_blocks, ctx1) = map_acc(module.types, ctx0, emit_type_def)
+  let #(raw_type_blocks, ctx1) = map_acc(module.types, ctx0, emit_type_def)
+  let type_blocks = list.filter(raw_type_blocks, fn(b) { b != "" })
 
-  let #(alias_blocks, ctx2) =
-    map_acc(module.type_aliases, ctx1, emit_type_alias)
+  let visible_aliases =
+    list.filter(module.type_aliases, fn(ta) {
+      ta.publicity == glance.Public
+      || is_alias_referenced_in_module(module, ta.name)
+    })
+  let #(alias_blocks, ctx2) = map_acc(visible_aliases, ctx1, emit_type_alias)
 
   let #(getter_blocks, ctx3) = map_acc(module.getters, ctx2, emit_getter)
 
   let #(const_blocks, ctx4) = map_acc(module.constants, ctx3, emit_constant)
 
-  let #(fn_blocks, ctx5) = map_acc(module.functions, ctx4, emit_function)
+  let fn_eq_bounds = compute_module_eq_bounds(module, ctx4)
+  let ctx4_with_bounds = EmitCtx(..ctx4, fn_eq_bounds:)
+  let #(fn_blocks, ctx5) =
+    map_acc(module.functions, ctx4_with_bounds, emit_function)
 
   let main_blocks = case module_has_main(module) {
     True -> ["///|\nfn main {\n  @prelude.ignore(main_())\n}"]
@@ -209,19 +222,34 @@ fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
         glance.Public -> "pub "
         glance.Private -> "priv "
       }
-      let #(target_str, ctx1) = case package {
-        "" | "builtin" -> #(type_name <> generics, ctx)
-        _ -> {
-          let default_alias = mangle.module_to_alias(package)
-          let #(ffi_alias, ctx_imp) =
-            register_import(ctx, package, default_alias, default_alias)
-          #("@" <> ffi_alias <> "." <> type_name <> generics, ctx_imp)
+      case package == "" || package == "builtin", type_name == td.name {
+        True, True -> #("", ctx)
+        _, _ -> {
+          let #(target_str, ctx1) = case package {
+            "" | "builtin" -> #(type_name <> generics, ctx)
+            "gprelude" -> #(
+              "@gprelude." <> type_name <> generics,
+              add_gprelude_import(ctx),
+            )
+            _ -> {
+              let default_alias = mangle.module_to_alias(package)
+              let #(ffi_alias, ctx_imp) =
+                register_import(ctx, package, default_alias, default_alias)
+              #("@" <> ffi_alias <> "." <> type_name <> generics, ctx_imp)
+            }
+          }
+          #(
+            "///|\n"
+              <> vis
+              <> "type "
+              <> td.name
+              <> generics
+              <> " = "
+              <> target_str,
+            ctx1,
+          )
         }
       }
-      #(
-        "///|\n" <> vis <> "type " <> td.name <> generics <> " = " <> target_str,
-        ctx1,
-      )
     }
 
     None -> {
@@ -230,9 +258,15 @@ fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
         glance.Public, True -> "pub "
         glance.Private, _ -> "priv "
       }
-      let derive_line = case td.derive_eq_debug_hash {
-        True -> "#derive(Eq, Debug, Hash)\n"
-        False -> ""
+      let dict_key_params = collect_td_dict_key_vars(td)
+      let needs_manual_dict_eq =
+        td.derive_eq_debug_hash
+        && td.type_params != []
+        && !set.is_empty(dict_key_params)
+      let derive_line = case td.derive_eq_debug_hash, needs_manual_dict_eq {
+        True, False -> "#derive(Eq, Debug, Hash)\n"
+        True, True -> "#derive(Debug, Hash)\n"
+        False, _ -> ""
       }
       let #(variant_lines, ctx1) = map_acc(td.variants, ctx, emit_variant)
       let body = case variant_lines {
@@ -248,8 +282,12 @@ fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
         <> generics
         <> " "
         <> body
+      let eq_block = case needs_manual_dict_eq {
+        True -> "\n\n" <> emit_type_eq_impl(td, dict_key_params)
+        False -> ""
+      }
       let #(inspect_impl, ctx2) = emit_type_inspect_impl(td, ctx1)
-      #(enum_decl <> "\n\n" <> inspect_impl, ctx2)
+      #(enum_decl <> eq_block <> "\n\n" <> inspect_impl, ctx2)
     }
   }
 }
@@ -294,25 +332,30 @@ fn classify_list_inspect_kind(
 }
 
 fn is_external_named_type(module: String, name: String, ctx: EmitCtx) -> Bool {
-  case
-    module == ctx.current_module && set.contains(ctx.local_external_types, name)
-  {
-    True -> True
+  case symbol_table.is_builtin_inspectable_external(module, name) {
+    True -> False
     False ->
-      case ctx.table {
-        None -> False
-        Some(tbl) ->
-          case dict.get(tbl.modules, module) {
-            Error(_) -> False
-            Ok(ms) ->
-              case dict.get(ms.types, name) {
-                Ok(ti) -> option.is_some(ti.external_type)
-                Error(_) ->
-                  dict.values(ms.types)
-                  |> list.any(fn(ti) {
-                    mangle.mangle_type_name(ti.name) == name
-                    && option.is_some(ti.external_type)
-                  })
+      case
+        module == ctx.current_module
+        && set.contains(ctx.local_external_types, name)
+      {
+        True -> True
+        False ->
+          case ctx.table {
+            None -> False
+            Some(tbl) ->
+              case dict.get(tbl.modules, module) {
+                Error(_) -> False
+                Ok(ms) ->
+                  case dict.get(ms.types, name) {
+                    Ok(ti) -> option.is_some(ti.external_type)
+                    Error(_) ->
+                      dict.values(ms.types)
+                      |> list.any(fn(ti) {
+                        mangle.mangle_type_name(ti.name) == name
+                        && option.is_some(ti.external_type)
+                      })
+                  }
               }
           }
       }
@@ -516,7 +559,8 @@ fn emit_constant(c: IrConstant, ctx: EmitCtx) -> #(String, EmitCtx) {
     glance.Public -> "pub "
     glance.Private -> ""
   }
-  let #(ty_str, ctx1) = emit_type(c.value_type, ctx)
+  let concrete_ty = instantiate_type_vars_to_unit(c.value_type)
+  let #(ty_str, ctx1) = emit_type(concrete_ty, ctx)
   let #(val_str, ctx2) = emit_expr(c.value, ctx1)
   #(
     "///|\n" <> vis <> "let " <> c.name <> " : " <> ty_str <> " = " <> val_str,
@@ -524,7 +568,42 @@ fn emit_constant(c: IrConstant, ctx: EmitCtx) -> #(String, EmitCtx) {
   )
 }
 
+fn instantiate_type_vars_to_unit(ty: IrType) -> IrType {
+  case ty {
+    IrTypeVar(_) -> IrTypeUnit
+    IrTypeList(inner) -> IrTypeList(instantiate_type_vars_to_unit(inner))
+    IrTypeResult(ok_t, err_t) ->
+      IrTypeResult(
+        instantiate_type_vars_to_unit(ok_t),
+        instantiate_type_vars_to_unit(err_t),
+      )
+    IrTypeTuple(els) ->
+      IrTypeTuple(list.map(els, instantiate_type_vars_to_unit))
+    IrTypeFn(ps, r) ->
+      IrTypeFn(
+        list.map(ps, instantiate_type_vars_to_unit),
+        instantiate_type_vars_to_unit(r),
+      )
+    IrTypeNamed(args:, ..) ->
+      IrTypeNamed(..ty, args: list.map(args, instantiate_type_vars_to_unit))
+    _ -> ty
+  }
+}
+
 fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
+  let f = case f.ffi {
+    Some(_) -> {
+      let named_params =
+        list.index_map(f.params, fn(p, idx) {
+          case p.name {
+            "_" -> IrParam(..p, name: "__arg_" <> int.to_string(idx))
+            _ -> p
+          }
+        })
+      ir.IrFunction(..f, params: named_params)
+    }
+    None -> f
+  }
   let vis = case f.publicity {
     glance.Public -> "pub "
     glance.Private -> ""
@@ -546,9 +625,13 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
 
   let #(fn_block, ctx3) = case f.ffi {
     Some(PackageCall(pkg, target_fn)) -> {
-      let default_alias = mangle.module_to_alias(pkg)
-      let #(ffi_alias, ctx_imp) =
-        register_import(ctx2, pkg, default_alias, default_alias)
+      let #(ffi_alias, ctx_imp) = case pkg {
+        "gprelude" -> #("gprelude", add_gprelude_import(ctx2))
+        _ -> {
+          let default_alias = mangle.module_to_alias(pkg)
+          register_import(ctx2, pkg, default_alias, default_alias)
+        }
+      }
       let call_args =
         list.map(f.params, fn(p) { p.name })
         |> string.join(", ")
@@ -1384,6 +1467,59 @@ fn emit_bin_op_expr(
   right: IrExpr,
   ctx: EmitCtx,
 ) -> #(String, EmitCtx) {
+  case op {
+    IrEq | IrNotEq ->
+      case
+        is_empty_list_or_none(left, ctx.current_module),
+        is_empty_list_or_none(right, ctx.current_module)
+      {
+        None, Some(ctor) -> emit_is_empty_op(op == IrEq, left, ctor, ctx)
+        Some(ctor), None -> emit_is_empty_op(op == IrEq, right, ctor, ctx)
+        _, _ -> emit_regular_bin_op_expr(op, left, right, ctx)
+      }
+    _ -> emit_regular_bin_op_expr(op, left, right, ctx)
+  }
+}
+
+fn is_empty_list_or_none(
+  expr: IrExpr,
+  current_module: String,
+) -> Option(String) {
+  case expr {
+    IrList(elements: [], tail: None) -> Some("@gprelude.Nil")
+    IrConstructor(target_module: Some("gleam/option"), name: "None", ..) ->
+      Some("None")
+    IrConstructor(target_module: None, name: "None", ..)
+      if current_module == "gleam/option"
+    -> Some("None")
+    _ -> None
+  }
+}
+
+fn emit_is_empty_op(
+  is_eq: Bool,
+  subject: IrExpr,
+  ctor: String,
+  ctx: EmitCtx,
+) -> #(String, EmitCtx) {
+  let ctx0 = case ctor {
+    "@gprelude.Nil" -> add_gprelude_import(ctx)
+    _ -> ctx
+  }
+  let #(subj_raw, ctx1) = emit_expr(subject, ctx0)
+  let base = "((" <> subj_raw <> ") is " <> ctor <> ")"
+  case is_eq {
+    True -> #(base, ctx1)
+    False -> #("!(" <> base <> ")", ctx1)
+  }
+}
+
+fn emit_regular_bin_op_expr(
+  op: IrBinOp,
+  left: IrExpr,
+  right: IrExpr,
+  ctx: EmitCtx,
+) -> #(String, EmitCtx) {
   let #(l_raw, ctx1) = emit_expr(left, ctx)
   let #(r_raw, ctx2) = emit_expr(right, ctx1)
   let l_str = paren_if_match(left, l_raw)
@@ -1621,6 +1757,10 @@ fn emit_type(ty: IrType, ctx: EmitCtx) -> #(String, EmitCtx) {
           "@gprelude.Dynamic",
           add_gprelude_import(ctx),
         )
+        "gleam", "UtfCodepoint" -> #(
+          "@gprelude.UtfCodepoint",
+          add_gprelude_import(ctx),
+        )
         "gleam/option", "Option" -> {
           let #(arg_strs, ctx1) = map_acc(args, ctx, emit_type)
           #("Option[" <> string.join(arg_strs, ", ") <> "]", ctx1)
@@ -1680,10 +1820,19 @@ fn format_function_type_params(
   case f.type_params {
     [] -> #("", ctx)
     tps -> {
-      let needs_eq_or_dict = stmts_any_expr(f.body, expr_is_eq_or_dict)
-      let needs_inspect = stmts_any_expr(f.body, expr_is_inspect)
-      let dict_keys = collect_dict_key_vars(f.params, f.return_type)
-      let dict_vals = collect_dict_val_only_vars(f.params, f.return_type)
+      let needs_inspect =
+        {
+          ctx.current_module == "gleam/string"
+          && {
+            f.unmangled_name == "inspect" || f.unmangled_name == "do_inspect"
+          }
+        }
+        || stmts_any_expr(f.body, expr_is_inspect)
+      let eq_vars = case dict.get(ctx.fn_eq_bounds, f.name) {
+        Ok(vars) -> vars
+        Error(_) -> collect_dict_key_vars(f.params, f.return_type)
+      }
+      let to_dynamic_vars = compute_to_dynamic_vars(f, ctx)
       let non_fn_vars =
         list.append(list.map(f.params, fn(p) { p.param_type }), [f.return_type])
         |> list.fold(set.new(), fn(acc, t) {
@@ -1692,21 +1841,38 @@ fn format_function_type_params(
       let #(rev_formatted, final_ctx) =
         list.fold(tps, #([], ctx), fn(acc, tp) {
           let #(parts, cur_ctx) = acc
-          let has_eq =
-            set.contains(dict_keys, tp)
-            || { needs_eq_or_dict && !set.contains(dict_vals, tp) }
+          let has_eq = set.contains(eq_vars, tp)
           let has_inspect = needs_inspect && set.contains(non_fn_vars, tp)
-          let #(entry, next_ctx) = case has_eq, has_inspect {
-            True, True -> #(
-              tp <> " : Eq + Hash + @gprelude.GleamInspect",
-              add_gprelude_import(cur_ctx),
-            )
-            True, False -> #(tp <> " : Eq + Hash", cur_ctx)
-            False, True -> #(
-              tp <> " : @gprelude.GleamInspect",
-              add_gprelude_import(cur_ctx),
-            )
-            False, False -> #(tp, cur_ctx)
+          let has_to_dyn = set.contains(to_dynamic_vars, tp)
+          let traits =
+            []
+            |> fn(ts) {
+              case has_to_dyn {
+                True -> ["@gprelude.ToDynamic", ..ts]
+                False -> ts
+              }
+            }
+            |> fn(ts) {
+              case has_inspect {
+                True -> ["@gprelude.GleamInspect", ..ts]
+                False -> ts
+              }
+            }
+            |> fn(ts) {
+              case has_eq {
+                True -> ["Eq", "Hash", ..ts]
+                False -> ts
+              }
+            }
+          let #(entry, next_ctx) = case traits {
+            [] -> #(tp, cur_ctx)
+            _ -> {
+              let ctx_g = case has_inspect || has_to_dyn {
+                True -> add_gprelude_import(cur_ctx)
+                False -> cur_ctx
+              }
+              #(tp <> " : " <> string.join(traits, " + "), ctx_g)
+            }
           }
           #([entry, ..parts], next_ctx)
         })
@@ -1723,6 +1889,1218 @@ fn format_function_type_params(
   }
 }
 
+fn compute_to_dynamic_vars(f: IrFunction, ctx: EmitCtx) -> Set(String) {
+  let local = case ctx.current_module == "gleam/dynamic/decode" {
+    False -> set.new()
+    True ->
+      case f.unmangled_name, f.params {
+        "cast", [p0, ..] -> collect_type_var_names(p0.param_type, set.new())
+        "bare_index", [_, p1, ..] ->
+          collect_type_var_names(p1.param_type, set.new())
+        "push_path", [_, p1, ..] ->
+          collect_type_var_names(p1.param_type, set.new())
+        "subfield", [p0, ..]
+        | "at", [p0, ..]
+        | "index", [p0, ..]
+        | "field", [p0, ..]
+        | "optional_field", [p0, ..]
+        | "optionally_at", [p0, ..]
+        -> collect_type_var_names(p0.param_type, set.new())
+        _, _ -> set.new()
+      }
+  }
+  let base_env = build_initial_env(f, ctx)
+  collect_stmts_to_dynamic(f.body, base_env, local)
+}
+
+fn collect_stmts_to_dynamic(
+  stmts: List(IrStmt),
+  env: dict.Dict(String, IrType),
+  acc: Set(String),
+) -> Set(String) {
+  case stmts {
+    [] -> acc
+    [stmt, ..rest] ->
+      case stmt {
+        IrStmtLet(value:, ..) -> {
+          let acc1 = collect_expr_to_dynamic(value, env, acc)
+          collect_stmts_to_dynamic(rest, env, acc1)
+        }
+        IrStmtGuard(
+          value:,
+          guard_condition:,
+          abort_message:,
+          post_bindings:,
+          ..,
+        ) -> {
+          let acc1 = collect_expr_to_dynamic(value, env, acc)
+          let acc2 = case guard_condition {
+            Some(g) -> collect_expr_to_dynamic(g, env, acc1)
+            None -> acc1
+          }
+          let acc3 = case abort_message {
+            Some(m) -> collect_expr_to_dynamic(m, env, acc2)
+            None -> acc2
+          }
+          let acc4 =
+            list.fold(post_bindings, acc3, fn(a, b) {
+              collect_expr_to_dynamic(b.1, env, a)
+            })
+          collect_stmts_to_dynamic(rest, env, acc4)
+        }
+        IrStmtAssert(condition:, abort_message:) -> {
+          let acc1 = collect_expr_to_dynamic(condition, env, acc)
+          let acc2 = case abort_message {
+            Some(m) -> collect_expr_to_dynamic(m, env, acc1)
+            None -> acc1
+          }
+          collect_stmts_to_dynamic(rest, env, acc2)
+        }
+        IrStmtExpr(expr) ->
+          collect_stmts_to_dynamic(
+            rest,
+            env,
+            collect_expr_to_dynamic(expr, env, acc),
+          )
+      }
+  }
+}
+
+fn collect_expr_to_dynamic(
+  expr: IrExpr,
+  env: dict.Dict(String, IrType),
+  acc: Set(String),
+) -> Set(String) {
+  case expr {
+    IrCall(
+      function: IrModuleRef(target_module: "gleam/dynamic/decode", symbol:, ..),
+      args:,
+    ) -> {
+      let acc1 = case symbol, args {
+        "subfield", [arg0, ..]
+        | "at", [arg0, ..]
+        | "field", [arg0, ..]
+        | "optional_field", [arg0, ..]
+        | "optionally_at", [arg0, ..]
+        ->
+          case infer_simple_expr_type(arg0.value, env) {
+            Some(ty) -> collect_type_var_names(ty, acc)
+            None -> acc
+          }
+        _, _ -> acc
+      }
+      list.fold(args, acc1, fn(a, arg) {
+        collect_expr_to_dynamic(arg.value, env, a)
+      })
+    }
+    IrCall(function:, args:) -> {
+      let acc1 = collect_expr_to_dynamic(function, env, acc)
+      list.fold(args, acc1, fn(a, arg) {
+        collect_expr_to_dynamic(arg.value, env, a)
+      })
+    }
+    IrBlock(stmts) | IrFn(body: stmts, ..) ->
+      collect_stmts_to_dynamic(stmts, env, acc)
+    IrMatch(subjects:, clauses:) -> {
+      let acc1 =
+        list.fold(subjects, acc, fn(a, s) { collect_expr_to_dynamic(s, env, a) })
+      list.fold(clauses, acc1, fn(a, c) {
+        let a1 = case c.guard {
+          Some(g) -> collect_expr_to_dynamic(g, env, a)
+          None -> a
+        }
+        let a2 =
+          list.fold(c.prefix_bindings, a1, fn(x, b) {
+            collect_expr_to_dynamic(b.1, env, x)
+          })
+        collect_expr_to_dynamic(c.body, env, a2)
+      })
+    }
+    IrBinOp(left:, right:, ..) ->
+      collect_expr_to_dynamic(
+        right,
+        env,
+        collect_expr_to_dynamic(left, env, acc),
+      )
+    IrNegateInt(inner)
+    | IrNegateBool(inner)
+    | IrBreak(inner)
+    | IrGetterCall(receiver: inner, ..)
+    | IrTupleIndex(tuple: inner, ..) -> collect_expr_to_dynamic(inner, env, acc)
+    IrTuple(els) | IrContinue(els) ->
+      list.fold(els, acc, fn(a, e) { collect_expr_to_dynamic(e, env, a) })
+    IrList(elements:, tail:) -> {
+      let acc1 =
+        list.fold(elements, acc, fn(a, e) { collect_expr_to_dynamic(e, env, a) })
+      case tail {
+        Some(t) -> collect_expr_to_dynamic(t, env, acc1)
+        None -> acc1
+      }
+    }
+    IrForLoop(bindings:, body:) -> {
+      let acc1 =
+        list.fold(bindings, acc, fn(a, b) {
+          collect_expr_to_dynamic(b.1, env, a)
+        })
+      collect_stmts_to_dynamic(body, env, acc1)
+    }
+    IrEcho(expr: inner, message:, ..) -> {
+      let acc1 = collect_expr_to_dynamic(inner, env, acc)
+      case message {
+        Some(m) -> collect_expr_to_dynamic(m, env, acc1)
+        None -> acc1
+      }
+    }
+    IrAbort(message: Some(m), ..) -> collect_expr_to_dynamic(m, env, acc)
+    _ -> acc
+  }
+}
+
+fn infer_simple_expr_type(
+  expr: IrExpr,
+  env: dict.Dict(String, IrType),
+) -> Option(IrType) {
+  case expr {
+    IrVar(name) -> dict.get(env, name) |> option.from_result
+    IrList(elements: [first, ..], ..) ->
+      option.map(infer_simple_expr_type(first, env), IrTypeList)
+    IrList(tail: Some(t), ..) -> infer_simple_expr_type(t, env)
+    _ -> None
+  }
+}
+
+fn build_initial_env(f: IrFunction, ctx: EmitCtx) -> dict.Dict(String, IrType) {
+  let _ = ctx
+  list.fold(f.params, dict.new(), fn(acc, p) {
+    dict.insert(acc, p.name, p.param_type)
+  })
+}
+
+fn compute_module_eq_bounds(
+  module: IrModule,
+  ctx: EmitCtx,
+) -> dict.Dict(String, Set(String)) {
+  let fn_map =
+    list.fold(module.functions, dict.new(), fn(acc, f) {
+      dict.insert(acc, f.name, f)
+    })
+  let const_env =
+    list.fold(module.constants, dict.new(), fn(acc, c) {
+      dict.insert(acc, c.name, c.value_type)
+    })
+  let initial_bounds =
+    list.fold(module.functions, dict.new(), fn(acc, f) {
+      let sig_keys = collect_dict_key_vars(f.params, f.return_type)
+      dict.insert(acc, f.name, sig_keys)
+    })
+  iterate_eq_bounds(module.functions, fn_map, const_env, ctx, initial_bounds, 6)
+}
+
+fn iterate_eq_bounds(
+  fns: List(IrFunction),
+  fn_map: dict.Dict(String, IrFunction),
+  const_env: dict.Dict(String, IrType),
+  ctx: EmitCtx,
+  cur_bounds: dict.Dict(String, Set(String)),
+  iters_left: Int,
+) -> dict.Dict(String, Set(String)) {
+  case iters_left <= 0 {
+    True -> cur_bounds
+    False -> {
+      let #(next_bounds, changed) =
+        list.fold(fns, #(cur_bounds, False), fn(acc, f) {
+          let #(bmap, ch) = acc
+          let existing = case dict.get(bmap, f.name) {
+            Ok(s) -> s
+            Error(_) -> set.new()
+          }
+          let env0 =
+            list.fold(f.params, const_env, fn(e, p) {
+              dict.insert(e, p.name, p.param_type)
+            })
+          let dict_vals = collect_dict_val_only_vars(f.params, f.return_type)
+          let allowed = set.difference(set.from_list(f.type_params), dict_vals)
+          let computed =
+            collect_stmts_eq_vars(
+              f.body,
+              env0,
+              fn_map,
+              bmap,
+              ctx,
+              allowed,
+              existing,
+            )
+          let final_set =
+            set.intersection(computed, set.from_list(f.type_params))
+          let grew = set.size(final_set) > set.size(existing)
+          #(dict.insert(bmap, f.name, final_set), ch || grew)
+        })
+      case changed {
+        True ->
+          iterate_eq_bounds(
+            fns,
+            fn_map,
+            const_env,
+            ctx,
+            next_bounds,
+            iters_left - 1,
+          )
+        False -> next_bounds
+      }
+    }
+  }
+}
+
+fn collect_stmts_eq_vars(
+  stmts: List(IrStmt),
+  env: dict.Dict(String, IrType),
+  fn_map: dict.Dict(String, IrFunction),
+  bounds_map: dict.Dict(String, Set(String)),
+  ctx: EmitCtx,
+  allowed: Set(String),
+  acc: Set(String),
+) -> Set(String) {
+  case stmts {
+    [] -> acc
+    [stmt, ..rest] ->
+      case stmt {
+        IrStmtLet(pattern:, annotation:, value:) -> {
+          let acc1 =
+            collect_expr_eq_vars(
+              value,
+              env,
+              fn_map,
+              bounds_map,
+              ctx,
+              allowed,
+              acc,
+            )
+          let val_ty = case annotation {
+            Some(t) -> Some(t)
+            None -> infer_expr_type(value, env, fn_map, ctx)
+          }
+          let env1 = case val_ty {
+            Some(ty) -> bind_pattern_types(pattern, ty, env)
+            None -> env
+          }
+          collect_stmts_eq_vars(
+            rest,
+            env1,
+            fn_map,
+            bounds_map,
+            ctx,
+            allowed,
+            acc1,
+          )
+        }
+        IrStmtGuard(
+          value:,
+          pattern:,
+          guard_condition:,
+          abort_message:,
+          post_bindings:,
+        ) -> {
+          let acc1 =
+            collect_expr_eq_vars(
+              value,
+              env,
+              fn_map,
+              bounds_map,
+              ctx,
+              allowed,
+              acc,
+            )
+          let env1 = case infer_expr_type(value, env, fn_map, ctx) {
+            Some(ty) -> bind_pattern_types(pattern, ty, env)
+            None -> env
+          }
+          let env2 =
+            list.fold(post_bindings, env1, fn(e, b) {
+              case infer_expr_type(b.1, env1, fn_map, ctx) {
+                Some(ty) -> dict.insert(e, b.0, ty)
+                None -> e
+              }
+            })
+          let acc2 = case guard_condition {
+            Some(g) ->
+              collect_expr_eq_vars(
+                g,
+                env2,
+                fn_map,
+                bounds_map,
+                ctx,
+                allowed,
+                acc1,
+              )
+            None -> acc1
+          }
+          let acc3 = case abort_message {
+            Some(m) ->
+              collect_expr_eq_vars(
+                m,
+                env2,
+                fn_map,
+                bounds_map,
+                ctx,
+                allowed,
+                acc2,
+              )
+            None -> acc2
+          }
+          let acc4 =
+            list.fold(post_bindings, acc3, fn(a, b) {
+              collect_expr_eq_vars(
+                b.1,
+                env1,
+                fn_map,
+                bounds_map,
+                ctx,
+                allowed,
+                a,
+              )
+            })
+          collect_stmts_eq_vars(
+            rest,
+            env2,
+            fn_map,
+            bounds_map,
+            ctx,
+            allowed,
+            acc4,
+          )
+        }
+        IrStmtAssert(condition:, abort_message:) -> {
+          let acc1 =
+            collect_expr_eq_vars(
+              condition,
+              env,
+              fn_map,
+              bounds_map,
+              ctx,
+              allowed,
+              acc,
+            )
+          let acc2 = case abort_message {
+            Some(m) ->
+              collect_expr_eq_vars(
+                m,
+                env,
+                fn_map,
+                bounds_map,
+                ctx,
+                allowed,
+                acc1,
+              )
+            None -> acc1
+          }
+          collect_stmts_eq_vars(
+            rest,
+            env,
+            fn_map,
+            bounds_map,
+            ctx,
+            allowed,
+            acc2,
+          )
+        }
+        IrStmtExpr(expr) -> {
+          let acc1 =
+            collect_expr_eq_vars(
+              expr,
+              env,
+              fn_map,
+              bounds_map,
+              ctx,
+              allowed,
+              acc,
+            )
+          collect_stmts_eq_vars(
+            rest,
+            env,
+            fn_map,
+            bounds_map,
+            ctx,
+            allowed,
+            acc1,
+          )
+        }
+      }
+  }
+}
+
+fn collect_expr_eq_vars(
+  expr: IrExpr,
+  env: dict.Dict(String, IrType),
+  fn_map: dict.Dict(String, IrFunction),
+  bounds_map: dict.Dict(String, Set(String)),
+  ctx: EmitCtx,
+  allowed: Set(String),
+  acc: Set(String),
+) -> Set(String) {
+  case expr {
+    IrBinOp(op: IrEq, left:, right:) | IrBinOp(op: IrNotEq, left:, right:) -> {
+      let acc_children =
+        collect_expr_eq_vars(left, env, fn_map, bounds_map, ctx, allowed, acc)
+        |> collect_expr_eq_vars(right, env, fn_map, bounds_map, ctx, allowed, _)
+      case
+        is_empty_list_or_none(left, ctx.current_module),
+        is_empty_list_or_none(right, ctx.current_module)
+      {
+        None, None ->
+          case
+            infer_expr_type(left, env, fn_map, ctx),
+            infer_expr_type(right, env, fn_map, ctx)
+          {
+            Some(ty), _ -> collect_type_var_names(ty, acc_children)
+            None, Some(ty) -> collect_type_var_names(ty, acc_children)
+            None, None -> set.union(acc_children, allowed)
+          }
+        _, _ -> acc_children
+      }
+    }
+    IrBinOp(left:, right:, ..) ->
+      collect_expr_eq_vars(left, env, fn_map, bounds_map, ctx, allowed, acc)
+      |> collect_expr_eq_vars(right, env, fn_map, bounds_map, ctx, allowed, _)
+    IrCall(function:, args:) -> {
+      let acc1 =
+        collect_expr_eq_vars(
+          function,
+          env,
+          fn_map,
+          bounds_map,
+          ctx,
+          allowed,
+          acc,
+        )
+      let callee_param_types =
+        resolve_callee_param_types(function, env, fn_map, ctx, args)
+      let acc2 =
+        propagate_call_eq_vars(
+          function,
+          args,
+          env,
+          fn_map,
+          bounds_map,
+          ctx,
+          allowed,
+          acc1,
+        )
+      list.index_fold(args, acc2, fn(a, arg, idx) {
+        case arg.value, list_at_idx(callee_param_types, idx) {
+          IrFn(params:, body:, ..), Some(IrTypeFn(params: exp_ps, ..)) -> {
+            let fn_env = bind_fn_param_types(params, exp_ps, env)
+            collect_stmts_eq_vars(
+              body,
+              fn_env,
+              fn_map,
+              bounds_map,
+              ctx,
+              allowed,
+              a,
+            )
+          }
+          _, _ ->
+            collect_expr_eq_vars(
+              arg.value,
+              env,
+              fn_map,
+              bounds_map,
+              ctx,
+              allowed,
+              a,
+            )
+        }
+      })
+    }
+    IrBlock(stmts) ->
+      collect_stmts_eq_vars(stmts, env, fn_map, bounds_map, ctx, allowed, acc)
+    IrFn(params:, body:, ..) -> {
+      let env1 =
+        list.fold(params, env, fn(e, p) {
+          case p.param_type {
+            Some(pt) -> dict.insert(e, p.name, pt)
+            None -> e
+          }
+        })
+      collect_stmts_eq_vars(body, env1, fn_map, bounds_map, ctx, allowed, acc)
+    }
+    IrForLoop(bindings:, body:) -> {
+      let #(acc1, env1) =
+        list.fold(bindings, #(acc, env), fn(st, b) {
+          let #(a, e) = st
+          let a1 =
+            collect_expr_eq_vars(b.1, env, fn_map, bounds_map, ctx, allowed, a)
+          let e1 = case infer_expr_type(b.1, env, fn_map, ctx) {
+            Some(ty) -> dict.insert(e, b.0, ty)
+            None -> e
+          }
+          #(a1, e1)
+        })
+      collect_stmts_eq_vars(body, env1, fn_map, bounds_map, ctx, allowed, acc1)
+    }
+    IrMatch(subjects:, clauses:) -> {
+      let acc1 =
+        list.fold(subjects, acc, fn(a, s) {
+          collect_expr_eq_vars(s, env, fn_map, bounds_map, ctx, allowed, a)
+        })
+      let subj_tys =
+        list.map(subjects, fn(s) { infer_expr_type(s, env, fn_map, ctx) })
+      list.fold(clauses, acc1, fn(a, c) {
+        let c_env = case c.patterns {
+          [first_alt, ..] ->
+            list.fold(list.zip(first_alt, subj_tys), env, fn(e, pair) {
+              let #(pat, maybe_ty) = pair
+              case maybe_ty {
+                Some(ty) -> bind_pattern_types(pat, ty, e)
+                None -> e
+              }
+            })
+          [] -> env
+        }
+        let c_env2 =
+          list.fold(c.prefix_bindings, c_env, fn(e, b) {
+            case infer_expr_type(b.1, c_env, fn_map, ctx) {
+              Some(ty) -> dict.insert(e, b.0, ty)
+              None -> e
+            }
+          })
+        let a1 = case c.guard {
+          Some(g) ->
+            collect_expr_eq_vars(g, c_env2, fn_map, bounds_map, ctx, allowed, a)
+          None -> a
+        }
+        let a2 =
+          list.fold(c.prefix_bindings, a1, fn(x, b) {
+            collect_expr_eq_vars(
+              b.1,
+              c_env,
+              fn_map,
+              bounds_map,
+              ctx,
+              allowed,
+              x,
+            )
+          })
+        collect_expr_eq_vars(
+          c.body,
+          c_env2,
+          fn_map,
+          bounds_map,
+          ctx,
+          allowed,
+          a2,
+        )
+      })
+    }
+    IrNegateInt(inner)
+    | IrNegateBool(inner)
+    | IrBreak(inner)
+    | IrGetterCall(receiver: inner, ..)
+    | IrTupleIndex(tuple: inner, ..) ->
+      collect_expr_eq_vars(inner, env, fn_map, bounds_map, ctx, allowed, acc)
+    IrTuple(els) | IrContinue(els) ->
+      list.fold(els, acc, fn(a, e) {
+        collect_expr_eq_vars(e, env, fn_map, bounds_map, ctx, allowed, a)
+      })
+    IrList(elements:, tail:) -> {
+      let acc1 =
+        list.fold(elements, acc, fn(a, e) {
+          collect_expr_eq_vars(e, env, fn_map, bounds_map, ctx, allowed, a)
+        })
+      case tail {
+        Some(t) ->
+          collect_expr_eq_vars(t, env, fn_map, bounds_map, ctx, allowed, acc1)
+        None -> acc1
+      }
+    }
+    IrBitString(segments:) ->
+      list.fold(segments, acc, fn(a, seg) {
+        collect_expr_eq_vars(seg.0, env, fn_map, bounds_map, ctx, allowed, a)
+      })
+    IrEcho(expr: inner, message:, ..) -> {
+      let acc1 =
+        collect_expr_eq_vars(inner, env, fn_map, bounds_map, ctx, allowed, acc)
+      case message {
+        Some(m) ->
+          collect_expr_eq_vars(m, env, fn_map, bounds_map, ctx, allowed, acc1)
+        None -> acc1
+      }
+    }
+    IrAbort(message: Some(m), ..) ->
+      collect_expr_eq_vars(m, env, fn_map, bounds_map, ctx, allowed, acc)
+    IrModuleRef(target_module: "gleam/dict", ..)
+    | IrModuleRef(target_module: "gleam/set", ..) ->
+      case ctx.table {
+        None -> set.union(acc, allowed)
+        Some(_) -> acc
+      }
+    _ -> acc
+  }
+}
+
+fn propagate_call_eq_vars(
+  function: IrExpr,
+  args: List(IrCallArg),
+  env: dict.Dict(String, IrType),
+  fn_map: dict.Dict(String, IrFunction),
+  bounds_map: dict.Dict(String, Set(String)),
+  ctx: EmitCtx,
+  allowed: Set(String),
+  acc: Set(String),
+) -> Set(String) {
+  case function {
+    IrVar(callee_name) ->
+      case dict.get(fn_map, callee_name), dict.get(bounds_map, callee_name) {
+        Ok(callee_fn), Ok(callee_eq_vars) ->
+          case set.is_empty(callee_eq_vars) {
+            True -> acc
+            False -> {
+              let param_tys = list.map(callee_fn.params, fn(p) { p.param_type })
+              unify_call_eq_vars(
+                param_tys,
+                callee_fn.params,
+                args,
+                callee_eq_vars,
+                env,
+                fn_map,
+                ctx,
+                acc,
+              )
+            }
+          }
+        _, _ -> acc
+      }
+
+    IrModuleRef(target_module:, symbol:, ..) ->
+      case ctx.table {
+        None ->
+          case target_module {
+            "gleam/dict" | "gleam/set" -> set.union(acc, allowed)
+            _ -> acc
+          }
+        Some(tbl) ->
+          case lookup_table_fn_sig(tbl, target_module, symbol) {
+            None -> acc
+            Some(#(param_infos, ret_ty)) -> {
+              let eq_vars =
+                cross_module_eq_vars(target_module, symbol, param_infos, ret_ty)
+              case set.is_empty(eq_vars) {
+                True -> acc
+                False -> {
+                  let param_tys =
+                    list.map(param_infos, fn(pi) { pi.param_type })
+                  unify_call_eq_vars(
+                    param_tys,
+                    param_infos,
+                    args,
+                    eq_vars,
+                    env,
+                    fn_map,
+                    ctx,
+                    acc,
+                  )
+                }
+              }
+            }
+          }
+      }
+
+    _ -> acc
+  }
+}
+
+fn resolve_callee_param_types(
+  function: IrExpr,
+  env: dict.Dict(String, IrType),
+  fn_map: dict.Dict(String, IrFunction),
+  ctx: EmitCtx,
+  args: List(IrCallArg),
+) -> List(IrType) {
+  let raw_params = case function {
+    IrVar(callee_name) ->
+      case dict.get(fn_map, callee_name) {
+        Ok(callee_fn) -> Some(callee_fn.params)
+        Error(_) -> None
+      }
+    IrModuleRef(target_module:, symbol:, ..) ->
+      case ctx.table {
+        Some(tbl) ->
+          case lookup_table_fn_sig(tbl, target_module, symbol) {
+            Some(#(param_infos, _)) -> Some(param_infos)
+            None -> None
+          }
+        None -> None
+      }
+    _ -> None
+  }
+  case raw_params {
+    None -> []
+    Some(param_infos) -> {
+      let ordered_args = align_ir_call_args(param_infos, args)
+      let subst =
+        list.fold(list.zip(param_infos, ordered_args), dict.new(), fn(s, pair) {
+          let #(pi, maybe_arg) = pair
+          case maybe_arg {
+            Some(arg_val) ->
+              case infer_expr_type(arg_val, env, fn_map, ctx) {
+                Some(arg_ty) -> unify_ir_types(pi.param_type, arg_ty, s)
+                None -> s
+              }
+            None -> s
+          }
+        })
+      list.map(param_infos, fn(pi) { apply_ir_subst(pi.param_type, subst) })
+    }
+  }
+}
+
+fn align_ir_call_args(
+  params: List(IrParam),
+  args: List(IrCallArg),
+) -> List(Option(IrExpr)) {
+  let #(labelled, rev_pos) =
+    list.fold(args, #(dict.new(), []), fn(st, a) {
+      let #(lm, pos) = st
+      case a.label {
+        Some(lbl) -> #(dict.insert(lm, lbl, a.value), pos)
+        None -> #(lm, [a.value, ..pos])
+      }
+    })
+  let #(rev_out, _) =
+    list.fold(params, #([], list.reverse(rev_pos)), fn(st, p) {
+      let #(out, pos_q) = st
+      case p.label {
+        Some(lbl) ->
+          case dict.get(labelled, lbl) {
+            Ok(v) -> #([Some(v), ..out], pos_q)
+            Error(_) ->
+              case pos_q {
+                [v, ..rest] -> #([Some(v), ..out], rest)
+                [] -> #([None, ..out], pos_q)
+              }
+          }
+        None ->
+          case pos_q {
+            [v, ..rest] -> #([Some(v), ..out], rest)
+            [] -> #([None, ..out], pos_q)
+          }
+      }
+    })
+  list.reverse(rev_out)
+}
+
+fn unify_call_eq_vars(
+  param_tys: List(IrType),
+  param_infos: List(IrParam),
+  args: List(IrCallArg),
+  callee_eq_vars: Set(String),
+  env: dict.Dict(String, IrType),
+  fn_map: dict.Dict(String, IrFunction),
+  ctx: EmitCtx,
+  acc: Set(String),
+) -> Set(String) {
+  let _ = param_tys
+  let ordered_args = align_ir_call_args(param_infos, args)
+  let subst =
+    list.fold(list.zip(param_infos, ordered_args), dict.new(), fn(s, pair) {
+      let #(pi, maybe_arg) = pair
+      case maybe_arg {
+        Some(arg_val) ->
+          case infer_expr_type(arg_val, env, fn_map, ctx) {
+            Some(arg_ty) -> unify_ir_types(pi.param_type, arg_ty, s)
+            None -> s
+          }
+        None -> s
+      }
+    })
+  set.fold(callee_eq_vars, acc, fn(a, tp) {
+    case dict.get(subst, tp) {
+      Ok(caller_ty) -> collect_type_var_names(caller_ty, a)
+      Error(_) -> a
+    }
+  })
+}
+
+fn cross_module_eq_vars(
+  target_module: String,
+  symbol: String,
+  params: List(IrParam),
+  ret_ty: IrType,
+) -> Set(String) {
+  let base = collect_dict_key_vars(params, ret_ty)
+  case target_module, symbol, params {
+    "gleam/list", "contains", [_, p1, ..]
+    | "gleam/list", "key_find", [_, p1, ..]
+    | "gleam/list", "key_filter", [_, p1, ..]
+    | "gleam/list", "key_pop", [_, p1, ..]
+    | "gleam/list", "key_set", [_, p1, ..]
+    -> collect_type_var_names(p1.param_type, base)
+    "gleam/list", "unique", [p0, ..] ->
+      collect_type_var_names(p0.param_type, base)
+    "gleam/list", "chunk", [_, p1, ..] ->
+      case p1.param_type {
+        IrTypeFn(_, k_ret) -> collect_type_var_names(k_ret, base)
+        _ -> base
+      }
+    _, _, _ -> base
+  }
+}
+
+fn lookup_table_fn_sig(
+  tbl: SymbolTable,
+  target_mod: String,
+  symbol: String,
+) -> Option(#(List(IrParam), IrType)) {
+  case dict.get(tbl.modules, target_mod) {
+    Error(_) -> None
+    Ok(ms) -> {
+      let maybe_fi = case dict.get(ms.functions, symbol) {
+        Ok(fi) -> Some(fi)
+        Error(_) ->
+          dict.values(ms.functions)
+          |> list.find(fn(fi) { mangle.mangle_ident(fi.name) == symbol })
+          |> option.from_result
+      }
+      case maybe_fi {
+        None -> None
+        Some(fi) -> {
+          let params =
+            list.map(fi.parameters, fn(p) {
+              let pt = case p.resolved_type {
+                Some(rt) -> resolved_interface_to_ir(rt)
+                None -> IrTypeUnit
+              }
+              let name = case p.name {
+                glance.Named(n) -> mangle.mangle_ident(n)
+                glance.Discarded(_) -> "_"
+              }
+              IrParam(
+                label: option.map(p.label, mangle.mangle_ident),
+                name:,
+                param_type: pt,
+              )
+            })
+          let ret = case fi.return_type {
+            Some(rt) -> resolved_interface_to_ir(rt)
+            None -> IrTypeUnit
+          }
+          Some(#(params, ret))
+        }
+      }
+    }
+  }
+}
+
+fn resolved_interface_to_ir(rt: ResolvedType) -> IrType {
+  case rt {
+    NamedType(name:, package:, module:, parameters:) -> {
+      let args = list.map(parameters, resolved_interface_to_ir)
+      case module, name, args {
+        "gleam", "Int", [] -> IrTypeInt64
+        "gleam", "Float", [] -> IrTypeDouble
+        "gleam", "String", [] -> IrTypeString
+        "gleam", "Bool", [] -> IrTypeBool
+        "gleam", "Nil", [] -> IrTypeUnit
+        "gleam", "BitArray", [] -> IrTypeBitArray
+        "gleam", "List", [inner] -> IrTypeList(inner)
+        "gleam", "Result", [ok_t, err_t] -> IrTypeResult(ok_t, err_t)
+        _, _, _ ->
+          IrTypeNamed(module_alias: None, package:, module:, name:, args:)
+      }
+    }
+    TupleType(elements:) ->
+      IrTypeTuple(list.map(elements, resolved_interface_to_ir))
+    FnType(parameters:, return:) ->
+      IrTypeFn(
+        list.map(parameters, resolved_interface_to_ir),
+        resolved_interface_to_ir(return),
+      )
+    VariableType(id:) -> IrTypeVar(mangle.type_var_id_to_name(id))
+  }
+}
+
+fn infer_expr_type(
+  expr: IrExpr,
+  env: dict.Dict(String, IrType),
+  fn_map: dict.Dict(String, IrFunction),
+  ctx: EmitCtx,
+) -> Option(IrType) {
+  case expr {
+    IrInt(_) -> Some(IrTypeInt64)
+    IrFloat(_) -> Some(IrTypeDouble)
+    IrString(_) -> Some(IrTypeString)
+    IrBool(_) -> Some(IrTypeBool)
+    IrUnit -> Some(IrTypeUnit)
+    IrBitString(_) -> Some(IrTypeBitArray)
+    IrVar(name) -> dict.get(env, name) |> option.from_result
+    IrTuple(els) -> {
+      let inferred =
+        list.map(els, fn(e) { infer_expr_type(e, env, fn_map, ctx) })
+      case list.all(inferred, option.is_some) {
+        True ->
+          Some(IrTypeTuple(list.filter_map(inferred, option.to_result(_, Nil))))
+        False -> None
+      }
+    }
+    IrTupleIndex(tuple:, index:) ->
+      case infer_expr_type(tuple, env, fn_map, ctx) {
+        Some(IrTypeTuple(els)) -> list_at_idx(els, index)
+        _ -> None
+      }
+    IrList(elements:, tail:) ->
+      case tail {
+        Some(t) -> infer_expr_type(t, env, fn_map, ctx)
+        None ->
+          case elements {
+            [first, ..] ->
+              option.map(infer_expr_type(first, env, fn_map, ctx), IrTypeList)
+            [] -> None
+          }
+      }
+    IrBinOp(op:, ..) ->
+      case op {
+        IrEq
+        | IrNotEq
+        | IrAnd
+        | IrOr
+        | IrLtInt
+        | IrLtEqInt
+        | IrGtInt
+        | IrGtEqInt
+        | IrLtFloat
+        | IrLtEqFloat
+        | IrGtFloat
+        | IrGtEqFloat -> Some(IrTypeBool)
+        IrStringConcat -> Some(IrTypeString)
+        IrAddInt | IrSubInt | IrMultInt | IrDivInt | IrRemInt ->
+          Some(IrTypeInt64)
+        IrAddFloat | IrSubFloat | IrMultFloat | IrDivFloat -> Some(IrTypeDouble)
+      }
+    IrNegateBool(_) -> Some(IrTypeBool)
+    IrNegateInt(_) -> Some(IrTypeInt64)
+    IrCall(function:, args:) -> {
+      let sig = case function {
+        IrVar(name) ->
+          case dict.get(fn_map, name) {
+            Ok(callee) -> Some(#(callee.params, callee.return_type))
+            Error(_) -> None
+          }
+        IrModuleRef(target_module:, symbol:, ..) ->
+          case ctx.table {
+            Some(tbl) -> lookup_table_fn_sig(tbl, target_module, symbol)
+            None -> None
+          }
+        _ -> None
+      }
+      case sig {
+        Some(#(param_infos, ret_ty)) -> {
+          let ordered_args = align_ir_call_args(param_infos, args)
+          let subst =
+            list.fold(
+              list.zip(param_infos, ordered_args),
+              dict.new(),
+              fn(s, pair) {
+                let #(pi, maybe_arg) = pair
+                case maybe_arg {
+                  Some(arg_val) ->
+                    case infer_expr_type(arg_val, env, fn_map, ctx) {
+                      Some(arg_ty) -> unify_ir_types(pi.param_type, arg_ty, s)
+                      None -> s
+                    }
+                  None -> s
+                }
+              },
+            )
+          Some(apply_call_ret_subst(ret_ty, subst))
+        }
+        None -> None
+      }
+    }
+    IrBlock(stmts) ->
+      case list.last(stmts) {
+        Ok(IrStmtExpr(e)) -> infer_expr_type(e, env, fn_map, ctx)
+        _ -> None
+      }
+    IrEcho(expr: inner, ..) -> infer_expr_type(inner, env, fn_map, ctx)
+    _ -> None
+  }
+}
+
+fn bind_pattern_types(
+  pat: IrPattern,
+  ty: IrType,
+  env: dict.Dict(String, IrType),
+) -> dict.Dict(String, IrType) {
+  case pat, ty {
+    IrPatVar(name), _ -> dict.insert(env, name, ty)
+    IrPatAs(inner, alias), _ ->
+      bind_pattern_types(inner, ty, dict.insert(env, alias, ty))
+    IrPatTuple(pats), IrTypeTuple(tys) ->
+      list.fold(list.zip(pats, tys), env, fn(e, pair) {
+        bind_pattern_types(pair.0, pair.1, e)
+      })
+    IrPatVariant(constructor: "Cons", args: [h_arg, t_arg], ..),
+      IrTypeList(inner)
+    ->
+      env
+      |> bind_pattern_types(h_arg.pattern, inner, _)
+      |> bind_pattern_types(t_arg.pattern, IrTypeList(inner), _)
+    IrPatVariant(constructor: "Ok", args: [ok_arg], ..), IrTypeResult(ok_t, _)
+    -> bind_pattern_types(ok_arg.pattern, ok_t, env)
+    IrPatVariant(constructor: "Err", args: [err_arg], ..),
+      IrTypeResult(_, err_t)
+    -> bind_pattern_types(err_arg.pattern, err_t, env)
+    IrPatVariant(constructor: "Some", args: [some_arg], ..),
+      IrTypeNamed(module: "gleam/option", name: "Option", args: [inner], ..)
+    -> bind_pattern_types(some_arg.pattern, inner, env)
+    _, _ -> env
+  }
+}
+
+fn bind_fn_param_types(
+  params: List(IrFnParam),
+  expected: List(IrType),
+  env: dict.Dict(String, IrType),
+) -> dict.Dict(String, IrType) {
+  list.fold(list.zip(params, expected), env, fn(e, pair) {
+    let #(p, exp_ty) = pair
+    let final_ty = option.unwrap(p.param_type, exp_ty)
+    dict.insert(e, p.name, final_ty)
+  })
+}
+
+fn unify_ir_types(
+  pattern_ty: IrType,
+  concrete_ty: IrType,
+  subst: dict.Dict(String, IrType),
+) -> dict.Dict(String, IrType) {
+  case pattern_ty, concrete_ty {
+    IrTypeVar(v), _ ->
+      case string.starts_with(v, "__free") {
+        True -> subst
+        False ->
+          case concrete_ty {
+            IrTypeVar(cv) ->
+              case string.starts_with(cv, "__free") {
+                True -> subst
+                False ->
+                  case dict.has_key(subst, v) {
+                    True -> subst
+                    False -> dict.insert(subst, v, concrete_ty)
+                  }
+              }
+            _ ->
+              case dict.has_key(subst, v) {
+                True -> subst
+                False -> dict.insert(subst, v, concrete_ty)
+              }
+          }
+      }
+    IrTypeList(p_in), IrTypeList(c_in) -> unify_ir_types(p_in, c_in, subst)
+    IrTypeResult(po, pe), IrTypeResult(co, ce) ->
+      unify_ir_types(pe, ce, unify_ir_types(po, co, subst))
+    IrTypeTuple(ps), IrTypeTuple(cs) ->
+      list.fold(list.zip(ps, cs), subst, fn(s, pair) {
+        unify_ir_types(pair.0, pair.1, s)
+      })
+    IrTypeFn(pp, pr), IrTypeFn(cp, cr) -> {
+      let s1 =
+        list.fold(list.zip(pp, cp), subst, fn(s, pair) {
+          unify_ir_types(pair.0, pair.1, s)
+        })
+      unify_ir_types(pr, cr, s1)
+    }
+    IrTypeNamed(module: pm, name: pn, args: pas, ..),
+      IrTypeNamed(module: cm, name: cn, args: cas, ..)
+      if pm == cm && pn == cn
+    ->
+      list.fold(list.zip(pas, cas), subst, fn(s, pair) {
+        unify_ir_types(pair.0, pair.1, s)
+      })
+    _, _ -> subst
+  }
+}
+
+fn apply_call_ret_subst(
+  ty: IrType,
+  subst: dict.Dict(String, IrType),
+) -> IrType {
+  case ty {
+    IrTypeVar(v) ->
+      case dict.get(subst, v) {
+        Ok(t) -> t
+        Error(_) ->
+          case string.starts_with(v, "__free") {
+            True -> ty
+            False -> IrTypeVar("__free_" <> v)
+          }
+      }
+    IrTypeList(inner) -> IrTypeList(apply_call_ret_subst(inner, subst))
+    IrTypeResult(ok_t, err_t) ->
+      IrTypeResult(
+        apply_call_ret_subst(ok_t, subst),
+        apply_call_ret_subst(err_t, subst),
+      )
+    IrTypeTuple(els) ->
+      IrTypeTuple(list.map(els, apply_call_ret_subst(_, subst)))
+    IrTypeFn(ps, r) ->
+      IrTypeFn(
+        list.map(ps, apply_call_ret_subst(_, subst)),
+        apply_call_ret_subst(r, subst),
+      )
+    IrTypeNamed(args:, ..) ->
+      IrTypeNamed(..ty, args: list.map(args, apply_call_ret_subst(_, subst)))
+    _ -> ty
+  }
+}
+
+fn apply_ir_subst(ty: IrType, subst: dict.Dict(String, IrType)) -> IrType {
+  case ty {
+    IrTypeVar(v) ->
+      case dict.get(subst, v) {
+        Ok(t) -> t
+        Error(_) -> ty
+      }
+    IrTypeList(inner) -> IrTypeList(apply_ir_subst(inner, subst))
+    IrTypeResult(ok_t, err_t) ->
+      IrTypeResult(apply_ir_subst(ok_t, subst), apply_ir_subst(err_t, subst))
+    IrTypeTuple(els) -> IrTypeTuple(list.map(els, apply_ir_subst(_, subst)))
+    IrTypeFn(ps, r) ->
+      IrTypeFn(list.map(ps, apply_ir_subst(_, subst)), apply_ir_subst(r, subst))
+    IrTypeNamed(args:, ..) ->
+      IrTypeNamed(..ty, args: list.map(args, apply_ir_subst(_, subst)))
+    _ -> ty
+  }
+}
+
+fn collect_type_var_names(ty: IrType, acc: Set(String)) -> Set(String) {
+  case ty {
+    IrTypeVar(v) -> set.insert(acc, v)
+    IrTypeList(inner) -> collect_type_var_names(inner, acc)
+    IrTypeResult(ok_t, err_t) ->
+      collect_type_var_names(err_t, collect_type_var_names(ok_t, acc))
+    IrTypeTuple(els) ->
+      list.fold(els, acc, fn(s, e) { collect_type_var_names(e, s) })
+    IrTypeFn(ps, r) ->
+      collect_type_var_names(
+        r,
+        list.fold(ps, acc, fn(s, p) { collect_type_var_names(p, s) }),
+      )
+    IrTypeNamed(args:, ..) ->
+      list.fold(args, acc, fn(s, a) { collect_type_var_names(a, s) })
+    _ -> acc
+  }
+}
+
+fn list_at_idx(items: List(a), index: Int) -> Option(a) {
+  case items, index {
+    [], _ -> None
+    [head, ..], 0 -> Some(head)
+    [_, ..tail], i if i > 0 -> list_at_idx(tail, i - 1)
+    _, _ -> None
+  }
+}
+
 fn collect_dict_key_vars(params: List(IrParam), ret: IrType) -> Set(String) {
   let all = list.append(list.map(params, fn(p) { p.param_type }), [ret])
   list.fold(all, set.new(), fn(acc, t) { walk_type_dict_keys(t, acc) })
@@ -1730,13 +3108,18 @@ fn collect_dict_key_vars(params: List(IrParam), ret: IrType) -> Set(String) {
 
 fn walk_type_dict_keys(ty: IrType, acc: Set(String)) -> Set(String) {
   case ty {
-    IrTypeNamed(module: "gleam/dict", name: "Dict", args: [k_ty, v_ty], ..) -> {
-      let with_k = case k_ty {
-        IrTypeVar(v) -> set.insert(acc, v)
-        _ -> walk_type_dict_keys(k_ty, acc)
-      }
+    IrTypeNamed(module: "gleam/dict", name: "Dict", args: [k_ty, v_ty], ..)
+    | IrTypeNamed(
+        module: "gleam/dict",
+        name: "TransientDict",
+        args: [k_ty, v_ty],
+        ..,
+      ) -> {
+      let with_k = collect_type_var_names(k_ty, acc)
       walk_type_dict_keys(v_ty, with_k)
     }
+    IrTypeNamed(module: "gleam/set", name: "Set", args: [m_ty], ..) ->
+      collect_type_var_names(m_ty, acc)
     IrTypeList(inner) -> walk_type_dict_keys(inner, acc)
     IrTypeResult(ok_t, err_t) ->
       walk_type_dict_keys(err_t, walk_type_dict_keys(ok_t, acc))
@@ -1771,7 +3154,13 @@ fn walk_type_val_vars(
   other_vars: Set(String),
 ) -> #(Set(String), Set(String)) {
   case ty {
-    IrTypeNamed(module: "gleam/dict", name: "Dict", args: [k_ty, v_ty], ..) -> {
+    IrTypeNamed(module: "gleam/dict", name: "Dict", args: [k_ty, v_ty], ..)
+    | IrTypeNamed(
+        module: "gleam/dict",
+        name: "TransientDict",
+        args: [k_ty, v_ty],
+        ..,
+      ) -> {
       let #(dv1, ov1) = walk_type_val_vars(k_ty, dict_vals, other_vars)
       case v_ty {
         IrTypeVar(v) -> #(set.insert(dv1, v), ov1)
@@ -1864,14 +3253,6 @@ fn expr_any(expr: IrExpr, pred: fn(IrExpr) -> Bool) -> Bool {
   }
 }
 
-fn expr_is_eq_or_dict(expr: IrExpr) -> Bool {
-  case expr {
-    IrBinOp(op: IrEq, ..) | IrBinOp(op: IrNotEq, ..) -> True
-    IrModuleRef(target_module: "gleam/dict", ..) -> True
-    _ -> False
-  }
-}
-
 fn expr_is_inspect(expr: IrExpr) -> Bool {
   case expr {
     IrEcho(_, _, _, _) -> True
@@ -1953,4 +3334,206 @@ fn map_acc(
       #([rendered, ..out_acc], next_ctx)
     })
   #(list.reverse(rev_out), final_ctx)
+}
+
+fn collect_td_dict_key_vars(td: IrTypeDef) -> Set(String) {
+  let used =
+    list.fold(td.variants, set.new(), fn(acc, v) {
+      list.fold(v.fields, acc, fn(inner, f) {
+        walk_type_dict_keys(f.field_type, inner)
+      })
+    })
+  set.intersection(used, set.from_list(td.type_params))
+}
+
+fn emit_type_eq_impl(td: IrTypeDef, dict_key_params: Set(String)) -> String {
+  let vis = case td.publicity {
+    glance.Public -> "pub "
+    glance.Private -> ""
+  }
+  let impl_generics = case td.type_params {
+    [] -> ""
+    tps ->
+      "["
+      <> {
+        list.map(tps, fn(tp) {
+          case set.contains(dict_key_params, tp) {
+            True -> tp <> " : Eq + Hash"
+            False -> tp <> " : Eq"
+          }
+        })
+        |> string.join(", ")
+      }
+      <> "]"
+  }
+  let self_ty = td.name <> format_type_params(td.type_params)
+  let body = case td.variants {
+    [] -> "  @prelude.ignore(self)\n  @prelude.ignore(other)\n  true"
+    variants -> {
+      let arms =
+        list.map(variants, fn(v) {
+          case v.fields {
+            [] -> "    (" <> v.name <> ", " <> v.name <> ") => true"
+            fields -> {
+              let #(lhs_pats, rhs_pats, cmps) =
+                list.index_fold(fields, #([], [], []), fn(acc, f, idx) {
+                  let #(lp, rp, cs) = acc
+                  let lname = "l" <> int.to_string(idx)
+                  let rname = "r" <> int.to_string(idx)
+                  let #(lpat, rpat) = case f.label {
+                    Some(lbl) -> #(lbl <> "=" <> lname, lbl <> "=" <> rname)
+                    None -> #(lname, rname)
+                  }
+                  #([lpat, ..lp], [rpat, ..rp], [lname <> " == " <> rname, ..cs])
+                })
+              let l_str =
+                list.reverse(lhs_pats)
+                |> string.join(", ")
+              let r_str =
+                list.reverse(rhs_pats)
+                |> string.join(", ")
+              let cmp_str =
+                list.reverse(cmps)
+                |> string.join(" && ")
+              "    ("
+              <> v.name
+              <> "("
+              <> l_str
+              <> "), "
+              <> v.name
+              <> "("
+              <> r_str
+              <> ")) => "
+              <> cmp_str
+            }
+          }
+        })
+      let all_arms = case list.length(variants) > 1 {
+        True -> list.append(arms, ["    _ => false"])
+        False -> arms
+      }
+      "  match (self, other) {\n" <> string.join(all_arms, "\n") <> "\n  }"
+    }
+  }
+  "///|\n"
+  <> vis
+  <> "impl"
+  <> impl_generics
+  <> " Eq for "
+  <> self_ty
+  <> " with equal(self, other) {\n"
+  <> body
+  <> "\n}"
+}
+
+fn is_alias_referenced_in_module(module: IrModule, alias_name: String) -> Bool {
+  let in_types =
+    list.any(module.types, fn(td) {
+      td.external_type == None
+      && list.any(td.variants, fn(v) {
+        list.any(v.fields, fn(f) {
+          type_uses_local_name(f.field_type, alias_name)
+        })
+      })
+    })
+  let in_aliases =
+    list.any(module.type_aliases, fn(ta) {
+      ta.publicity == glance.Public
+      && type_uses_local_name(ta.aliased, alias_name)
+    })
+  let in_getters =
+    list.any(module.getters, fn(g) {
+      type_uses_local_name(g.return_type, alias_name)
+    })
+  let in_consts =
+    list.any(module.constants, fn(c) {
+      type_uses_local_name(c.value_type, alias_name)
+    })
+  let in_fns =
+    list.any(module.functions, fn(f) {
+      list.any(f.params, fn(p) {
+        type_uses_local_name(p.param_type, alias_name)
+      })
+      || type_uses_local_name(f.return_type, alias_name)
+      || stmts_use_local_type(f.body, alias_name)
+    })
+  in_types || in_aliases || in_getters || in_consts || in_fns
+}
+
+fn type_uses_local_name(ty: IrType, alias_name: String) -> Bool {
+  case ty {
+    IrTypeNamed(module: "", name:, args:, ..) ->
+      name == alias_name || list.any(args, type_uses_local_name(_, alias_name))
+    IrTypeNamed(args:, ..) ->
+      list.any(args, type_uses_local_name(_, alias_name))
+    IrTypeList(inner) -> type_uses_local_name(inner, alias_name)
+    IrTypeResult(ok_t, err_t) ->
+      type_uses_local_name(ok_t, alias_name)
+      || type_uses_local_name(err_t, alias_name)
+    IrTypeTuple(els) -> list.any(els, type_uses_local_name(_, alias_name))
+    IrTypeFn(ps, r) ->
+      list.any(ps, type_uses_local_name(_, alias_name))
+      || type_uses_local_name(r, alias_name)
+    _ -> False
+  }
+}
+
+fn stmts_use_local_type(stmts: List(IrStmt), alias_name: String) -> Bool {
+  list.any(stmts, fn(s) {
+    case s {
+      IrStmtLet(annotation: Some(ann), value:, ..) ->
+        type_uses_local_name(ann, alias_name)
+        || expr_uses_local_type(value, alias_name)
+      IrStmtLet(value:, ..) -> expr_uses_local_type(value, alias_name)
+      IrStmtGuard(value:, guard_condition:, abort_message:, post_bindings:, ..) ->
+        expr_uses_local_type(value, alias_name)
+        || option.map(guard_condition, expr_uses_local_type(_, alias_name))
+        == Some(True)
+        || option.map(abort_message, expr_uses_local_type(_, alias_name))
+        == Some(True)
+        || list.any(post_bindings, fn(b) {
+          expr_uses_local_type(b.1, alias_name)
+        })
+      IrStmtAssert(condition:, abort_message:) ->
+        expr_uses_local_type(condition, alias_name)
+        || option.map(abort_message, expr_uses_local_type(_, alias_name))
+        == Some(True)
+      IrStmtExpr(expr) -> expr_uses_local_type(expr, alias_name)
+    }
+  })
+}
+
+fn expr_uses_local_type(expr: IrExpr, alias_name: String) -> Bool {
+  case expr {
+    IrFn(params:, return_type:, body:) ->
+      list.any(params, fn(p) {
+        option.map(p.param_type, type_uses_local_name(_, alias_name))
+        == Some(True)
+      })
+      || option.map(return_type, type_uses_local_name(_, alias_name))
+      == Some(True)
+      || stmts_use_local_type(body, alias_name)
+    IrBlock(stmts) -> stmts_use_local_type(stmts, alias_name)
+    IrForLoop(bindings:, body:) ->
+      list.any(bindings, fn(b) { expr_uses_local_type(b.1, alias_name) })
+      || stmts_use_local_type(body, alias_name)
+    IrBinOp(left:, right:, ..) ->
+      expr_uses_local_type(left, alias_name)
+      || expr_uses_local_type(right, alias_name)
+    IrNegateInt(i) | IrNegateBool(i) | IrBreak(i) ->
+      expr_uses_local_type(i, alias_name)
+    IrTuple(els) | IrContinue(els) ->
+      list.any(els, expr_uses_local_type(_, alias_name))
+    IrTupleIndex(tuple:, ..) -> expr_uses_local_type(tuple, alias_name)
+    IrList(elements:, tail:) ->
+      list.any(elements, expr_uses_local_type(_, alias_name))
+      || option.map(tail, expr_uses_local_type(_, alias_name)) == Some(True)
+    IrCall(function:, args:) ->
+      expr_uses_local_type(function, alias_name)
+      || list.any(args, fn(a) { expr_uses_local_type(a.value, alias_name) })
+    IrMatch(subjects:, clauses:) ->
+      list.any(subjects, expr_uses_local_type(_, alias_name))
+      || list.any(clauses, fn(c) { expr_uses_local_type(c.body, alias_name) })
+    _ -> False
+  }
 }

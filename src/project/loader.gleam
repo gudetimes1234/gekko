@@ -34,16 +34,11 @@ type DiscoveredPkg {
   )
 }
 
-/// Return True if `pkg_name` is handled directly by `gekko`'s built-in MoonBit
-/// runtime shims or target-specific test/runtime packages that must not be
-/// transpiled from Erlang/JS sources.
+/// Return True if `pkg_name` is a target-specific test/runtime package that
+/// must not be transpiled from Erlang/JS sources.
 pub fn is_intercepted_package(pkg_name: String) -> Bool {
   case pkg_name {
-    "gleam_stdlib"
-    | "gleam_json"
-    | "gleeunit"
-    | "gleam_erlang"
-    | "gleam_javascript" -> True
+    "gleeunit" | "gleam_erlang" | "gleam_javascript" -> True
     _ -> False
   }
 }
@@ -103,8 +98,9 @@ pub fn discover_and_parse(
 }
 
 /// Discover, topologically sort, parse, validate externals, and extract
-/// compiler interfaces for all non-intercepted Hex dependencies in
-/// `<project_root>/build/packages/`.
+/// compiler interfaces for all non-intercepted Hex and local-path dependencies
+/// in `<project_root>/build/packages/` and `<project_root>/manifest.toml` /
+/// `<project_root>/gleam.toml`.
 pub fn load_dependencies(
   project_root: String,
   ffi_overrides: Dict(String, FfiKind),
@@ -115,16 +111,243 @@ pub fn load_dependencies(
     |> filepath.join("build")
     |> filepath.join("packages")
 
-  case simplifile.is_directory(packages_dir) {
-    Ok(True) -> {
-      use discovered <- result.try(discover_packages(packages_dir, root_name))
-      let ordered = topo_sort_packages(discovered)
-      list.try_map(ordered, fn(pkg) {
-        load_single_dependency(project_root, pkg, ffi_overrides)
-      })
-    }
+  use build_pkgs <- result.try(case simplifile.is_directory(packages_dir) {
+    Ok(True) -> discover_packages(packages_dir, root_name)
     _ -> Ok([])
+  })
+  use local_pkgs <- result.try(discover_local_path_packages(
+    project_root,
+    root_name,
+  ))
+
+  let combined_map =
+    list.append(build_pkgs, local_pkgs)
+    |> list.fold(dict.new(), fn(acc, pkg) {
+      dict.insert(acc, pkg.package_name, pkg)
+    })
+
+  let discovered =
+    combined_map
+    |> dict.to_list
+    |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+    |> list.map(fn(pair) { pair.1 })
+
+  let ordered = topo_sort_packages(discovered)
+  list.try_map(ordered, fn(pkg) {
+    load_single_dependency(project_root, pkg, ffi_overrides)
+  })
+}
+
+fn discover_local_path_packages(
+  project_root: String,
+  root_name: String,
+) -> Result(List(DiscoveredPkg), String) {
+  let manifest_path = filepath.join(project_root, "manifest.toml")
+  use from_manifest <- result.try(case simplifile.is_file(manifest_path) {
+    Ok(True) ->
+      read_local_packages_from_manifest(manifest_path, project_root, root_name)
+    _ -> Ok([])
+  })
+  use from_toml <- result.try(collect_gleam_toml_path_deps(
+    [project_root],
+    root_name,
+    set.new(),
+    dict.new(),
+  ))
+  let by_name =
+    list.fold(from_manifest, from_toml, fn(acc, pkg) {
+      dict.insert(acc, pkg.package_name, pkg)
+    })
+  Ok(dict.values(by_name))
+}
+
+fn read_local_packages_from_manifest(
+  manifest_path: String,
+  project_root: String,
+  root_name: String,
+) -> Result(List(DiscoveredPkg), String) {
+  use content <- result.try(
+    simplifile.read(manifest_path)
+    |> result.map_error(fn(err) {
+      "Failed to read "
+      <> manifest_path
+      <> ": "
+      <> simplifile.describe_error(err)
+    }),
+  )
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(fn(_) {
+      "Failed to parse " <> manifest_path <> " as TOML"
+    }),
+  )
+  case tom.get_array(parsed, ["packages"]) {
+    Error(_) -> Ok([])
+    Ok(items) ->
+      Ok(
+        list.filter_map(items, fn(item) {
+          case item {
+            tom.InlineTable(tbl) | tom.Table(tbl) ->
+              case
+                tom.get_string(tbl, ["source"]),
+                tom.get_string(tbl, ["path"]),
+                tom.get_string(tbl, ["name"])
+              {
+                Ok("local"), Ok(rel_or_abs), Ok(name) -> {
+                  case name == root_name || is_intercepted_package(name) {
+                    True -> Error(Nil)
+                    False -> {
+                      let pkg_root = resolve_dep_path(project_root, rel_or_abs)
+                      let version =
+                        tom.get_string(tbl, ["version"])
+                        |> result.unwrap("0.1.0")
+                      let deps = case tom.get_array(tbl, ["requirements"]) {
+                        Ok(reqs) ->
+                          list.filter_map(reqs, fn(r) {
+                            case r {
+                              tom.String(s) -> Ok(s)
+                              _ -> Error(Nil)
+                            }
+                          })
+                        Error(_) -> []
+                      }
+                      Ok(DiscoveredPkg(
+                        package_name: name,
+                        version:,
+                        package_root: pkg_root,
+                        deps:,
+                      ))
+                    }
+                  }
+                }
+                _, _, _ -> Error(Nil)
+              }
+            _ -> Error(Nil)
+          }
+        }),
+      )
   }
+}
+
+fn collect_gleam_toml_path_deps(
+  queue: List(String),
+  root_name: String,
+  visited_roots: Set(String),
+  acc: Dict(String, DiscoveredPkg),
+) -> Result(Dict(String, DiscoveredPkg), String) {
+  case queue {
+    [] -> Ok(acc)
+    [cur_root, ..rest] -> {
+      let norm_root = simplifile.resolve(cur_root) |> result.unwrap(cur_root)
+      case set.contains(visited_roots, norm_root) {
+        True ->
+          collect_gleam_toml_path_deps(rest, root_name, visited_roots, acc)
+        False -> {
+          let next_visited = set.insert(visited_roots, norm_root)
+          let toml_path = filepath.join(norm_root, "gleam.toml")
+          case simplifile.read(toml_path) {
+            Error(_) ->
+              collect_gleam_toml_path_deps(rest, root_name, next_visited, acc)
+            Ok(content) ->
+              case tom.parse(content) {
+                Error(_) ->
+                  collect_gleam_toml_path_deps(
+                    rest,
+                    root_name,
+                    next_visited,
+                    acc,
+                  )
+                Ok(parsed) -> {
+                  let dep_tables =
+                    [
+                      tom.get_table(parsed, ["dependencies"]),
+                      tom.get_table(parsed, ["dev-dependencies"]),
+                    ]
+                    |> list.filter_map(fn(r) { r })
+                  let #(next_queue, next_acc) =
+                    list.fold(dep_tables, #(rest, acc), fn(st, tbl) {
+                      dict.fold(tbl, st, fn(st_inner, dep_name, val) {
+                        let #(q, d_acc) = st_inner
+                        case val {
+                          tom.InlineTable(dep_tbl) | tom.Table(dep_tbl) ->
+                            case tom.get_string(dep_tbl, ["path"]) {
+                              Ok(rel_or_abs) -> {
+                                let pkg_root =
+                                  resolve_dep_path(norm_root, rel_or_abs)
+                                let pkg_toml =
+                                  filepath.join(pkg_root, "gleam.toml")
+                                case
+                                  simplifile.is_directory(pkg_root),
+                                  simplifile.is_file(pkg_toml)
+                                {
+                                  Ok(True), Ok(True) -> {
+                                    use_pkg(
+                                      dep_name,
+                                      pkg_root,
+                                      pkg_toml,
+                                      root_name,
+                                      q,
+                                      d_acc,
+                                    )
+                                  }
+                                  _, _ -> st_inner
+                                }
+                              }
+                              Error(_) -> st_inner
+                            }
+                          _ -> st_inner
+                        }
+                      })
+                    })
+                  collect_gleam_toml_path_deps(
+                    next_queue,
+                    root_name,
+                    next_visited,
+                    next_acc,
+                  )
+                }
+              }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn use_pkg(
+  fallback_name: String,
+  pkg_root: String,
+  pkg_toml: String,
+  root_name: String,
+  queue: List(String),
+  acc: Dict(String, DiscoveredPkg),
+) -> #(List(String), Dict(String, DiscoveredPkg)) {
+  case read_package_manifest(pkg_toml, fallback_name) {
+    Ok(#(name, version, deps)) ->
+      case name == root_name || is_intercepted_package(name) {
+        True -> #(queue, acc)
+        False -> {
+          let pkg =
+            DiscoveredPkg(
+              package_name: name,
+              version:,
+              package_root: pkg_root,
+              deps:,
+            )
+          #([pkg_root, ..queue], dict.insert(acc, name, pkg))
+        }
+      }
+    Error(_) -> #(queue, acc)
+  }
+}
+
+fn resolve_dep_path(base_root: String, rel_or_abs: String) -> String {
+  let abs_base = simplifile.resolve(base_root) |> result.unwrap(base_root)
+  let raw = case filepath.is_absolute(rel_or_abs) {
+    True -> rel_or_abs
+    False -> filepath.join(abs_base, rel_or_abs)
+  }
+  filepath.expand(raw) |> result.unwrap(raw)
 }
 
 fn discover_packages(
@@ -285,11 +508,42 @@ fn validate_dependency_externals(
 ) -> Result(Nil, String) {
   list.try_each(modules, fn(entry) {
     let #(mod_name, ast_mod, prepass_res) = entry
-    list.try_each(ast_mod.functions, fn(fn_def) {
-      case symbol_table.is_excluded_target(fn_def.attributes) {
-        True -> Ok(Nil)
-        False -> {
-          let fn_name = fn_def.definition.name
+    let active_fns =
+      list.filter(ast_mod.functions, fn(fn_def) {
+        !symbol_table.is_excluded_target(fn_def.attributes)
+      })
+    let fn_infos =
+      list.fold(active_fns, dict.new(), fn(acc, fn_def) {
+        let fn_name = fn_def.definition.name
+        let ffi =
+          symbol_table.resolve_function_ffi(
+            pkg_name,
+            mod_name,
+            fn_name,
+            prepass_res,
+            ffi_overrides,
+          )
+        let info =
+          symbol_table.FunctionInfo(
+            module: mod_name,
+            name: fn_name,
+            publicity: fn_def.definition.publicity,
+            arity: list.length(fn_def.definition.parameters),
+            parameters: [],
+            return_type: None,
+            resolved: None,
+            ffi:,
+            has_erlang_or_js_external: False,
+            has_gleam_body: fn_def.definition.body != [],
+          )
+        dict.insert(acc, fn_name, info)
+      })
+    let reachable = symbol_table.reachable_private_functions(ast_mod, fn_infos)
+    list.try_each(active_fns, fn(fn_def) {
+      let fn_name = fn_def.definition.name
+      case set.contains(reachable, fn_name) {
+        False -> Ok(Nil)
+        True -> {
           let has_erl_or_js = has_erlang_or_js_external(fn_def.attributes)
           let has_ffi_mapping =
             symbol_table.resolve_function_ffi(

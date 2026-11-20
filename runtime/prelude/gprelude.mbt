@@ -60,6 +60,17 @@ pub(all) enum Order {
 
 ///|
 #derive(Eq, Debug, Hash)
+pub(all) struct UtfCodepoint {
+  code : Int64
+}
+
+///|
+pub impl GleamInspect for UtfCodepoint with gleam_inspect(self) {
+  "UtfCodepoint(" + self.code.to_string() + ")"
+}
+
+///|
+#derive(Eq, Debug, Hash)
 pub(all) struct BitArray {
   data : Bytes
 }
@@ -188,7 +199,7 @@ pub(all) enum Dynamic {
   DynBitArray(BitArray)
   DynList(GList[Dynamic])
   DynArray(Array[Dynamic])
-  DynMap(Map[String, Dynamic])
+  DynMap(Map[Dynamic, Dynamic])
 }
 
 ///|
@@ -506,7 +517,7 @@ pub impl GleamInspect for Dynamic with gleam_inspect(self) {
         }
         first = false
         buf.write_string("#(")
-        buf.write_string(escape_gleam_string(k))
+        buf.write_string(GleamInspect::gleam_inspect(k))
         buf.write_string(", ")
         buf.write_string(GleamInspect::gleam_inspect(v))
         buf.write_char(')')
@@ -515,6 +526,70 @@ pub impl GleamInspect for Dynamic with gleam_inspect(self) {
       buf.to_string()
     }
   }
+}
+
+///|
+pub(open) trait ToDynamic {
+  to_dynamic(Self) -> Dynamic
+}
+
+///|
+pub impl ToDynamic for Dynamic with to_dynamic(self) {
+  self
+}
+
+///|
+pub impl ToDynamic for String with to_dynamic(self) {
+  DynString(self)
+}
+
+///|
+pub impl ToDynamic for Int64 with to_dynamic(self) {
+  DynInt(self)
+}
+
+///|
+pub impl ToDynamic for Double with to_dynamic(self) {
+  DynFloat(self)
+}
+
+///|
+pub impl ToDynamic for Bool with to_dynamic(self) {
+  DynBool(self)
+}
+
+///|
+pub impl ToDynamic for Unit with to_dynamic(_) {
+  DynNull
+}
+
+///|
+pub impl ToDynamic for BitArray with to_dynamic(self) {
+  DynBitArray(self)
+}
+
+///|
+pub impl ToDynamic for UtfCodepoint with to_dynamic(self) {
+  DynInt(self.code)
+}
+
+///|
+pub impl[T : ToDynamic] ToDynamic for Option[T] with to_dynamic(self) {
+  match self {
+    Some(v) => ToDynamic::to_dynamic(v)
+    None => DynNull
+  }
+}
+
+///|
+pub impl[T : ToDynamic] ToDynamic for GList[T] with to_dynamic(self) {
+  let rev = for cur = self, acc = (Nil : GList[Dynamic]) {
+    match cur {
+      Nil => break acc
+      Cons(x, rest) => continue rest, Cons(ToDynamic::to_dynamic(x), acc)
+    }
+  }
+  DynList(rev.reverse())
 }
 
 ///|

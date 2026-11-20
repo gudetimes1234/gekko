@@ -1,4 +1,5 @@
 import filepath
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -13,6 +14,7 @@ import project/text_edit.{
   type TextEdit, TextEdit, apply_edits, skip_trivia, token_end,
 }
 import simplifile
+import tom
 
 /// Preprocess `@external(moonbit, ...)` directives and promote all top-level
 /// private `fn`, `type`, `opaque type`, and `const` declarations to `pub`
@@ -24,7 +26,7 @@ pub fn promote_private_to_pub(source: String) -> String {
     glexer.new(cleaned)
     |> glexer.lex
 
-  let edits = collect_pub_edits(tokens, 0, False, [])
+  let edits = collect_pub_edits(tokens, 0, False, False, False, [])
   apply_edits(cleaned, edits)
 }
 
@@ -115,6 +117,38 @@ fn stage_toml_and_deps(
   deps_root: String,
   staging_dir: String,
 ) -> Result(Nil, String) {
+  let abs_pkg = resolve_abs_dir(pkg_root)
+  let abs_deps = resolve_abs_dir(deps_root)
+  let is_dep_staging = abs_pkg != abs_deps
+
+  let packages_rel = filepath.join("build", "packages")
+  use staged_pkg_paths <- result.try(
+    case
+      first_existing_path(
+        deps_root,
+        pkg_root,
+        packages_rel,
+        simplifile.is_directory,
+      )
+    {
+      Some(src_packages) -> {
+        let staging_build = filepath.join(staging_dir, "build")
+        use _ <- result.try(
+          simplifile.create_directory_all(staging_build)
+          |> result.map_error(fn(err) {
+            "Failed to create staging build dir: "
+            <> simplifile.describe_error(err)
+          }),
+        )
+        let dest_packages = filepath.join(staging_build, "packages")
+        let _ = simplifile.delete(file_or_dir_at: dest_packages)
+        use _ <- result.try(copy_packages_isolated(src_packages, dest_packages))
+        collect_staged_package_paths(dest_packages)
+      }
+      None -> Ok(dict.new())
+    },
+  )
+
   let src_gleam_toml = filepath.join(pkg_root, "gleam.toml")
   let dest_gleam_toml = filepath.join(staging_dir, "gleam.toml")
   use toml_content <- result.try(
@@ -126,57 +160,417 @@ fn stage_toml_and_deps(
       <> simplifile.describe_error(err)
     }),
   )
-  let rewritten_toml = override_gleam_toml_internal_modules(toml_content)
-  use _ <- result.try(
-    simplifile.write(to: dest_gleam_toml, contents: rewritten_toml)
-    |> result.map_error(fn(err) {
-      "Failed to write "
-      <> dest_gleam_toml
-      <> ": "
-      <> simplifile.describe_error(err)
-    }),
-  )
 
-  let src_manifest =
-    first_existing_path(
-      deps_root,
-      pkg_root,
-      "manifest.toml",
-      simplifile.is_file,
-    )
-  let dest_manifest = filepath.join(staging_dir, "manifest.toml")
-  use _ <- result.try(case src_manifest {
-    Some(path) ->
-      simplifile.copy_file(at: path, to: dest_manifest)
-      |> result.map_error(fn(err) {
-        "Failed to copy manifest.toml: " <> simplifile.describe_error(err)
-      })
-    None -> Ok(Nil)
-  })
-
-  let packages_rel = filepath.join("build", "packages")
-  case
-    first_existing_path(
-      deps_root,
-      pkg_root,
-      packages_rel,
-      simplifile.is_directory,
-    )
-  {
-    Some(src_packages) -> {
-      let staging_build = filepath.join(staging_dir, "build")
+  case is_dep_staging {
+    False -> {
+      let rewritten_toml =
+        toml_content
+        |> resolve_toml_relative_paths(abs_pkg)
+        |> override_gleam_toml_internal_modules
       use _ <- result.try(
-        simplifile.create_directory_all(staging_build)
+        simplifile.write(to: dest_gleam_toml, contents: rewritten_toml)
         |> result.map_error(fn(err) {
-          "Failed to create staging build dir: "
+          "Failed to write "
+          <> dest_gleam_toml
+          <> ": "
           <> simplifile.describe_error(err)
         }),
       )
-      let dest_packages = filepath.join(staging_build, "packages")
-      let _ = simplifile.delete(file_or_dir_at: dest_packages)
-      copy_packages_isolated(src_packages, dest_packages)
+      let src_manifest =
+        first_existing_path(
+          deps_root,
+          pkg_root,
+          "manifest.toml",
+          simplifile.is_file,
+        )
+      let dest_manifest = filepath.join(staging_dir, "manifest.toml")
+      case src_manifest {
+        Some(path) -> {
+          use manifest_content <- result.try(
+            simplifile.read(path)
+            |> result.map_error(fn(err) {
+              "Failed to read "
+              <> path
+              <> ": "
+              <> simplifile.describe_error(err)
+            }),
+          )
+          let rewritten_manifest =
+            resolve_toml_relative_paths(manifest_content, abs_deps)
+          simplifile.write(to: dest_manifest, contents: rewritten_manifest)
+          |> result.map_error(fn(err) {
+            "Failed to write staged manifest.toml: "
+            <> simplifile.describe_error(err)
+          })
+        }
+        None -> Ok(Nil)
+      }
     }
-    None -> Ok(Nil)
+
+    True -> {
+      let local_dep_paths = collect_root_local_dep_paths(abs_deps)
+      let dep_paths = dict.merge(staged_pkg_paths, local_dep_paths)
+      use _ <- result.try(rewrite_staged_packages_tomls(
+        staged_pkg_paths,
+        dep_paths,
+      ))
+      let rewritten_toml =
+        toml_content
+        |> resolve_toml_relative_paths(abs_pkg)
+        |> strip_dev_dependencies
+        |> rewrite_dependencies_to_paths(dep_paths)
+        |> override_gleam_toml_internal_modules
+      simplifile.write(to: dest_gleam_toml, contents: rewritten_toml)
+      |> result.map_error(fn(err) {
+        "Failed to write "
+        <> dest_gleam_toml
+        <> ": "
+        <> simplifile.describe_error(err)
+      })
+    }
+  }
+}
+
+fn resolve_abs_dir(dir: String) -> String {
+  simplifile.resolve(dir) |> result.unwrap(dir)
+}
+
+fn resolve_relative_against(base_dir: String, rel_or_abs: String) -> String {
+  let raw = case filepath.is_absolute(rel_or_abs) {
+    True -> rel_or_abs
+    False -> filepath.join(base_dir, rel_or_abs)
+  }
+  filepath.expand(raw) |> result.unwrap(raw)
+}
+
+fn collect_staged_package_paths(
+  dest_packages: String,
+) -> Result(Dict(String, String), String) {
+  let abs_dest = resolve_abs_dir(dest_packages)
+  use entries <- result.try(
+    simplifile.read_directory(at: dest_packages)
+    |> result.map_error(fn(err) {
+      "Failed to read staged packages: " <> simplifile.describe_error(err)
+    }),
+  )
+  Ok(
+    list.fold(entries, dict.new(), fn(acc, entry) {
+      let pkg_dir = filepath.join(abs_dest, entry)
+      let toml_path = filepath.join(pkg_dir, "gleam.toml")
+      case simplifile.is_directory(pkg_dir), simplifile.is_file(toml_path) {
+        Ok(True), Ok(True) -> dict.insert(acc, entry, pkg_dir)
+        _, _ -> acc
+      }
+    }),
+  )
+}
+
+fn collect_root_local_dep_paths(abs_deps: String) -> Dict(String, String) {
+  let from_manifest = case
+    simplifile.read(filepath.join(abs_deps, "manifest.toml"))
+  {
+    Error(_) -> dict.new()
+    Ok(content) ->
+      case tom.parse(content) {
+        Error(_) -> dict.new()
+        Ok(parsed) ->
+          case tom.get_array(parsed, ["packages"]) {
+            Error(_) -> dict.new()
+            Ok(items) ->
+              list.fold(items, dict.new(), fn(acc, item) {
+                case item {
+                  tom.InlineTable(tbl) | tom.Table(tbl) ->
+                    case
+                      tom.get_string(tbl, ["source"]),
+                      tom.get_string(tbl, ["path"]),
+                      tom.get_string(tbl, ["name"])
+                    {
+                      Ok("local"), Ok(rel), Ok(name) ->
+                        dict.insert(
+                          acc,
+                          name,
+                          resolve_relative_against(abs_deps, rel),
+                        )
+                      _, _, _ -> acc
+                    }
+                  _ -> acc
+                }
+              })
+          }
+      }
+  }
+  case simplifile.read(filepath.join(abs_deps, "gleam.toml")) {
+    Error(_) -> from_manifest
+    Ok(content) ->
+      case tom.parse(content) {
+        Error(_) -> from_manifest
+        Ok(parsed) ->
+          case tom.get_table(parsed, ["dependencies"]) {
+            Error(_) -> from_manifest
+            Ok(tbl) ->
+              dict.fold(tbl, from_manifest, fn(acc, name, val) {
+                case val {
+                  tom.InlineTable(dep_tbl) | tom.Table(dep_tbl) ->
+                    case tom.get_string(dep_tbl, ["path"]) {
+                      Ok(rel) ->
+                        dict.insert(
+                          acc,
+                          name,
+                          resolve_relative_against(abs_deps, rel),
+                        )
+                      Error(_) -> acc
+                    }
+                  _ -> acc
+                }
+              })
+          }
+      }
+  }
+}
+
+fn rewrite_staged_packages_tomls(
+  staged_pkg_paths: Dict(String, String),
+  dep_paths: Dict(String, String),
+) -> Result(Nil, String) {
+  dict.values(staged_pkg_paths)
+  |> list.try_each(fn(pkg_dir) {
+    let toml_path = filepath.join(pkg_dir, "gleam.toml")
+    use content <- result.try(
+      simplifile.read(toml_path)
+      |> result.map_error(fn(err) {
+        "Failed to read " <> toml_path <> ": " <> simplifile.describe_error(err)
+      }),
+    )
+    let updated =
+      content
+      |> strip_dev_dependencies
+      |> rewrite_dependencies_to_paths(dep_paths)
+    simplifile.write(to: toml_path, contents: updated)
+    |> result.map_error(fn(err) {
+      "Failed to write " <> toml_path <> ": " <> simplifile.describe_error(err)
+    })
+  })
+}
+
+fn strip_dev_dependencies(toml_src: String) -> String {
+  let lines = string.split(toml_src, "\n")
+  strip_section_loop(lines, False, [])
+  |> string.join("\n")
+}
+
+fn strip_section_loop(
+  lines: List(String),
+  skipping: Bool,
+  rev_acc: List(String),
+) -> List(String) {
+  case lines {
+    [] -> list.reverse(rev_acc)
+    [line, ..rest] -> {
+      let trimmed = string.trim(line)
+      case
+        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+      {
+        True -> {
+          let is_dev_deps = trimmed == "[dev-dependencies]"
+          let next_acc = case is_dev_deps {
+            True -> rev_acc
+            False -> [line, ..rev_acc]
+          }
+          strip_section_loop(rest, is_dev_deps, next_acc)
+        }
+        False ->
+          case skipping {
+            True -> strip_section_loop(rest, True, rev_acc)
+            False -> strip_section_loop(rest, False, [line, ..rev_acc])
+          }
+      }
+    }
+  }
+}
+
+fn rewrite_dependencies_to_paths(
+  toml_src: String,
+  dep_paths: Dict(String, String),
+) -> String {
+  let lines = string.split(toml_src, "\n")
+  rewrite_deps_loop(lines, False, dep_paths, [])
+  |> string.join("\n")
+}
+
+fn rewrite_deps_loop(
+  lines: List(String),
+  in_deps: Bool,
+  dep_paths: Dict(String, String),
+  rev_acc: List(String),
+) -> List(String) {
+  case lines {
+    [] -> list.reverse(rev_acc)
+    [line, ..rest] -> {
+      let trimmed = string.trim(line)
+      case
+        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+      {
+        True ->
+          rewrite_deps_loop(rest, trimmed == "[dependencies]", dep_paths, [
+            line,
+            ..rev_acc
+          ])
+        False ->
+          case in_deps {
+            False ->
+              rewrite_deps_loop(rest, False, dep_paths, [line, ..rev_acc])
+            True ->
+              case string.split_once(trimmed, "=") {
+                Ok(#(lhs, _)) -> {
+                  let key = string.trim(lhs)
+                  case dict.get(dep_paths, key) {
+                    Ok(abs_path) -> {
+                      let new_line =
+                        key
+                        <> " = { path = \""
+                        <> escape_toml_str(abs_path)
+                        <> "\" }"
+                      rewrite_deps_loop(rest, True, dep_paths, [
+                        new_line,
+                        ..rev_acc
+                      ])
+                    }
+                    Error(_) ->
+                      rewrite_deps_loop(rest, True, dep_paths, [line, ..rev_acc])
+                  }
+                }
+                Error(_) ->
+                  rewrite_deps_loop(rest, True, dep_paths, [line, ..rev_acc])
+              }
+          }
+      }
+    }
+  }
+}
+
+fn escape_toml_str(s: String) -> String {
+  string.replace(s, "\\", "\\\\")
+  |> string.replace("\"", "\\\"")
+}
+
+/// Resolve any relative `path = "..."` TOML values against `abs_base_dir`,
+/// ignoring comments and unrelated string literals.
+fn resolve_toml_relative_paths(
+  toml_src: String,
+  abs_base_dir: String,
+) -> String {
+  scan_toml_chars(string.to_graphemes(toml_src), abs_base_dir, "", False, [])
+  |> string.concat
+}
+
+fn scan_toml_chars(
+  chars: List(String),
+  base_dir: String,
+  last_ident: String,
+  saw_eq: Bool,
+  rev_out: List(String),
+) -> List(String) {
+  case chars {
+    [] -> list.reverse(rev_out)
+    ["#", ..rest] -> {
+      let #(comment, after) = take_until_newline(rest, ["#"])
+      scan_toml_chars(after, base_dir, "", False, [comment, ..rev_out])
+    }
+    ["'", ..rest] -> {
+      let #(lit, after) = take_single_quoted(rest, ["'"])
+      scan_toml_chars(after, base_dir, "", False, [lit, ..rev_out])
+    }
+    ["\"", ..rest] -> {
+      let #(raw_inner, raw_full, after) = take_double_quoted(rest, [], ["\""])
+      let emitted = case last_ident == "path" && saw_eq && raw_inner != "" {
+        True ->
+          case filepath.is_absolute(raw_inner) {
+            True -> raw_full
+            False ->
+              "\""
+              <> escape_toml_str(resolve_relative_against(base_dir, raw_inner))
+              <> "\""
+          }
+        False -> raw_full
+      }
+      scan_toml_chars(after, base_dir, "", False, [emitted, ..rev_out])
+    }
+    ["=", ..rest] ->
+      scan_toml_chars(rest, base_dir, last_ident, last_ident != "", [
+        "=",
+        ..rev_out
+      ])
+    [" ", ..rest] | ["\t", ..rest] ->
+      scan_toml_chars(rest, base_dir, last_ident, saw_eq, [
+        case chars {
+          ["\t", ..] -> "\t"
+          _ -> " "
+        },
+        ..rev_out
+      ])
+    [ch, ..rest] ->
+      case is_toml_ident_char(ch) {
+        True -> {
+          let next_ident = case saw_eq {
+            True -> ch
+            False -> last_ident <> ch
+          }
+          scan_toml_chars(rest, base_dir, next_ident, False, [ch, ..rev_out])
+        }
+        False -> scan_toml_chars(rest, base_dir, "", False, [ch, ..rev_out])
+      }
+  }
+}
+
+fn is_toml_ident_char(ch: String) -> Bool {
+  string.contains(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+    ch,
+  )
+}
+
+fn take_until_newline(
+  chars: List(String),
+  rev_acc: List(String),
+) -> #(String, List(String)) {
+  case chars {
+    [] -> #(list.reverse(rev_acc) |> string.concat, [])
+    ["\n", ..rest] -> #(list.reverse(["\n", ..rev_acc]) |> string.concat, rest)
+    [ch, ..rest] -> take_until_newline(rest, [ch, ..rev_acc])
+  }
+}
+
+fn take_single_quoted(
+  chars: List(String),
+  rev_acc: List(String),
+) -> #(String, List(String)) {
+  case chars {
+    [] -> #(list.reverse(rev_acc) |> string.concat, [])
+    ["'", ..rest] -> #(list.reverse(["'", ..rev_acc]) |> string.concat, rest)
+    [ch, ..rest] -> take_single_quoted(rest, [ch, ..rev_acc])
+  }
+}
+
+fn take_double_quoted(
+  chars: List(String),
+  rev_inner: List(String),
+  rev_full: List(String),
+) -> #(String, String, List(String)) {
+  case chars {
+    [] -> #(
+      list.reverse(rev_inner) |> string.concat,
+      list.reverse(rev_full) |> string.concat,
+      [],
+    )
+    ["\\", esc, ..rest] ->
+      take_double_quoted(rest, [esc, ..rev_inner], [esc, "\\", ..rev_full])
+    ["\"", ..rest] -> #(
+      list.reverse(rev_inner) |> string.concat,
+      list.reverse(["\"", ..rev_full]) |> string.concat,
+      rest,
+    )
+    [ch, ..rest] ->
+      take_double_quoted(rest, [ch, ..rev_inner], [ch, ..rev_full])
   }
 }
 
@@ -202,14 +596,7 @@ fn copy_packages_isolated(
     let resolved =
       simplifile.resolve(path: src_entry) |> result.unwrap(src_entry)
     case simplifile.is_directory(resolved) {
-      Ok(True) ->
-        simplifile.copy_directory(at: resolved, to: dest_entry)
-        |> result.map_error(fn(err) {
-          "Failed to copy package dir "
-          <> entry
-          <> ": "
-          <> simplifile.describe_error(err)
-        })
+      Ok(True) -> copy_package_dir_filtered(resolved, dest_entry)
       Ok(False) ->
         case simplifile.is_file(resolved) {
           Ok(True) ->
@@ -229,6 +616,70 @@ fn copy_packages_isolated(
           <> ": "
           <> simplifile.describe_error(err),
         )
+    }
+  })
+}
+
+fn copy_package_dir_filtered(
+  src_dir: String,
+  dest_dir: String,
+) -> Result(Nil, String) {
+  use _ <- result.try(
+    simplifile.create_directory_all(dest_dir)
+    |> result.map_error(fn(err) {
+      "Failed to create staged package dir "
+      <> dest_dir
+      <> ": "
+      <> simplifile.describe_error(err)
+    }),
+  )
+  use entries <- result.try(
+    simplifile.read_directory(at: src_dir)
+    |> result.map_error(fn(err) {
+      "Failed to read package dir "
+      <> src_dir
+      <> ": "
+      <> simplifile.describe_error(err)
+    }),
+  )
+  list.try_each(entries, fn(entry) {
+    case entry {
+      ".git" | "build" | "_build" | "target" -> Ok(Nil)
+      _ -> {
+        let src_path = filepath.join(src_dir, entry)
+        let dest_path = filepath.join(dest_dir, entry)
+        let resolved =
+          simplifile.resolve(path: src_path) |> result.unwrap(src_path)
+        case simplifile.is_directory(resolved) {
+          Ok(True) ->
+            simplifile.copy_directory(at: resolved, to: dest_path)
+            |> result.map_error(fn(err) {
+              "Failed to copy package dir "
+              <> entry
+              <> ": "
+              <> simplifile.describe_error(err)
+            })
+          Ok(False) ->
+            case simplifile.is_file(resolved) {
+              Ok(True) ->
+                simplifile.copy_file(at: resolved, to: dest_path)
+                |> result.map_error(fn(err) {
+                  "Failed to copy package file "
+                  <> entry
+                  <> ": "
+                  <> simplifile.describe_error(err)
+                })
+              _ -> Ok(Nil)
+            }
+          Error(err) ->
+            Error(
+              "Failed to stat package entry "
+              <> entry
+              <> ": "
+              <> simplifile.describe_error(err),
+            )
+        }
+      }
     }
   })
 }
@@ -347,22 +798,38 @@ fn collect_pub_edits(
   tokens: List(#(Token, glexer.Position)),
   brace_depth: Int,
   seen_pub: Bool,
+  has_js_external: Bool,
+  has_erl_external: Bool,
   edits: List(TextEdit),
 ) -> List(TextEdit) {
   case tokens {
     [] -> edits
 
     [#(token.LeftBrace, _), ..rest] ->
-      collect_pub_edits(rest, brace_depth + 1, False, edits)
+      collect_pub_edits(rest, brace_depth + 1, False, False, False, edits)
 
     [#(token.RightBrace, _), ..rest] ->
-      collect_pub_edits(rest, int.max(0, brace_depth - 1), False, edits)
+      collect_pub_edits(
+        rest,
+        int.max(0, brace_depth - 1),
+        False,
+        False,
+        False,
+        edits,
+      )
 
     [#(token.Space(_), _), ..rest]
     | [#(token.CommentNormal(_), _), ..rest]
     | [#(token.CommentDoc(_), _), ..rest]
     | [#(token.CommentModule(_), _), ..rest] ->
-      collect_pub_edits(rest, brace_depth, seen_pub, edits)
+      collect_pub_edits(
+        rest,
+        brace_depth,
+        seen_pub,
+        has_js_external,
+        has_erl_external,
+        edits,
+      )
 
     [#(token.At, pos), ..after_at] if brace_depth == 0 ->
       case skip_trivia(after_at) {
@@ -373,27 +840,108 @@ fn collect_pub_edits(
               end: token_end(tok, name_pos),
               replacement: "",
             )
-          collect_pub_edits(rest, brace_depth, False, [edit, ..edits])
+          collect_pub_edits(
+            rest,
+            brace_depth,
+            False,
+            has_js_external,
+            has_erl_external,
+            [edit, ..edits],
+          )
         }
-        _ -> collect_pub_edits(after_at, brace_depth, False, edits)
+        [#(token.Name("external"), _), ..after_ext] ->
+          case skip_trivia(after_ext) {
+            [#(token.LeftParen, _), ..after_lp] ->
+              case skip_trivia(after_lp) {
+                [#(token.Name("javascript"), _), ..] ->
+                  collect_pub_edits(
+                    after_at,
+                    brace_depth,
+                    False,
+                    True,
+                    has_erl_external,
+                    edits,
+                  )
+                [#(token.Name("erlang"), _), ..] ->
+                  collect_pub_edits(
+                    after_at,
+                    brace_depth,
+                    False,
+                    has_js_external,
+                    True,
+                    edits,
+                  )
+                _ ->
+                  collect_pub_edits(
+                    after_at,
+                    brace_depth,
+                    False,
+                    has_js_external,
+                    has_erl_external,
+                    edits,
+                  )
+              }
+            _ ->
+              collect_pub_edits(
+                after_at,
+                brace_depth,
+                False,
+                has_js_external,
+                has_erl_external,
+                edits,
+              )
+          }
+        _ ->
+          collect_pub_edits(
+            after_at,
+            brace_depth,
+            False,
+            has_js_external,
+            has_erl_external,
+            edits,
+          )
       }
 
     [#(token.Pub, _), ..rest] if brace_depth == 0 ->
-      collect_pub_edits(rest, brace_depth, True, edits)
+      collect_pub_edits(
+        rest,
+        brace_depth,
+        True,
+        has_js_external,
+        has_erl_external,
+        edits,
+      )
 
     [#(token.Fn, pos), ..rest] if brace_depth == 0 -> {
       let edits = case seen_pub, skip_trivia(rest) {
-        False, [#(token.Name(_), _), ..] -> [
-          TextEdit(
-            start: pos.byte_offset,
-            end: pos.byte_offset,
-            replacement: "pub ",
-          ),
-          ..edits
-        ]
+        False, [#(token.Name(_), _), ..after_name] -> {
+          let skip_promote = case has_js_external && !has_erl_external {
+            False -> False
+            True ->
+              case skip_trivia(after_name) {
+                [#(token.LeftParen, _), ..] as params_tokens ->
+                  case prepass.find_fn_signature_end(params_tokens) {
+                    Some(#(_, False, _)) -> True
+                    _ -> False
+                  }
+                _ -> False
+              }
+          }
+          case skip_promote {
+            True -> edits
+            False -> [
+              TextEdit(
+                start: pos.byte_offset,
+                end: pos.byte_offset,
+                replacement: "pub ",
+              ),
+              ..edits
+            ]
+          }
+        }
         _, _ -> edits
       }
-      collect_pub_edits(rest, brace_depth, False, edits)
+      collect_pub_edits(rest, brace_depth, False, False, False, edits)
     }
 
     [#(token.Type, pos), ..rest] if brace_depth == 0 -> {
@@ -408,7 +956,7 @@ fn collect_pub_edits(
         ]
         _, _ -> edits
       }
-      collect_pub_edits(rest, brace_depth, False, edits)
+      collect_pub_edits(rest, brace_depth, False, False, False, edits)
     }
 
     [#(token.Opaque, pos), ..rest] if brace_depth == 0 ->
@@ -430,11 +978,23 @@ fn collect_pub_edits(
                     replacement: "pub type",
                   )
               }
-              collect_pub_edits(after_type, brace_depth, False, [edit, ..edits])
+              collect_pub_edits(after_type, brace_depth, False, False, False, [
+                edit,
+                ..edits
+              ])
             }
-            _ -> collect_pub_edits(after_type, brace_depth, False, edits)
+            _ ->
+              collect_pub_edits(
+                after_type,
+                brace_depth,
+                False,
+                False,
+                False,
+                edits,
+              )
           }
-        other -> collect_pub_edits(other, brace_depth, False, edits)
+        other ->
+          collect_pub_edits(other, brace_depth, False, False, False, edits)
       }
 
     [#(token.Const, pos), ..rest] if brace_depth == 0 -> {
@@ -449,10 +1009,21 @@ fn collect_pub_edits(
         ]
         _, _ -> edits
       }
-      collect_pub_edits(rest, brace_depth, False, edits)
+      collect_pub_edits(rest, brace_depth, False, False, False, edits)
     }
 
-    [_, ..rest] -> collect_pub_edits(rest, brace_depth, False, edits)
+    [#(token.Import, _), ..rest] if brace_depth == 0 ->
+      collect_pub_edits(rest, brace_depth, False, False, False, edits)
+
+    [_, ..rest] ->
+      collect_pub_edits(
+        rest,
+        brace_depth,
+        False,
+        has_js_external,
+        has_erl_external,
+        edits,
+      )
   }
 }
 

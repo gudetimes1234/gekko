@@ -11,9 +11,9 @@ import index/symbol_table.{
 }
 import lower/ir.{
   type IrBinOp, type IrCallArg, type IrClause, type IrConstant, type IrExpr,
-  type IrFnParam, type IrFunction, type IrGetter, type IrModule, type IrStmt,
-  type IrType, type IrTypeDef, IrAbort, IrAddFloat, IrAddInt, IrAnd, IrBinOp,
-  IrBitString, IrBlock, IrBool, IrCall, IrCallArg, IrClause, IrConstant,
+  type IrFnParam, type IrFunction, type IrGetter, type IrModule, type IrParam,
+  type IrStmt, type IrType, type IrTypeDef, IrAbort, IrAddFloat, IrAddInt, IrAnd,
+  IrBinOp, IrBitString, IrBlock, IrBool, IrCall, IrCallArg, IrClause, IrConstant,
   IrConstructor, IrDivFloat, IrDivInt, IrEcho, IrEq, IrFloat, IrFn, IrFnParam,
   IrFunction, IrGetter, IrGetterCall, IrGtEqFloat, IrGtEqInt, IrGtFloat, IrGtInt,
   IrImport, IrInt, IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch,
@@ -38,6 +38,7 @@ type LowerCtx {
     current_module: String,
     mod_syms: ModuleSymbols,
     local_vars: Set(String),
+    ast_type_vars: dict.Dict(String, String),
     next_id: Int,
   )
 }
@@ -83,10 +84,15 @@ pub fn desugar_module(
     ast_mod.constants
     |> list.reverse
     |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+  let reachable_fns =
+    symbol_table.reachable_private_functions(ast_mod, mod_syms.functions)
   let ast_functions =
     ast_mod.functions
     |> list.reverse
-    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+    |> list.filter(fn(def) {
+      !symbol_table.is_excluded_target(def.attributes)
+      && set.contains(reachable_fns, def.definition.name)
+    })
 
   let types =
     list.filter_map(custom_types, fn(def) {
@@ -126,6 +132,7 @@ pub fn desugar_module(
         current_module: module_name,
         mod_syms:,
         local_vars: set.new(),
+        ast_type_vars: dict.new(),
         next_id: 0,
       ),
     )
@@ -341,7 +348,16 @@ fn lower_function(
       }
     })
 
-  let body_ctx = LowerCtx(..ctx, local_vars: param_local_vars)
+  let ast_type_vars =
+    build_ast_type_var_map(
+      func.parameters,
+      params,
+      func.return,
+      return_type,
+      ctx.mod_syms,
+      ctx.table.package_name,
+    )
+  let body_ctx = LowerCtx(..ctx, local_vars: param_local_vars, ast_type_vars:)
   let #(body, after_body_ctx) = lower_statements(func.body, body_ctx)
 
   let lowered =
@@ -405,7 +421,12 @@ fn lower_statements(
           let ctx2 = LowerCtx(..ctx1, next_id: lp.next_id)
           let lowered_ann =
             option.map(annotation, fn(t) {
-              lower_ast_type(t, ctx2.mod_syms, ctx2.table.package_name)
+              lower_ast_type_with_vars(
+                t,
+                ctx2.mod_syms,
+                ctx2.table.package_name,
+                ctx2.ast_type_vars,
+              )
             })
 
           let #(stmt_ir, ctx3) = case kind {
@@ -497,7 +518,12 @@ fn lower_use_patterns(
       let next_ctx = LowerCtx(..cur_ctx, next_id: lp.next_id)
       let lowered_ann =
         option.map(up.annotation, fn(t) {
-          lower_ast_type(t, next_ctx.mod_syms, next_ctx.table.package_name)
+          lower_ast_type_with_vars(
+            t,
+            next_ctx.mod_syms,
+            next_ctx.table.package_name,
+            next_ctx.ast_type_vars,
+          )
         })
       let updated_vars =
         list.fold(lp.bound_names, vars_acc, fn(v, n) { set.insert(v, n) })
@@ -604,13 +630,23 @@ fn lower_expr(expr: glance.Expression, ctx: LowerCtx) -> #(IrExpr, LowerCtx) {
           }
           let p_type =
             option.map(param.type_, fn(t) {
-              lower_ast_type(t, ctx.mod_syms, ctx.table.package_name)
+              lower_ast_type_with_vars(
+                t,
+                ctx.mod_syms,
+                ctx.table.package_name,
+                ctx.ast_type_vars,
+              )
             })
           #([IrFnParam(p_name, p_type), ..ps], next_vars)
         })
       let ret_type =
         option.map(return_annotation, fn(t) {
-          lower_ast_type(t, ctx.mod_syms, ctx.table.package_name)
+          lower_ast_type_with_vars(
+            t,
+            ctx.mod_syms,
+            ctx.table.package_name,
+            ctx.ast_type_vars,
+          )
         })
       let #(lowered_body, ctx1) =
         lower_statements(body, LowerCtx(..ctx, local_vars: body_vars))
@@ -822,13 +858,9 @@ fn resolve_callee_arity(
       }
 
     glance.FieldAccess(container: glance.Variable(name: alias, ..), label:, ..) ->
-      case set.contains(ctx.local_vars, alias) {
-        True -> None
-        False ->
-          case dict.get(ctx.mod_syms.alias_to_module, alias) {
-            Ok(target_mod) -> lookup_remote_arity(ctx.table, target_mod, label)
-            Error(_) -> None
-          }
+      case resolve_module_alias_for_access(alias, label, ctx) {
+        Some(target_mod) -> lookup_remote_arity(ctx.table, target_mod, label)
+        None -> None
       }
 
     _ -> None
@@ -896,43 +928,43 @@ fn lower_field_access(
 ) -> #(IrExpr, LowerCtx) {
   case container {
     glance.Variable(name: alias, ..) ->
-      case set.contains(ctx.local_vars, alias) {
-        True -> #(
-          IrGetterCall(
-            receiver: IrVar(mangle.mangle_ident(alias)),
-            field: mangle.mangle_ident(label),
-          ),
-          ctx,
-        )
-        False ->
-          case dict.get(ctx.mod_syms.alias_to_module, alias) {
-            Ok(target_mod) ->
-              case
-                symbol_table.lookup_constructor(
-                  ctx.table,
-                  ctx.current_module,
-                  Some(alias),
-                  label,
-                )
-              {
-                Some(ctor) -> #(
-                  IrConstructor(
-                    module_alias: Some(alias),
-                    target_module: Some(ctor.module),
-                    name: ctor.variant_name,
-                  ),
-                  ctx,
-                )
-                None -> #(
-                  IrModuleRef(
-                    module_alias: Some(alias),
-                    target_module: target_mod,
-                    symbol: mangle.mangle_ident(label),
-                  ),
-                  ctx,
-                )
-              }
-            Error(_) -> #(
+      case resolve_module_alias_for_access(alias, label, ctx) {
+        Some(target_mod) ->
+          case
+            symbol_table.lookup_constructor(
+              ctx.table,
+              ctx.current_module,
+              Some(alias),
+              label,
+            )
+          {
+            Some(ctor) -> #(
+              IrConstructor(
+                module_alias: Some(alias),
+                target_module: Some(ctor.module),
+                name: ctor.variant_name,
+              ),
+              ctx,
+            )
+            None -> #(
+              IrModuleRef(
+                module_alias: Some(alias),
+                target_module: target_mod,
+                symbol: mangle.mangle_ident(label),
+              ),
+              ctx,
+            )
+          }
+        None ->
+          case set.contains(ctx.local_vars, alias) {
+            True -> #(
+              IrGetterCall(
+                receiver: IrVar(mangle.mangle_ident(alias)),
+                field: mangle.mangle_ident(label),
+              ),
+              ctx,
+            )
+            False -> #(
               IrGetterCall(
                 receiver: resolve_variable(alias, ctx),
                 field: mangle.mangle_ident(label),
@@ -953,6 +985,64 @@ fn lower_field_access(
       )
     }
   }
+}
+
+fn resolve_module_alias_for_access(
+  alias: String,
+  label: String,
+  ctx: LowerCtx,
+) -> Option(String) {
+  case dict.get(ctx.mod_syms.alias_to_module, alias) {
+    Error(_) -> None
+    Ok(target_mod) ->
+      case set.contains(ctx.local_vars, alias) {
+        False -> Some(target_mod)
+        True ->
+          case
+            module_has_value(ctx.table, target_mod, label)
+            && !scope_has_record_field(ctx.table, ctx.mod_syms, label)
+          {
+            True -> Some(target_mod)
+            False -> None
+          }
+      }
+  }
+}
+
+fn module_has_value(
+  table: SymbolTable,
+  target_mod: String,
+  symbol: String,
+) -> Bool {
+  case dict.get(table.modules, target_mod) {
+    Error(_) -> False
+    Ok(ms) ->
+      dict.has_key(ms.functions, symbol)
+      || dict.has_key(ms.constructors, symbol)
+      || dict.has_key(ms.constants, symbol)
+  }
+}
+
+fn scope_has_record_field(
+  table: SymbolTable,
+  mod_syms: ModuleSymbols,
+  label: String,
+) -> Bool {
+  let imported_mods = list.map(mod_syms.imports, fn(imp) { imp.module })
+  let scope_mods = [mod_syms.name, ..imported_mods]
+  list.any(scope_mods, fn(mod_name) {
+    case dict.get(table.modules, mod_name) {
+      Error(_) -> False
+      Ok(ms) ->
+        dict.values(ms.types)
+        |> list.any(fn(ti) {
+          dict.has_key(ti.shared_fields, label)
+          || list.any(ti.variants, fn(v) {
+            list.any(v.fields, fn(f) { f.label == Some(label) })
+          })
+        })
+    }
+  })
 }
 
 fn lower_record_update(
@@ -1492,10 +1582,21 @@ pub fn lower_ast_type(
   mod_syms: ModuleSymbols,
   package_name: String,
 ) -> IrType {
+  lower_ast_type_with_vars(ty, mod_syms, package_name, dict.new())
+}
+
+fn lower_ast_type_with_vars(
+  ty: glance.Type,
+  mod_syms: ModuleSymbols,
+  package_name: String,
+  ast_type_vars: dict.Dict(String, String),
+) -> IrType {
   case ty {
     glance.NamedType(name:, module: mod_opt, parameters:, ..) -> {
       let args =
-        list.map(parameters, fn(p) { lower_ast_type(p, mod_syms, package_name) })
+        list.map(parameters, fn(p) {
+          lower_ast_type_with_vars(p, mod_syms, package_name, ast_type_vars)
+        })
       case mod_opt, name, args {
         None, "Int", [] -> IrTypeInt64
         None, "Float", [] -> IrTypeDouble
@@ -1503,6 +1604,14 @@ pub fn lower_ast_type(
         None, "Bool", [] -> IrTypeBool
         None, "Nil", [] -> IrTypeUnit
         None, "BitArray", [] -> IrTypeBitArray
+        None, "UtfCodepoint", [] ->
+          IrTypeNamed(
+            module_alias: None,
+            package: "gleam",
+            module: "gleam",
+            name: "UtfCodepoint",
+            args: [],
+          )
         None, "List", [inner] -> IrTypeList(inner)
         None, "Result", [ok_t, err_t] -> IrTypeResult(ok_t, err_t)
         Some(alias), _, _ -> {
@@ -1542,19 +1651,92 @@ pub fn lower_ast_type(
 
     glance.TupleType(elements:, ..) ->
       IrTypeTuple(
-        list.map(elements, fn(el) { lower_ast_type(el, mod_syms, package_name) }),
+        list.map(elements, fn(el) {
+          lower_ast_type_with_vars(el, mod_syms, package_name, ast_type_vars)
+        }),
       )
 
     glance.FunctionType(parameters:, return:, ..) ->
       IrTypeFn(
         params: list.map(parameters, fn(p) {
-          lower_ast_type(p, mod_syms, package_name)
+          lower_ast_type_with_vars(p, mod_syms, package_name, ast_type_vars)
         }),
-        return: lower_ast_type(return, mod_syms, package_name),
+        return: lower_ast_type_with_vars(
+          return,
+          mod_syms,
+          package_name,
+          ast_type_vars,
+        ),
       )
 
-    glance.VariableType(name:, ..) | glance.HoleType(name:, ..) ->
-      IrTypeVar(mangle.mangle_type_param(name))
+    glance.VariableType(name:, ..) | glance.HoleType(name:, ..) -> {
+      let mangled = mangle.mangle_type_param(name)
+      case dict.get(ast_type_vars, mangled) {
+        Ok(canon) -> IrTypeVar(canon)
+        Error(_) -> IrTypeVar(mangled)
+      }
+    }
+  }
+}
+
+fn build_ast_type_var_map(
+  ast_params: List(glance.FunctionParameter),
+  ir_params: List(IrParam),
+  ast_return: Option(glance.Type),
+  ir_return: IrType,
+  mod_syms: ModuleSymbols,
+  package_name: String,
+) -> dict.Dict(String, String) {
+  let acc0 =
+    list.fold(list.zip(ast_params, ir_params), dict.new(), fn(acc, pair) {
+      let #(ap, ip) = pair
+      case ap.type_ {
+        Some(ast_t) ->
+          collect_ast_type_var_map(
+            lower_ast_type(ast_t, mod_syms, package_name),
+            ip.param_type,
+            acc,
+          )
+        None -> acc
+      }
+    })
+  case ast_return {
+    Some(ast_r) ->
+      collect_ast_type_var_map(
+        lower_ast_type(ast_r, mod_syms, package_name),
+        ir_return,
+        acc0,
+      )
+    None -> acc0
+  }
+}
+
+fn collect_ast_type_var_map(
+  ast_ir: IrType,
+  resolved_ir: IrType,
+  acc: dict.Dict(String, String),
+) -> dict.Dict(String, String) {
+  case ast_ir, resolved_ir {
+    IrTypeVar(a), IrTypeVar(b) -> dict.insert(acc, a, b)
+    IrTypeList(a), IrTypeList(b) -> collect_ast_type_var_map(a, b, acc)
+    IrTypeResult(ao, ae), IrTypeResult(bo, be) ->
+      collect_ast_type_var_map(ae, be, collect_ast_type_var_map(ao, bo, acc))
+    IrTypeTuple(as_), IrTypeTuple(bs) ->
+      list.fold(list.zip(as_, bs), acc, fn(s, pair) {
+        collect_ast_type_var_map(pair.0, pair.1, s)
+      })
+    IrTypeFn(ap, ar), IrTypeFn(bp, br) -> {
+      let s1 =
+        list.fold(list.zip(ap, bp), acc, fn(s, pair) {
+          collect_ast_type_var_map(pair.0, pair.1, s)
+        })
+      collect_ast_type_var_map(ar, br, s1)
+    }
+    IrTypeNamed(args: a_args, ..), IrTypeNamed(args: b_args, ..) ->
+      list.fold(list.zip(a_args, b_args), acc, fn(s, pair) {
+        collect_ast_type_var_map(pair.0, pair.1, s)
+      })
+    _, _ -> acc
   }
 }
 
