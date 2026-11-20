@@ -73,21 +73,32 @@ pub impl GleamInspect for UtfCodepoint with gleam_inspect(self) {
 #derive(Eq, Debug, Hash)
 pub(all) struct BitArray {
   data : Bytes
+  bit_length : Int64
 }
 
 ///|
 pub fn BitArray::empty() -> BitArray {
-  { data: b"" }
+  { data: b"", bit_length: 0L }
 }
 
 ///|
 pub fn BitArray::from_bytes(b : Bytes) -> BitArray {
-  { data: b }
+  { data: b, bit_length: b.length().to_int64() * 8L }
 }
 
 ///|
 pub fn BitArray::from_string(s : String) -> BitArray {
-  { data: @utf8.encode(s) }
+  BitArray::from_bytes(@utf8.encode(s))
+}
+
+///|
+pub fn BitArray::bit_size(self : BitArray) -> Int64 {
+  self.bit_length
+}
+
+///|
+pub fn bit_array_bit_size(ba : BitArray) -> Int64 {
+  ba.bit_length
 }
 
 ///|
@@ -96,12 +107,67 @@ pub fn BitArray::byte_size(self : BitArray) -> Int64 {
 }
 
 ///|
+pub fn BitArray::pad_to_bytes(self : BitArray) -> BitArray {
+  { data: self.data, bit_length: self.data.length().to_int64() * 8L }
+}
+
+///|
 pub fn BitArray::concat(parts : ArrayView[BitArray]) -> BitArray {
-  let buf = @buffer.Buffer()
+  let mut total_bits = 0L
+  let mut all_aligned = true
   for part in parts {
-    buf.write_bytesview(part.data[:])
+    total_bits = total_bits + part.bit_length
+    if part.bit_length % 8L != 0L {
+      all_aligned = false
+    }
   }
-  { data: buf.to_bytes() }
+  if total_bits == 0L {
+    return BitArray::empty()
+  }
+  let buf = @buffer.Buffer()
+  if all_aligned {
+    for part in parts {
+      if part.bit_length > 0L {
+        buf.write_bytesview(part.data[:])
+      }
+    }
+    return { data: buf.to_bytes(), bit_length: total_bits }
+  }
+  let mut acc = 0
+  let mut acc_bits = 0
+  for part in parts {
+    if part.bit_length <= 0L {
+      continue
+    }
+    let full_bytes = (part.bit_length / 8L).to_int()
+    let rem = (part.bit_length % 8L).to_int()
+    let mut i = 0
+    while i < full_bytes {
+      let b = part.data[i].to_int()
+      if acc_bits == 0 {
+        buf.write_byte(part.data[i])
+      } else {
+        let combined = (acc << 8) | b
+        buf.write_byte(((combined >> acc_bits) & 0xFF).to_byte())
+        acc = combined & ((1 << acc_bits) - 1)
+      }
+      i = i + 1
+    }
+    if rem > 0 {
+      let v = part.data[full_bytes].to_int() >> (8 - rem)
+      acc = (acc << rem) | v
+      acc_bits = acc_bits + rem
+      if acc_bits >= 8 {
+        acc_bits = acc_bits - 8
+        buf.write_byte(((acc >> acc_bits) & 0xFF).to_byte())
+        acc = acc & ((1 << acc_bits) - 1)
+      }
+    }
+  }
+  if acc_bits > 0 {
+    buf.write_byte((acc << (8 - acc_bits)).to_byte())
+  }
+  { data: buf.to_bytes(), bit_length: total_bits }
 }
 
 ///|
@@ -110,11 +176,28 @@ pub fn bit_array_from_segments(parts : ArrayView[BitArray]) -> BitArray {
 }
 
 ///|
+pub fn BitArray::bits_segment(self : BitArray, bits : Int64) -> BitArray {
+  if bits <= 0L {
+    BitArray::empty()
+  } else if bits == self.bit_length {
+    self
+  } else {
+    match bit_array_read_bits(self, 0L, bits) {
+      Some(v) => v
+      None => @prelude.abort("bit array segment shorter than specified size")
+    }
+  }
+}
+
+///|
 pub fn BitArray::int_segment(
   val : Int64,
   bits : Int64,
   big_endian : Bool,
 ) -> BitArray {
+  if bits <= 0L {
+    return BitArray::empty()
+  }
   let buf = @buffer.Buffer()
   if bits == 8L {
     buf.write_byte(val.to_byte())
@@ -140,10 +223,179 @@ pub fn BitArray::int_segment(
     } else {
       buf.write_int64_le(val)
     }
+  } else if big_endian {
+    let uval = val.reinterpret_as_uint64()
+    let fill_byte = if val < 0L { b'\xFF' } else { b'\x00' }
+    let sign_bit = if val < 0L { 1 } else { 0 }
+    if bits > 64L {
+      let extra = bits - 64L
+      let extra_bytes = extra / 8L
+      let mut bi = 0L
+      while bi < extra_bytes {
+        buf.write_byte(fill_byte)
+        bi = bi + 1L
+      }
+      let mut cur = 0
+      let mut cur_bits = 0
+      let rem_extra = (extra % 8L).to_int()
+      let mut ei = 0
+      while ei < rem_extra {
+        cur = (cur << 1) | sign_bit
+        cur_bits = cur_bits + 1
+        ei = ei + 1
+      }
+      let mut k = 63
+      while k >= 0 {
+        let b = ((uval >> k) & 1UL).to_int()
+        cur = (cur << 1) | b
+        cur_bits = cur_bits + 1
+        if cur_bits == 8 {
+          buf.write_byte(cur.to_byte())
+          cur = 0
+          cur_bits = 0
+        }
+        k = k - 1
+      }
+      if cur_bits > 0 {
+        buf.write_byte((cur << (8 - cur_bits)).to_byte())
+      }
+    } else {
+      let mut cur = 0
+      let mut cur_bits = 0
+      let mut k = bits.to_int() - 1
+      while k >= 0 {
+        let b = ((uval >> k) & 1UL).to_int()
+        cur = (cur << 1) | b
+        cur_bits = cur_bits + 1
+        if cur_bits == 8 {
+          buf.write_byte(cur.to_byte())
+          cur = 0
+          cur_bits = 0
+        }
+        k = k - 1
+      }
+      if cur_bits > 0 {
+        buf.write_byte((cur << (8 - cur_bits)).to_byte())
+      }
+    }
   } else {
-    @prelude.abort("unsupported non-byte-aligned bit segment width in Tier 1 BitArray")
+    let uval = val.reinterpret_as_uint64()
+    let full_bytes = bits / 8L
+    let rem = (bits % 8L).to_int()
+    let fill_byte = if val < 0L { b'\xFF' } else { b'\x00' }
+    let mut byte_idx = 0L
+    while byte_idx < full_bytes {
+      if byte_idx < 8L {
+        buf.write_byte(((uval >> (byte_idx.to_int() * 8)) & 0xFFUL).to_byte())
+      } else {
+        buf.write_byte(fill_byte)
+      }
+      byte_idx = byte_idx + 1L
+    }
+    if rem > 0 {
+      let top_bits = if full_bytes < 8L {
+        ((uval >> (full_bytes.to_int() * 8)) & ((1UL << rem) - 1UL)).to_int()
+      } else if val < 0L {
+        (1 << rem) - 1
+      } else {
+        0
+      }
+      buf.write_byte((top_bits << (8 - rem)).to_byte())
+    }
   }
-  { data: buf.to_bytes() }
+  { data: buf.to_bytes(), bit_length: bits }
+}
+
+///|
+fn write_u16(buf : @buffer.Buffer, v : Int, big_endian : Bool) -> Unit {
+  let hi = ((v >> 8) & 0xFF).to_byte()
+  let lo = (v & 0xFF).to_byte()
+  if big_endian {
+    buf.write_byte(hi)
+    buf.write_byte(lo)
+  } else {
+    buf.write_byte(lo)
+    buf.write_byte(hi)
+  }
+}
+
+///|
+fn write_u32(buf : @buffer.Buffer, v : Int, big_endian : Bool) -> Unit {
+  if big_endian {
+    buf.write_int_be(v)
+  } else {
+    buf.write_int_le(v)
+  }
+}
+
+///|
+fn double_to_f16_bits(val : Double) -> Int {
+  let bits = val.reinterpret_as_uint64()
+  let sign = ((bits >> 63) & 1UL).to_int() << 15
+  let exp = ((bits >> 52) & 0x7FFUL).to_int()
+  let frac = bits & 0x000F_FFFF_FFFF_FFFFUL
+  if exp == 0x7FF {
+    if frac == 0UL {
+      sign | 0x7C00
+    } else {
+      sign | 0x7E00
+    }
+  } else if exp == 0 {
+    sign
+  } else {
+    let unb = exp - 1023
+    if unb > 15 {
+      sign | 0x7C00
+    } else if unb >= -14 {
+      let mut rounded_exp = unb + 15
+      let mant = (frac >> 42).to_int()
+      let rem = frac & 0x0000_03FF_FFFF_FFFFUL
+      let half = 0x0000_0200_0000_0000UL
+      let mut rounded_mant = mant
+      if rem > half || (rem == half && (mant & 1) == 1) {
+        rounded_mant = rounded_mant + 1
+        if rounded_mant == 1024 {
+          rounded_mant = 0
+          rounded_exp = rounded_exp + 1
+          if rounded_exp >= 31 {
+            return sign | 0x7C00
+          }
+        }
+      }
+      sign | (rounded_exp << 10) | rounded_mant
+    } else if unb >= -25 {
+      let shift = 28 - unb
+      let sig = (1UL << 52) | frac
+      let mant = (sig >> shift).to_int()
+      let half = 1UL << (shift - 1)
+      let rem = sig & ((1UL << shift) - 1UL)
+      let mut final_mant = mant
+      if rem > half || (rem == half && (mant & 1) == 1) {
+        final_mant = final_mant + 1
+      }
+      sign | final_mant
+    } else {
+      sign
+    }
+  }
+}
+
+///|
+fn f16_bits_to_double(h : Int) -> Option[Double] {
+  let sign_bit = (h >> 15) & 1
+  let exp = (h >> 10) & 0x1F
+  let mant = h & 0x3FF
+  if exp == 0x1F {
+    None
+  } else if exp == 0 {
+    let mag = mant.to_double() * 5.960464477539063e-8
+    Some(if sign_bit == 1 { -mag } else { mag })
+  } else {
+    let d_sign = sign_bit.to_uint64() << 63
+    let d_exp = (exp - 15 + 1023).to_uint64() << 52
+    let d_mant = mant.to_uint64() << 42
+    Some((d_sign | d_exp | d_mant).reinterpret_as_double())
+  }
 }
 
 ///|
@@ -153,7 +405,9 @@ pub fn BitArray::float_segment(
   big_endian : Bool,
 ) -> BitArray {
   let buf = @buffer.Buffer()
-  if bits == 32L {
+  if bits == 16L {
+    write_u16(buf, double_to_f16_bits(val), big_endian)
+  } else if bits == 32L {
     let f = Float::from_double(val)
     if big_endian {
       buf.write_float_be(f)
@@ -169,7 +423,84 @@ pub fn BitArray::float_segment(
   } else {
     @prelude.abort("unsupported float bit segment width in BitArray")
   }
-  { data: buf.to_bytes() }
+  { data: buf.to_bytes(), bit_length: bits }
+}
+
+///|
+fn write_utf8_cp(buf : @buffer.Buffer, c : Int) -> Unit {
+  if c <= 0x7F {
+    buf.write_byte(c.to_byte())
+  } else if c <= 0x7FF {
+    buf.write_byte((0xC0 | (c >> 6)).to_byte())
+    buf.write_byte((0x80 | (c & 0x3F)).to_byte())
+  } else if c <= 0xFFFF {
+    buf.write_byte((0xE0 | (c >> 12)).to_byte())
+    buf.write_byte((0x80 | ((c >> 6) & 0x3F)).to_byte())
+    buf.write_byte((0x80 | (c & 0x3F)).to_byte())
+  } else {
+    buf.write_byte((0xF0 | (c >> 18)).to_byte())
+    buf.write_byte((0x80 | ((c >> 12) & 0x3F)).to_byte())
+    buf.write_byte((0x80 | ((c >> 6) & 0x3F)).to_byte())
+    buf.write_byte((0x80 | (c & 0x3F)).to_byte())
+  }
+}
+
+///|
+fn write_utf16_cp(buf : @buffer.Buffer, c : Int, big_endian : Bool) -> Unit {
+  if c <= 0xFFFF {
+    write_u16(buf, c, big_endian)
+  } else {
+    let u = c - 0x10000
+    let hi = 0xD800 | (u >> 10)
+    let lo = 0xDC00 | (u & 0x3FF)
+    write_u16(buf, hi, big_endian)
+    write_u16(buf, lo, big_endian)
+  }
+}
+
+///|
+pub fn BitArray::from_utf16(s : String, big_endian : Bool) -> BitArray {
+  let buf = @buffer.Buffer()
+  for ch in s {
+    write_utf16_cp(buf, ch.to_int(), big_endian)
+  }
+  BitArray::from_bytes(buf.to_bytes())
+}
+
+///|
+pub fn BitArray::from_utf32(s : String, big_endian : Bool) -> BitArray {
+  let buf = @buffer.Buffer()
+  for ch in s {
+    write_u32(buf, ch.to_int(), big_endian)
+  }
+  BitArray::from_bytes(buf.to_bytes())
+}
+
+///|
+pub fn BitArray::utf8_codepoint_segment(cp : UtfCodepoint) -> BitArray {
+  let buf = @buffer.Buffer()
+  write_utf8_cp(buf, cp.code.to_int())
+  BitArray::from_bytes(buf.to_bytes())
+}
+
+///|
+pub fn BitArray::utf16_codepoint_segment(
+  cp : UtfCodepoint,
+  big_endian : Bool,
+) -> BitArray {
+  let buf = @buffer.Buffer()
+  write_utf16_cp(buf, cp.code.to_int(), big_endian)
+  BitArray::from_bytes(buf.to_bytes())
+}
+
+///|
+pub fn BitArray::utf32_codepoint_segment(
+  cp : UtfCodepoint,
+  big_endian : Bool,
+) -> BitArray {
+  let buf = @buffer.Buffer()
+  write_u32(buf, cp.code.to_int(), big_endian)
+  BitArray::from_bytes(buf.to_bytes())
 }
 
 ///|
@@ -178,13 +509,389 @@ pub fn BitArray::slice(
   at : Int64,
   take : Int64,
 ) -> Result[BitArray, Unit] {
+  if self.bit_length % 8L != 0L || at < 0L {
+    return Err(())
+  }
   let len = self.data.length().to_int64()
-  let start = if at < 0L { len + at } else { at }
-  if start < 0L || take < 0L || start + take > len {
+  let (start, count) = if take < 0L {
+    (at + take, -take)
+  } else {
+    (at, take)
+  }
+  if start < 0L || start + count > len {
     Err(())
   } else {
-    let view = self.data[start.to_int():(start + take).to_int()]
-    Ok({ data: Bytes::from_iter(view.iter()) })
+    let view = self.data[start.to_int():(start + count).to_int()]
+    Ok(BitArray::from_bytes(Bytes::from_iter(view.iter())))
+  }
+}
+
+///|
+fn bit_array_read_byte_at(ba : BitArray, offset : Int64) -> Int {
+  let byte_idx = (offset / 8L).to_int()
+  let bit_off = (offset % 8L).to_int()
+  if bit_off == 0 {
+    ba.data[byte_idx].to_int()
+  } else {
+    let b0 = ba.data[byte_idx].to_int()
+    let b1 = if byte_idx + 1 < ba.data.length() {
+      ba.data[byte_idx + 1].to_int()
+    } else {
+      0
+    }
+    ((b0 << bit_off) | (b1 >> (8 - bit_off))) & 0xFF
+  }
+}
+
+///|
+fn bit_array_read_small_bits(ba : BitArray, offset : Int64, n : Int) -> Int {
+  bit_array_read_byte_at(ba, offset) >> (8 - n)
+}
+
+///|
+pub fn[T] bit_array_unwrap(opt : Option[T]) -> T {
+  match opt {
+    Some(v) => v
+    None => @prelude.abort("bit array pattern match internal error")
+  }
+}
+
+///|
+pub fn bit_array_has_bits(
+  ba : BitArray,
+  offset : Int64,
+  bits : Int64,
+) -> Bool {
+  bits >= 0L && offset >= 0L && offset + bits <= ba.bit_length
+}
+
+///|
+pub fn bit_array_rest_is_bytes(ba : BitArray, offset : Int64) -> Bool {
+  offset >= 0L && offset <= ba.bit_length && (ba.bit_length - offset) % 8L == 0L
+}
+
+///|
+pub fn bit_array_read_int(
+  ba : BitArray,
+  offset : Int64,
+  bits : Int64,
+  signed : Bool,
+  big_endian : Bool,
+) -> Option[Int64] {
+  if bits < 0L || offset < 0L || offset + bits > ba.bit_length {
+    return None
+  }
+  if bits == 0L {
+    return Some(0L)
+  }
+  if big_endian {
+    if bits <= 64L {
+      let full_bytes = (bits / 8L).to_int()
+      let rem = (bits % 8L).to_int()
+      let mut val = 0UL
+      let mut i = 0
+      while i < full_bytes {
+        let b = bit_array_read_byte_at(ba, offset + i.to_int64() * 8L)
+        val = (val << 8) | b.to_uint64()
+        i = i + 1
+      }
+      if rem > 0 {
+        let top = bit_array_read_small_bits(
+          ba,
+          offset + full_bytes.to_int64() * 8L,
+          rem,
+        )
+        val = (val << rem) | top.to_uint64()
+      }
+      let b_int = bits.to_int()
+      if signed && b_int < 64 && ((val >> (b_int - 1)) & 1UL) == 1UL {
+        val = val | (0xFFFF_FFFF_FFFF_FFFFUL << b_int)
+      }
+      Some(val.reinterpret_as_int64())
+    } else {
+      let start = offset + (bits - 64L)
+      let mut val = 0UL
+      let mut i = 0
+      while i < 8 {
+        let b = bit_array_read_byte_at(ba, start + i.to_int64() * 8L)
+        val = (val << 8) | b.to_uint64()
+        i = i + 1
+      }
+      Some(val.reinterpret_as_int64())
+    }
+  } else {
+    let full_bytes = bits / 8L
+    let rem = (bits % 8L).to_int()
+    let byte_count = if full_bytes < 8L { full_bytes.to_int() } else { 8 }
+    let mut val = 0UL
+    let mut i = 0
+    while i < byte_count {
+      let b = bit_array_read_byte_at(ba, offset + i.to_int64() * 8L)
+      val = val | (b.to_uint64() << (i * 8))
+      i = i + 1
+    }
+    if full_bytes < 8L && rem > 0 {
+      let top = bit_array_read_small_bits(ba, offset + full_bytes * 8L, rem)
+      val = val | (top.to_uint64() << (full_bytes.to_int() * 8))
+    }
+    if signed && bits < 64L {
+      let b_int = bits.to_int()
+      if ((val >> (b_int - 1)) & 1UL) == 1UL {
+        val = val | (0xFFFF_FFFF_FFFF_FFFFUL << b_int)
+      }
+    }
+    Some(val.reinterpret_as_int64())
+  }
+}
+
+///|
+pub fn bit_array_read_float(
+  ba : BitArray,
+  offset : Int64,
+  bits : Int64,
+  big_endian : Bool,
+) -> Option[Double] {
+  if bits == 16L {
+    match bit_array_read_int(ba, offset, 16L, false, big_endian) {
+      Some(i) => f16_bits_to_double(i.to_int())
+      None => None
+    }
+  } else if bits == 32L {
+    match bit_array_read_int(ba, offset, 32L, false, big_endian) {
+      Some(i) => {
+        let d = Float::reinterpret_from_uint(
+          i.reinterpret_as_uint64().to_uint(),
+        ).to_double()
+        if d.is_nan() || d.is_inf() {
+          None
+        } else {
+          Some(d)
+        }
+      }
+      None => None
+    }
+  } else if bits == 64L {
+    match bit_array_read_int(ba, offset, 64L, false, big_endian) {
+      Some(i) => {
+        let d = i.reinterpret_as_double()
+        if d.is_nan() || d.is_inf() {
+          None
+        } else {
+          Some(d)
+        }
+      }
+      None => None
+    }
+  } else {
+    None
+  }
+}
+
+///|
+pub fn bit_array_read_bits(
+  ba : BitArray,
+  offset : Int64,
+  bits : Int64,
+) -> Option[BitArray] {
+  if bits < 0L || offset < 0L || offset + bits > ba.bit_length {
+    return None
+  }
+  if bits == 0L {
+    return Some(BitArray::empty())
+  }
+  let full_bytes = (bits / 8L).to_int()
+  let rem = (bits % 8L).to_int()
+  let buf = @buffer.Buffer()
+  if offset % 8L == 0L {
+    let start_byte = (offset / 8L).to_int()
+    if full_bytes > 0 {
+      buf.write_bytesview(ba.data[start_byte:start_byte + full_bytes])
+    }
+    if rem > 0 {
+      let last_b = ba.data[start_byte + full_bytes].to_int()
+      let mask = 0xFF ^ ((1 << (8 - rem)) - 1)
+      buf.write_byte((last_b & mask).to_byte())
+    }
+    return Some({ data: buf.to_bytes(), bit_length: bits })
+  }
+  let mut i = 0
+  while i < full_bytes {
+    buf.write_byte(
+      bit_array_read_byte_at(ba, offset + i.to_int64() * 8L).to_byte(),
+    )
+    i = i + 1
+  }
+  if rem > 0 {
+    let top = bit_array_read_small_bits(
+      ba,
+      offset + full_bytes.to_int64() * 8L,
+      rem,
+    )
+    buf.write_byte((top << (8 - rem)).to_byte())
+  }
+  Some({ data: buf.to_bytes(), bit_length: bits })
+}
+
+///|
+pub fn bit_array_rest_bits(ba : BitArray, offset : Int64) -> Option[BitArray] {
+  if offset < 0L || offset > ba.bit_length {
+    None
+  } else {
+    bit_array_read_bits(ba, offset, ba.bit_length - offset)
+  }
+}
+
+///|
+pub fn bit_array_rest_bytes(ba : BitArray, offset : Int64) -> Option[BitArray] {
+  if !bit_array_rest_is_bytes(ba, offset) {
+    None
+  } else {
+    bit_array_read_bits(ba, offset, ba.bit_length - offset)
+  }
+}
+
+///|
+pub fn bit_array_match_bits(
+  ba : BitArray,
+  offset : Int64,
+  expected : BitArray,
+) -> Option[Int64] {
+  if offset < 0L || offset + expected.bit_length > ba.bit_length {
+    return None
+  }
+  let full_bytes = (expected.bit_length / 8L).to_int()
+  let rem = (expected.bit_length % 8L).to_int()
+  let mut i = 0
+  while i < full_bytes {
+    if bit_array_read_byte_at(ba, offset + i.to_int64() * 8L) !=
+      expected.data[i].to_int() {
+      return None
+    }
+    i = i + 1
+  }
+  if rem > 0 {
+    let actual_rem = bit_array_read_small_bits(
+      ba,
+      offset + full_bytes.to_int64() * 8L,
+      rem,
+    )
+    let exp_rem = expected.data[full_bytes].to_int() >> (8 - rem)
+    if actual_rem != exp_rem {
+      return None
+    }
+  }
+  Some(offset + expected.bit_length)
+}
+
+///|
+pub fn bit_array_read_utf8_codepoint(
+  ba : BitArray,
+  offset : Int64,
+) -> Option[(UtfCodepoint, Int64)] {
+  if offset < 0L || offset + 8L > ba.bit_length {
+    return None
+  }
+  let b0 = bit_array_read_byte_at(ba, offset)
+  if b0 <= 0x7F {
+    return Some(({ code: b0.to_int64() }, offset + 8L))
+  }
+  if b0 >= 0xC2 && b0 <= 0xDF {
+    if offset + 16L > ba.bit_length {
+      return None
+    }
+    let b1 = bit_array_read_byte_at(ba, offset + 8L)
+    if (b1 & 0xC0) != 0x80 {
+      return None
+    }
+    let cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+    return Some(({ code: cp.to_int64() }, offset + 16L))
+  }
+  if b0 >= 0xE0 && b0 <= 0xEF {
+    if offset + 24L > ba.bit_length {
+      return None
+    }
+    let b1 = bit_array_read_byte_at(ba, offset + 8L)
+    let b2 = bit_array_read_byte_at(ba, offset + 16L)
+    if (b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 {
+      return None
+    }
+    if b0 == 0xE0 && b1 < 0xA0 {
+      return None
+    }
+    if b0 == 0xED && b1 >= 0xA0 {
+      return None
+    }
+    let cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+    return Some(({ code: cp.to_int64() }, offset + 24L))
+  }
+  if b0 >= 0xF0 && b0 <= 0xF4 {
+    if offset + 32L > ba.bit_length {
+      return None
+    }
+    let b1 = bit_array_read_byte_at(ba, offset + 8L)
+    let b2 = bit_array_read_byte_at(ba, offset + 16L)
+    let b3 = bit_array_read_byte_at(ba, offset + 24L)
+    if (b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80 {
+      return None
+    }
+    if b0 == 0xF0 && b1 < 0x90 {
+      return None
+    }
+    if b0 == 0xF4 && b1 > 0x8F {
+      return None
+    }
+    let cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+    return Some(({ code: cp.to_int64() }, offset + 32L))
+  }
+  None
+}
+
+///|
+pub fn bit_array_read_utf16_codepoint(
+  ba : BitArray,
+  offset : Int64,
+  big_endian : Bool,
+) -> Option[(UtfCodepoint, Int64)] {
+  match bit_array_read_int(ba, offset, 16L, false, big_endian) {
+    None => None
+    Some(u1) => {
+      let w1 = u1.to_int()
+      if w1 < 0xD800 || w1 > 0xDFFF {
+        Some(({ code: u1 }, offset + 16L))
+      } else if w1 <= 0xDBFF {
+        match bit_array_read_int(ba, offset + 16L, 16L, false, big_endian) {
+          None => None
+          Some(u2) => {
+            let w2 = u2.to_int()
+            if w2 >= 0xDC00 && w2 <= 0xDFFF {
+              let cp = 0x10000 + ((w1 - 0xD800) << 10) + (w2 - 0xDC00)
+              Some(({ code: cp.to_int64() }, offset + 32L))
+            } else {
+              None
+            }
+          }
+        }
+      } else {
+        None
+      }
+    }
+  }
+}
+
+///|
+pub fn bit_array_read_utf32_codepoint(
+  ba : BitArray,
+  offset : Int64,
+  big_endian : Bool,
+) -> Option[(UtfCodepoint, Int64)] {
+  match bit_array_read_int(ba, offset, 32L, false, big_endian) {
+    None => None
+    Some(cp) =>
+      if cp >= 0L && cp <= 0x10FFFFL && !(cp >= 0xD800L && cp <= 0xDFFFL) {
+        Some(({ code: cp }, offset + 32L))
+      } else {
+        None
+      }
   }
 }
 
@@ -350,13 +1057,22 @@ pub impl GleamInspect for String with gleam_inspect(self) {
 pub impl GleamInspect for BitArray with gleam_inspect(self) {
   let buf = StringBuilder()
   buf.write_string("<<")
+  let full_bytes = (self.bit_length / 8L).to_int()
+  let rem = (self.bit_length % 8L).to_int()
   let mut i = 0
-  while i < self.data.length() {
+  while i < full_bytes {
     if i > 0 {
       buf.write_string(", ")
     }
     buf.write_string(self.data[i].to_int().to_string())
     i = i + 1
+  }
+  if rem > 0 {
+    if full_bytes > 0 {
+      buf.write_string(", ")
+    }
+    let v = self.data[full_bytes].to_int() >> (8 - rem)
+    buf.write_string(v.to_string() + ":size(" + rem.to_string() + ")")
   }
   buf.write_string(">>")
   buf.to_string()

@@ -747,7 +747,7 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
         ),
       ),
     ]
-  // Guard has both synthetic has_prefix AND user guard wrapped with prefix bindings
+  // Guard has both synthetic has_prefix AND user guard wrapped with needed prefix bindings
   let assert Some(ir.IrBinOp(ir.IrAnd, has_pfx_call, ir.IrBlock(guard_block))) =
     c_cmd.guard
   assert has_pfx_call
@@ -758,7 +758,7 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
         ir.IrCallArg(None, ir.IrString("cmd:")),
       ],
     )
-  assert list.length(guard_block) == 3
+  assert list.length(guard_block) == 2
 
   assert c_hi.patterns == [[ir.IrPatVar("__str_pfx_1")]]
   assert c_wild.patterns == [[ir.IrPatDiscard]]
@@ -3277,6 +3277,550 @@ pub fn example_file_io_moonbit_deps_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+// -----------------------------------------------------------------------------
+// 11. Tier 2 BitArray lowering, emission, semantics & stdlib parity tests
+// -----------------------------------------------------------------------------
+
+pub fn bit_array_tier2_lowering_and_emission_test() {
+  let src =
+    "pub fn is_empty(b: BitArray) -> Bool {\n"
+    <> "  case b {\n"
+    <> "    <<>> -> True\n"
+    <> "    <<_:bits>> -> False\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn id_bits(b: BitArray) -> BitArray {\n"
+    <> "  case b {\n"
+    <> "    <<rest:bits>> -> rest\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn split_bits(b: BitArray) -> #(Int, Int) {\n"
+    <> "  case b {\n"
+    <> "    <<a:3, b:5>> -> #(a, b)\n"
+    <> "    _ -> #(0, 0)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn sized_frame(b: BitArray) -> #(BitArray, BitArray) {\n"
+    <> "  case b {\n"
+    <> "    <<len:8, payload:bytes-size(len), rest:bits>> -> #(payload, rest)\n"
+    <> "    _ -> #(<<>>, <<>>)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn arith_size(b: BitArray) -> Int {\n"
+    <> "  case b {\n"
+    <> "    <<n:4, v:size(n * 2 - 1)>> -> v\n"
+    <> "    _ -> 0\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn endian_float_utf(b: BitArray) -> Int {\n"
+    <> "  case b {\n"
+    <> "    <<x:12-little-signed, _f:16-float-little>> -> x\n"
+    <> "    <<\"GET \":utf8, rest:bits>> -> bit_len(rest)\n"
+    <> "    <<cp:utf8_codepoint, _:bits>> -> {\n"
+    <> "      let _ = cp\n"
+    <> "      1\n"
+    <> "    }\n"
+    <> "    <<_:utf8, _:bits>> -> 2\n"
+    <> "    _ -> 0\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn nested_and_aliases(b: BitArray) -> #(Int, BitArray) {\n"
+    <> "  case b {\n"
+    <> "    <<1:8, payload:bytes-size(1), rest:bits>> -> #(1, <<payload:bits, rest:bits>>)\n"
+    <> "    <<a:4, b:4>> as header -> #(a + b, header)\n"
+    <> "    _ -> #(0, <<>>)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn guard_pruning(b: BitArray) -> BitArray {\n"
+    <> "  case b {\n"
+    <> "    <<byte, rest:bits>> if byte < 128 -> rest\n"
+    <> "    _ -> <<>>\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn body_pruning(b: BitArray) -> Bool {\n"
+    <> "  case b {\n"
+    <> "    <<len:8, _:bytes-size(len)>> -> True\n"
+    <> "    _ -> False\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn bit_len(b: BitArray) -> Int {\n"
+    <> "  let _ = b\n"
+    <> "  0\n"
+    <> "}\n\n"
+    <> "pub fn construct_all(n: Int, cp: UtfCodepoint, ba: BitArray) -> BitArray {\n"
+    <> "  <<n:16-native, 1.5, \"hi\":utf16-little, \"yo\":utf32-big, cp:utf8_codepoint, cp:utf16_codepoint-little, cp:utf32_codepoint-big, ba:bits-size(4), ba:bits-size(1)-unit(8)>>\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre_res)) = prepass.parse_module("ba_unit", src)
+  let table =
+    symbol_table.index_project(
+      "ba_pkg",
+      [#("ba_unit", ast_mod, pre_res)],
+      None,
+      dict.new(),
+    )
+  let ir_mod =
+    desugar.desugar_module(ast_mod, table, "ba_unit")
+    |> tco.optimize_module
+
+  // 1. <<>> and <<_:bits>>
+  let assert Ok(fn_empty) =
+    list.find(ir_mod.functions, fn(f) { f.name == "is_empty" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(clauses: [c_emp, c_any], ..))] =
+    fn_empty.body
+  assert c_emp.patterns == [[ir.IrPatBitString([])]]
+  assert c_any.patterns == [[ir.IrPatDiscard]]
+  assert c_any.guard == None
+  assert c_any.prefix_bindings == []
+
+  // 2. <<rest:bits>>
+  let assert Ok(fn_id) =
+    list.find(ir_mod.functions, fn(f) { f.name == "id_bits" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(clauses: [c_id], ..))] = fn_id.body
+  assert c_id.patterns == [[ir.IrPatVar("rest")]]
+  assert c_id.guard == None
+  assert c_id.prefix_bindings == []
+
+  // 3. <<byte, rest:bits>> if byte < 128 -> rest (guard has NO rest, body has NO byte)
+  let assert Ok(fn_gp) =
+    list.find(ir_mod.functions, fn(f) { f.name == "guard_pruning" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(clauses: [c_gp, _], ..))] = fn_gp.body
+  assert list.map(c_gp.prefix_bindings, fn(b) { b.0 }) == ["rest"]
+  let assert Some(ir.IrBinOp(ir.IrAnd, _, ir.IrBlock(gp_block))) = c_gp.guard
+  assert list.any(gp_block, fn(st) {
+    case st {
+      ir.IrStmtLet(ir.IrPatVar("byte"), ..) -> True
+      _ -> False
+    }
+  })
+  assert !list.any(gp_block, fn(st) {
+    case st {
+      ir.IrStmtLet(ir.IrPatVar("rest"), ..) -> True
+      _ -> False
+    }
+  })
+
+  // 4. <<len:8, _:bytes-size(len)>> -> True (body prefix_bindings completely pruned)
+  let assert Ok(fn_bp) =
+    list.find(ir_mod.functions, fn(f) { f.name == "body_pruning" })
+  let assert [ir.IrStmtExpr(ir.IrMatch(clauses: [c_bp, _], ..))] = fn_bp.body
+  assert c_bp.prefix_bindings == []
+  assert c_bp.guard != None
+
+  // 5. Verify MoonBit codegen strings
+  let #(mbt, _) = moonbit.emit_module(ir_mod)
+  assert string.contains(mbt, "{ bit_length: 0L, .. } => true")
+  assert string.contains(mbt, "@gprelude.bit_array_read_int(")
+  assert string.contains(mbt, "12L, true, false")
+  assert string.contains(mbt, "@gprelude.bit_array_read_float(")
+  assert string.contains(mbt, "16L, false")
+  assert string.contains(mbt, "@gprelude.bit_array_match_bits(")
+  assert string.contains(mbt, "@gprelude.bit_array_read_utf8_codepoint(")
+  assert string.contains(mbt, "@gprelude.BitArray::int_segment(n, 16L, false)")
+  assert string.contains(
+    mbt,
+    "@gprelude.BitArray::float_segment(1.5, 64L, true)",
+  )
+  assert string.contains(mbt, "@gprelude.BitArray::from_utf16(\"hi\", false)")
+  assert string.contains(mbt, "@gprelude.BitArray::from_utf32(\"yo\", true)")
+  assert string.contains(mbt, "@gprelude.BitArray::utf8_codepoint_segment(cp)")
+  assert string.contains(
+    mbt,
+    "@gprelude.BitArray::utf16_codepoint_segment(cp, false)",
+  )
+  assert string.contains(
+    mbt,
+    "@gprelude.BitArray::utf32_codepoint_segment(cp, true)",
+  )
+  assert string.contains(mbt, "@gprelude.BitArray::bits_segment(ba, 4L)")
+  assert string.contains(mbt, "@gprelude.BitArray::bits_segment(ba, (1L * 8L))")
+  Nil
+}
+
+fn assert_all_moonbit_targets_ok(out_dir: String, expected_summary: String) {
+  let targets = ["wasm", "wasm-gc", "js", "native"]
+  list.each(targets, fn(target) {
+    let chk =
+      cmd.run(
+        command: "moon",
+        args: ["check", "--deny-warn", "--target", target],
+        cwd: out_dir,
+      )
+    assert chk.exit_code == 0
+
+    let run =
+      cmd.run(command: "moon", args: ["test", "--target", target], cwd: out_dir)
+    assert run.exit_code == 0
+    assert string.contains(run.output, expected_summary)
+  })
+}
+
+fn stage_offline_bit_array_project(root: String, pkg_name: String) {
+  let packages_dir = filepath.join(root, "build/packages")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
+
+  symlink_root_package("gleam_stdlib", packages_dir)
+  symlink_root_package("gleeunit", packages_dir)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \""
+        <> pkg_name
+        <> "\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n\n[dev-dependencies]\ngleeunit = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(packages_dir, "packages.toml"),
+      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngleeunit = \"1.11.0\"\n\n[git]\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "manifest.toml"),
+      contents: "packages = [\n"
+        <> "  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n"
+        <> "  { name = \"gleeunit\", version = \"1.11.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"gleeunit\", source = \"hex\", outer_checksum = \"EC31ABA74256AEA531EDF8169931D775BBB384FED0A8A1BDC4DD9354E3E21826\" },\n"
+        <> "]\n\n[requirements]\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\ngleeunit = { version = \">= 1.0.0 and < 2.0.0\" }\n",
+    )
+    == Ok(Nil)
+}
+
+pub fn bit_array_tier2_e2e_all_targets_test() {
+  let root = "build/test_fixtures/bit_array_t2"
+  let out_dir = "build/test_fixtures/bit_array_t2_mbt"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  stage_offline_bit_array_project(root, "bit_array_t2")
+
+  let lib_src =
+    "import gleam/bit_array\n"
+    <> "import gleam/dict\n"
+    <> "import gleam/string\n\n"
+    <> "pub type Packet {\n"
+    <> "  Packet(version: Int, flags: Int, payload: BitArray, crc: Int)\n"
+    <> "  EmptyFrame\n"
+    <> "  RawTail(BitArray)\n"
+    <> "}\n\n"
+    <> "fn with_bits(b: BitArray, k: fn(BitArray) -> a) -> a {\n"
+    <> "  k(b)\n"
+    <> "}\n\n"
+    <> "pub fn parse_packet(b: BitArray) -> Result(Packet, Nil) {\n"
+    <> "  case b {\n"
+    <> "    <<>> -> Ok(EmptyFrame)\n"
+    <> "    <<0:3, _:5, rest:bytes>> -> Ok(RawTail(rest))\n"
+    <> "    <<version:3, flags:5, len:8, payload:bytes-size(len), crc:16-big>> ->\n"
+    <> "      Ok(Packet(version:, flags:, payload:, crc:))\n"
+    <> "    _ -> Error(Nil)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn check_dict_and_equality() -> Bool {\n"
+    <> "  let d =\n"
+    <> "    dict.from_list([\n"
+    <> "      #(<<1:1>>, \"one_bit\"),\n"
+    <> "      #(<<0x80>>, \"byte_128\"),\n"
+    <> "      #(<<0:1>>, \"z1\"),\n"
+    <> "      #(<<0:2>>, \"z2\"),\n"
+    <> "      #(<<0xAB>>, \"ab\"),\n"
+    <> "    ])\n"
+    <> "  let d2 = dict.insert(d, <<0xA:4, 0xB:4>>, \"ab2\")\n"
+    <> "  <<0:1>> != <<0:2>>\n"
+    <> "  && <<1:1>> != <<0x80>>\n"
+    <> "  && <<0xAB>> == <<0xA:4, 0xB:4>>\n"
+    <> "  && dict.size(d) == 5\n"
+    <> "  && dict.size(d2) == 5\n"
+    <> "  && dict.get(d2, <<0xAB>>) == Ok(\"ab2\")\n"
+    <> "  && dict.get(d2, <<1:1>>) == Ok(\"one_bit\")\n"
+    <> "  && dict.get(d2, <<0x80>>) == Ok(\"byte_128\")\n"
+    <> "}\n\n"
+    <> "pub fn check_int_widths_and_endianness() -> Bool {\n"
+    <> "  let zero = 0\n"
+    <> "  let neg = -5\n"
+    <> "  let dyn_zero = <<42:size(zero)>>\n"
+    <> "  let dyn_neg = <<42:size(neg)>>\n"
+    <> "  let assert <<zval:size(zero), rest:bits>> = <<1, 2>>\n"
+    <> "  let neg_pat_ok = case <<1, 2>> {\n"
+    <> "    <<_:size(neg), _:bits>> -> False\n"
+    <> "    <<_:bits>> -> True\n"
+    <> "  }\n"
+    <> "  let assert <<u12:12-little>> = <<0x123:12-little>>\n"
+    <> "  let assert <<s12:12-little-signed, u12b:12-little-unsigned>> =\n"
+    <> "    <<-20:12-little, -20:12-little>>\n"
+    <> "  let assert <<b127:127-big-signed, l127:127-little-signed>> =\n"
+    <> "    <<-1:127-big, -1:127-little>>\n"
+    <> "  let assert <<b127u:127-big-unsigned, l127u:127-little-unsigned>> =\n"
+    <> "    <<1:127-big, 1:127-little>>\n"
+    <> "  let assert <<nval:12-native-signed>> = <<-33:12-native>>\n"
+    <> "  let src = <<0xAB, 0xCD>>\n"
+    <> "  dyn_zero == <<>>\n"
+    <> "  && dyn_neg == <<>>\n"
+    <> "  && <<0:-8>> == <<>>\n"
+    <> "  && zval == 0\n"
+    <> "  && rest == <<1, 2>>\n"
+    <> "  && neg_pat_ok\n"
+    <> "  && <<0x123:12-little>> == <<35, 1:4>>\n"
+    <> "  && <<-20:12-little>> == <<236, 15:4>>\n"
+    <> "  && u12 == 0x123\n"
+    <> "  && s12 == -20\n"
+    <> "  && u12b == 4076\n"
+    <> "  && b127 == -1\n"
+    <> "  && l127 == -1\n"
+    <> "  && b127u == 1\n"
+    <> "  && l127u == 1\n"
+    <> "  && bit_array.bit_size(<<-1:190>>) == 190\n"
+    <> "  && nval == -33\n"
+    <> "  && <<0x123:3-unit(4)-big>> == <<0x12, 3:4>>\n"
+    <> "  && <<src:bits-size(4)>> == <<0xA:4>>\n"
+    <> "  && <<src:bits-size(8)>> == <<0xAB>>\n"
+    <> "}\n\n"
+    <> "pub fn check_floats() -> Bool {\n"
+    <> "  let bare = <<1.5>>\n"
+    <> "  let assert <<f64:64-float>> = bare\n"
+    <> "  let assert <<f16b:16-float-big, f16l:16-float-little>> =\n"
+    <> "    <<-2.25:16-float-big, 5.960464477539063e-8:16-float-little>>\n"
+    <> "  let assert <<f32b:32-float-big, f32l:32-float-little, f32n:32-float-native>> =\n"
+    <> "    <<-3.25:32-float-big, 1.5:32-float-little, 2.5:32-float-native>>\n"
+    <> "  let lit_mismatch = case <<0.1:32-float>> {\n"
+    <> "    <<0.1:32-float>> -> False\n"
+    <> "    _ -> True\n"
+    <> "  }\n"
+    <> "  let match_f16 = fn(bits: BitArray) {\n"
+    <> "    case bits {\n"
+    <> "      <<_:16-float-big>> -> True\n"
+    <> "      _ -> False\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "  let match_f32 = fn(bits: BitArray) {\n"
+    <> "    case bits {\n"
+    <> "      <<_:32-float-big>> -> True\n"
+    <> "      _ -> False\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "  let match_f64 = fn(bits: BitArray) {\n"
+    <> "    case bits {\n"
+    <> "      <<_:64-float-big>> -> True\n"
+    <> "      _ -> False\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "  f64 == 1.5\n"
+    <> "  && <<1.5:16-float-big>> == <<62, 0>>\n"
+    <> "  && <<1.5:16-float-little>> == <<0, 62>>\n"
+    <> "  && <<1.5:32-float-little>> == <<0, 0, 192, 63>>\n"
+    <> "  && <<0.0:16-float-big>> == <<0, 0>>\n"
+    <> "  && <<-0.0:16-float-big>> == <<128, 0>>\n"
+    <> "  && <<65504.0:16-float-big>> == <<123, 255>>\n"
+    <> "  && <<65520.0:16-float-big>> == <<124, 0>>\n"
+    <> "  && <<5.960464477539063e-8:16-float-big>> == <<0, 1>>\n"
+    <> "  && f16b == -2.25\n"
+    <> "  && f16l == 5.960464477539063e-8\n"
+    <> "  && f32b == -3.25\n"
+    <> "  && f32l == 1.5\n"
+    <> "  && f32n == 2.5\n"
+    <> "  && lit_mismatch\n"
+    <> "  && !match_f16(<<0x7C, 0x00>>)\n"
+    <> "  && !match_f16(<<0xFC, 0x00>>)\n"
+    <> "  && !match_f16(<<0x7E, 0x00>>)\n"
+    <> "  && !match_f32(<<0x7F, 0x80, 0x00, 0x00>>)\n"
+    <> "  && !match_f32(<<0x7F, 0xC0, 0x00, 0x00>>)\n"
+    <> "  && !match_f64(<<0x7F, 0xF8, 0, 0, 0, 0, 0, 0>>)\n"
+    <> "}\n\n"
+    <> "pub fn check_utf() -> Bool {\n"
+    <> "  let assert [emoji_cp] = string.to_utf_codepoints(\"😀\")\n"
+    <> "  let assert [acute_cp] = string.to_utf_codepoints(\"é\")\n"
+    <> "  let encoded =\n"
+    <> "    <<\"GET \":utf8, \"é\":utf16-little, \"😀\":utf16-big, \"😀\":utf32-little, 5:3>>\n"
+    <> "  let assert <<\n"
+    <> "    \"GET \":utf8,\n"
+    <> "    \"é\":utf16-little,\n"
+    <> "    \"😀\":utf16-big,\n"
+    <> "    \"😀\":utf32-little,\n"
+    <> "    tail:bits,\n"
+    <> "  >> = encoded\n"
+    <> "  let assert <<c8:utf8_codepoint, c16:utf16_codepoint-little, c32:utf32_codepoint-big, _:utf8, after:bits>> =\n"
+    <> "    <<emoji_cp:utf8_codepoint, acute_cp:utf16_codepoint-little, emoji_cp:utf32_codepoint-big, \"a!\":utf8>>\n"
+    <> "  let bad_utf8 = fn(bits: BitArray) {\n"
+    <> "    case bits {\n"
+    <> "      <<_:utf8>> -> False\n"
+    <> "      _ -> True\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "  let bad_utf16 = case <<0xD8, 0x00>> {\n"
+    <> "    <<_:utf16_codepoint-big>> -> False\n"
+    <> "    _ -> True\n"
+    <> "  }\n"
+    <> "  let bad_utf32 = case <<0x00, 0x00, 0xD8, 0x00>> {\n"
+    <> "    <<_:utf32_codepoint-big>> -> False\n"
+    <> "    _ -> True\n"
+    <> "  }\n"
+    <> "  <<emoji_cp:utf8_codepoint>> == <<240, 159, 152, 128>>\n"
+    <> "  && <<emoji_cp:utf16_codepoint-little>> == <<61, 216, 0, 222>>\n"
+    <> "  && <<emoji_cp:utf32_codepoint-big>> == <<0, 1, 246, 0>>\n"
+    <> "  && tail == <<5:3>>\n"
+    <> "  && string.utf_codepoint_to_int(c8) == 128512\n"
+    <> "  && string.utf_codepoint_to_int(c16) == 233\n"
+    <> "  && string.utf_codepoint_to_int(c32) == 128512\n"
+    <> "  && after == <<\"!\":utf8>>\n"
+    <> "  && bad_utf8(<<0xC0, 0xAF>>)\n"
+    <> "  && bad_utf8(<<0xED, 0xA0, 0x80>>)\n"
+    <> "  && bad_utf8(<<0xE2, 0x82>>)\n"
+    <> "  && bad_utf16\n"
+    <> "  && bad_utf32\n"
+    <> "}\n\n"
+    <> "pub fn check_patterns_scoping_and_control_flow() -> Bool {\n"
+    <> "  let n = 4\n"
+    <> "  let assert <<a:size(n), n:4, b:size(n)>> = <<5:4, 2:4, 1:2>>\n"
+    <> "  let assert <<m:4, v:size(m * 2 - 1), tail:bits>> = <<3:4, 21:5, 1:1>>\n"
+    <> "  let assert <<ha:4, hb:4, hrest:bits>> = << <<5:4, 10:4>>:bits-size(8), 3:2 >>\n"
+    <> "  let assert <<nlen:4, npay:bits-size(nlen)>> = << <<6:4>>:bits-size(4), 42:6 >>\n"
+    <> "  let assert #(Ok(<<t0:3, t1:5>>), [<<t2:4, _:bits>>]) =\n"
+    <> "    #(Ok(<<5:3, 19:5>>), [<<9:4, 1:1>>])\n"
+    <> "  let assert <<w0:4, w1:4>> as whole = <<0x4E>>\n"
+    <> "  let multi = case <<1:4, 9:4>>, <<2:4, 7:4>> {\n"
+    <> "    <<1:4, x:4>>, <<2:4, y:4>> -> x + y\n"
+    <> "    _, _ -> 0\n"
+    <> "  }\n"
+    <> "  let alt = fn(bits: BitArray) {\n"
+    <> "    case bits {\n"
+    <> "      <<1:4, x:4>> | <<2:4, x:4>> -> x\n"
+    <> "      _ -> -1\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "  let guard_prune = fn(bits: BitArray) {\n"
+    <> "    case bits {\n"
+    <> "      <<byte, rest:bits>> if byte < 128 -> rest\n"
+    <> "      _ -> <<>>\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "  let body_prune = fn(bits: BitArray) {\n"
+    <> "    case bits {\n"
+    <> "      <<len:8, _:bytes-size(len)>> -> True\n"
+    <> "      _ -> False\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "  let let_rest = {\n"
+    <> "    let <<r:bits>> = <<1:3, 2:4>>\n"
+    <> "    r\n"
+    <> "  }\n"
+    <> "  let assert <<ah:3, bh:5>> = <<0x7B>> as \"bad header\"\n"
+    <> "  let use_res = {\n"
+    <> "    use <<urest:bits>> <- with_bits(<<0x6D, 1:1>>)\n"
+    <> "    urest\n"
+    <> "  }\n"
+    <> "  let pkt = <<3:3, 19:5, 2:8, 0xAA, 0xBB, 0x1234:16-big>>\n"
+    <> "  a == 5\n"
+    <> "  && n == 2\n"
+    <> "  && b == 1\n"
+    <> "  && m == 3\n"
+    <> "  && v == 21\n"
+    <> "  && tail == <<1:1>>\n"
+    <> "  && ha == 5\n"
+    <> "  && hb == 10\n"
+    <> "  && hrest == <<3:2>>\n"
+    <> "  && nlen == 6\n"
+    <> "  && npay == <<42:6>>\n"
+    <> "  && t0 == 5 && t1 == 19 && t2 == 9\n"
+    <> "  && w0 == 4 && w1 == 14 && whole == <<0x4E>>\n"
+    <> "  && multi == 16\n"
+    <> "  && alt(<<1:4, 11:4>>) == 11\n"
+    <> "  && alt(<<2:4, 12:4>>) == 12\n"
+    <> "  && alt(<<3:4, 12:4>>) == -1\n"
+    <> "  && guard_prune(<<10, 1:2>>) == <<1:2>>\n"
+    <> "  && guard_prune(<<200, 1:2>>) == <<>>\n"
+    <> "  && body_prune(<<2, 99, 100>>)\n"
+    <> "  && !body_prune(<<2, 99>>)\n"
+    <> "  && let_rest == <<1:3, 2:4>>\n"
+    <> "  && ah == 3 && bh == 27\n"
+    <> "  && use_res == <<0x6D, 1:1>>\n"
+    <> "  && parse_packet(<<>>) == Ok(EmptyFrame)\n"
+    <> "  && parse_packet(<<0:3, 5:5, 1, 2>>) == Ok(RawTail(<<1, 2>>))\n"
+    <> "  && parse_packet(<<0:3, 5:5, 1, 2:3>>) == Error(Nil)\n"
+    <> "  && parse_packet(pkt) == Ok(Packet(3, 19, <<0xAA, 0xBB>>, 0x1234))\n"
+    <> "}\n"
+
+  let test_src =
+    "import bit_array_t2\n"
+    <> "import gleeunit\n\n"
+    <> "pub fn main() -> Nil {\n  gleeunit.main()\n}\n\n"
+    <> "pub fn dict_and_equality_test() {\n"
+    <> "  assert bit_array_t2.check_dict_and_equality()\n}\n\n"
+    <> "pub fn int_widths_and_endianness_test() {\n"
+    <> "  assert bit_array_t2.check_int_widths_and_endianness()\n}\n\n"
+    <> "pub fn floats_test() {\n"
+    <> "  assert bit_array_t2.check_floats()\n}\n\n"
+    <> "pub fn utf_test() {\n"
+    <> "  assert bit_array_t2.check_utf()\n}\n\n"
+    <> "pub fn patterns_scoping_and_control_flow_test() {\n"
+    <> "  assert bit_array_t2.check_patterns_scoping_and_control_flow()\n}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/bit_array_t2.gleam"),
+      contents: lib_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/bit_array_t2_test.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let gleam_res = cmd.run(command: "gleam", args: ["test"], cwd: root)
+  assert gleam_res.exit_code == 0
+  assert string.contains(gleam_res.output, "5 passed, no failures")
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  assert_all_moonbit_targets_ok(out_dir, "passed: 5, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn gleam_stdlib_bit_array_tier2_e2e_test() {
+  let root = "build/test_fixtures/stdlib_ba_parity"
+  let out_dir = "build/test_fixtures/stdlib_ba_parity_mbt"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  stage_offline_bit_array_project(root, "stdlib_ba_parity")
+
+  let assert Ok(upstream_test_src) =
+    simplifile.read(from: "../gleam_stdlib/test/gleam/bit_array_test.gleam")
+
+  let test_count =
+    string.split(upstream_test_src, "\npub fn ")
+    |> list.length
+  let actual_count = case string.starts_with(upstream_test_src, "pub fn ") {
+    True -> test_count
+    False -> test_count - 1
+  }
+  assert actual_count == 138
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/stdlib_ba_parity.gleam"),
+      contents: "pub fn main() -> Nil {\n  Nil\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/stdlib_ba_parity_test.gleam"),
+      contents: "import gleeunit\n\npub fn main() -> Nil {\n  gleeunit.main()\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/bit_array_test.gleam"),
+      contents: upstream_test_src,
+    )
+    == Ok(Nil)
+
+  let gleam_res = cmd.run(command: "gleam", args: ["test"], cwd: root)
+  assert gleam_res.exit_code == 0
+  assert string.contains(gleam_res.output, "138 passed, no failures")
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  assert_all_moonbit_targets_ok(out_dir, "passed: 138, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }

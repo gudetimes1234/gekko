@@ -115,7 +115,7 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 **Goal:** Close long-tail Gleam language edge cases and polish developer ergonomics for v1.0.
 
 ### Deliverables
-- **BitArray Tier 2:** Support arbitrary non-byte-aligned bit-level packing, `size(n)` expressions, signed/unsigned/endianness flags, and bit-level pattern matching in `@prelude.BitArray`.
+- **BitArray Tier 2 (Implemented):** Support arbitrary non-byte-aligned bit-level packing, `size(n)` expressions, signed/unsigned/endianness/float/UTF segments, and bit-level pattern matching in `gprelude.BitArray`.
 - **Mutual Tail Recursion & Optimization:** Add optional flags/diagnostics for mutually recursive functions on linear `wasm` vs `wasm-gc`.
 - **Source-Mapped Error Reporting:** Format transpiler errors (unmapped externals, unsupported constructs) with exact original `.gleam` file paths, line numbers, and actionable `gekko.toml` hints.
 - **Additional Popular Hex FFI Packs & Golden Suite:** Expand golden test matrix across real-world Gleam libraries and edge cases (nested generics, shadowed variables, opaque types, constant blocks, bit-syntax protocols).

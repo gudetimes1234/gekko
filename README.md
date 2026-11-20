@@ -148,6 +148,5 @@ Each example includes its own `README.md` with setup, generation commands (where
 
 ## Known Limitations
 
-- **BitArray (Tier 1 only):** `gprelude.BitArray` is currently backed by byte-aligned `Bytes` (`8`, `16`, `32`, `64`-bit integer and `32`/`64`-bit float segments). Non-byte-aligned bit-level packing and bit-level pattern matching are not yet supported (planned for Tier 2 in [ROADMAP.md](./docs/ROADMAP.md)).
 - **Testing MoonBit FFI code:** `gleam test` runs on Erlang/JS and cannot execute `@external(moonbit, ...)` functions unless they also provide an Erlang/JS external or pure-Gleam fallback. Use `gekko test` to transpile and run tests on MoonBit targets.
 - **Mutual tail recursion:** Self-recursive tail calls are lowered to MoonBit `for` loops, while mutually recursive functions are not yet tail-call optimized.

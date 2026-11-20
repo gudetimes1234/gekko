@@ -774,7 +774,7 @@ fn emit_stmt(
       }
       let #(guard_line, ctx3) = case pattern, guard_condition {
         IrPatVar(v), Some(cond) -> {
-          let #(cond_str, c) = emit_expr(cond, ctx2)
+          let #(cond_str, c) = emit_expr_indented(cond, indent, ctx2)
           #(
             indent
               <> "let "
@@ -784,7 +784,7 @@ fn emit_stmt(
               <> "\n"
               <> indent
               <> "guard "
-              <> cond_str
+              <> paren_if_match(cond, cond_str)
               <> " else { @prelude.abort("
               <> msg_str
               <> ") }",
@@ -800,8 +800,8 @@ fn emit_stmt(
           let #(pat_str, c1) = emit_pattern(pattern, ctx2)
           let #(cond_suffix, c2) = case guard_condition {
             Some(cond) -> {
-              let #(cond_str, c) = emit_expr(cond, c1)
-              #(" && " <> cond_str, c)
+              let #(cond_str, c) = emit_expr_indented(cond, indent, c1)
+              #(" && " <> paren_if_compound(cond, cond_str), c)
             }
             None -> #("", c1)
           }
@@ -1348,31 +1348,27 @@ fn emit_bit_segment(
   ctx: EmitCtx,
 ) -> #(String, EmitCtx) {
   let #(val_str, ctx1) = emit_expr(val, ctx)
-  let is_bytes =
+  let has_bytes = list.contains(opts, glance.BytesOption)
+  let has_bits = list.contains(opts, glance.BitsOption)
+  let has_utf8 = list.contains(opts, glance.Utf8Option)
+  let has_utf16 = list.contains(opts, glance.Utf16Option)
+  let has_utf32 = list.contains(opts, glance.Utf32Option)
+  let has_utf8_cp = list.contains(opts, glance.Utf8CodepointOption)
+  let has_utf16_cp = list.contains(opts, glance.Utf16CodepointOption)
+  let has_utf32_cp = list.contains(opts, glance.Utf32CodepointOption)
+  let has_float = list.contains(opts, glance.FloatOption)
+  let has_int = list.contains(opts, glance.IntOption)
+  let has_size =
     list.any(opts, fn(o) {
       case o {
-        glance.BytesOption | glance.BitsOption -> True
-        _ -> False
-      }
-    })
-  let is_utf8 =
-    list.any(opts, fn(o) {
-      case o {
-        glance.Utf8Option -> True
-        _ -> False
-      }
-    })
-  let is_float =
-    list.any(opts, fn(o) {
-      case o {
-        glance.FloatOption -> True
+        glance.SizeOption(_) | glance.SizeValueOption(_) -> True
         _ -> False
       }
     })
   let big_endian =
     !list.any(opts, fn(o) {
       case o {
-        glance.LittleOption -> True
+        glance.LittleOption | glance.NativeOption -> True
         _ -> False
       }
     })
@@ -1381,60 +1377,124 @@ fn emit_bit_segment(
     False -> "false"
   }
 
-  let has_explicit_int =
-    list.any(opts, fn(o) {
-      case o {
-        glance.IntOption -> True
-        _ -> False
+  case
+    has_bytes || has_bits,
+    has_utf8_cp,
+    has_utf16_cp,
+    has_utf32_cp,
+    has_utf8,
+    has_utf16,
+    has_utf32
+  {
+    True, _, _, _, _, _, _ ->
+      case has_size {
+        False -> #(val_str, ctx1)
+        True -> {
+          let default_unit = case has_bytes {
+            True -> 8
+            False -> 1
+          }
+          let #(bits_str, ctx2) =
+            compute_segment_bits(opts, 1, default_unit, ctx1)
+          #(
+            "@gprelude.BitArray::bits_segment("
+              <> val_str
+              <> ", "
+              <> bits_str
+              <> ")",
+            ctx2,
+          )
+        }
       }
-    })
-
-  case is_bytes, is_utf8, is_float, val {
-    True, _, _, _ -> #(val_str, ctx1)
-    _, True, _, _ -> #(
+    _, True, _, _, _, _, _ -> #(
+      "@gprelude.BitArray::utf8_codepoint_segment(" <> val_str <> ")",
+      ctx1,
+    )
+    _, _, True, _, _, _, _ -> #(
+      "@gprelude.BitArray::utf16_codepoint_segment("
+        <> val_str
+        <> ", "
+        <> endian_str
+        <> ")",
+      ctx1,
+    )
+    _, _, _, True, _, _, _ -> #(
+      "@gprelude.BitArray::utf32_codepoint_segment("
+        <> val_str
+        <> ", "
+        <> endian_str
+        <> ")",
+      ctx1,
+    )
+    _, _, _, _, True, _, _ -> #(
       "@gprelude.BitArray::from_string(" <> val_str <> ")",
       ctx1,
     )
-    _, False, False, IrString(_) if !has_explicit_int -> #(
-      "@gprelude.BitArray::from_string(" <> val_str <> ")",
+    _, _, _, _, _, True, _ -> #(
+      "@gprelude.BitArray::from_utf16(" <> val_str <> ", " <> endian_str <> ")",
       ctx1,
     )
-    _, _, True, _ -> {
-      let #(bits_str, ctx2) = compute_segment_bits(opts, 64, ctx1)
-      #(
-        "@gprelude.BitArray::float_segment("
-          <> val_str
-          <> ", "
-          <> bits_str
-          <> ", "
-          <> endian_str
-          <> ")",
-        ctx2,
-      )
-    }
-    _, _, _, _ -> {
-      let #(bits_str, ctx2) = compute_segment_bits(opts, 8, ctx1)
-      #(
-        "@gprelude.BitArray::int_segment("
-          <> val_str
-          <> ", "
-          <> bits_str
-          <> ", "
-          <> endian_str
-          <> ")",
-        ctx2,
-      )
-    }
+    _, _, _, _, _, _, True -> #(
+      "@gprelude.BitArray::from_utf32(" <> val_str <> ", " <> endian_str <> ")",
+      ctx1,
+    )
+    _, _, _, _, _, _, _ ->
+      case val {
+        IrString(_) if !has_int && !has_float -> #(
+          "@gprelude.BitArray::from_string(" <> val_str <> ")",
+          ctx1,
+        )
+        IrFloat(_) if !has_int -> {
+          let #(bits_str, ctx2) = compute_segment_bits(opts, 64, 1, ctx1)
+          #(
+            "@gprelude.BitArray::float_segment("
+              <> val_str
+              <> ", "
+              <> bits_str
+              <> ", "
+              <> endian_str
+              <> ")",
+            ctx2,
+          )
+        }
+        _ if has_float -> {
+          let #(bits_str, ctx2) = compute_segment_bits(opts, 64, 1, ctx1)
+          #(
+            "@gprelude.BitArray::float_segment("
+              <> val_str
+              <> ", "
+              <> bits_str
+              <> ", "
+              <> endian_str
+              <> ")",
+            ctx2,
+          )
+        }
+        _ -> {
+          let #(bits_str, ctx2) = compute_segment_bits(opts, 8, 1, ctx1)
+          #(
+            "@gprelude.BitArray::int_segment("
+              <> val_str
+              <> ", "
+              <> bits_str
+              <> ", "
+              <> endian_str
+              <> ")",
+            ctx2,
+          )
+        }
+      }
   }
 }
 
 fn compute_segment_bits(
   opts: List(glance.BitStringSegmentOption(IrExpr)),
   default_size: Int,
+  default_unit: Int,
   ctx: EmitCtx,
 ) -> #(String, EmitCtx) {
   let unit =
-    list.fold(opts, 1, fn(acc, o) {
+    list.fold(opts, default_unit, fn(acc, o) {
       case o {
         glance.UnitOption(u) -> u
         _ -> acc
@@ -1522,8 +1582,8 @@ fn emit_regular_bin_op_expr(
 ) -> #(String, EmitCtx) {
   let #(l_raw, ctx1) = emit_expr(left, ctx)
   let #(r_raw, ctx2) = emit_expr(right, ctx1)
-  let l_str = paren_if_match(left, l_raw)
-  let r_str = paren_if_match(right, r_raw)
+  let l_str = paren_if_compound(left, l_raw)
+  let r_str = paren_if_compound(right, r_raw)
 
   case op {
     IrDivInt -> {
@@ -1563,6 +1623,13 @@ fn emit_regular_bin_op_expr(
 fn paren_if_match(expr: IrExpr, emitted: String) -> String {
   case expr {
     IrMatch(_, _) -> "(" <> emitted <> ")"
+    _ -> emitted
+  }
+}
+
+fn paren_if_compound(expr: IrExpr, emitted: String) -> String {
+  case expr {
+    IrMatch(_, _) | IrBlock(_) -> "(" <> emitted <> ")"
     _ -> emitted
   }
 }
@@ -1619,7 +1686,7 @@ fn emit_clause(
   let #(guard_part, ctx2) = case clause.guard {
     Some(g) -> {
       let #(g_str, c_next) = emit_expr_indented(g, indent, ctx1)
-      #(" if " <> g_str, c_next)
+      #(" if " <> paren_if_match(g, g_str), c_next)
     }
     None -> #("", ctx1)
   }
@@ -1699,7 +1766,7 @@ fn emit_pattern(pat: IrPattern, ctx: EmitCtx) -> #(String, EmitCtx) {
     IrPatBitString(segments:) -> {
       let ctx1 = add_gprelude_import(ctx)
       case segments {
-        [] -> #("{ data: b\"\" }", ctx1)
+        [] -> #("{ bit_length: 0L, .. }", ctx1)
         _ -> #("_", ctx1)
       }
     }
@@ -2216,7 +2283,7 @@ fn collect_stmts_eq_vars(
           }
           let env2 =
             list.fold(post_bindings, env1, fn(e, b) {
-              case infer_expr_type(b.1, env1, fn_map, ctx) {
+              case infer_expr_type(b.1, e, fn_map, ctx) {
                 Some(ty) -> dict.insert(e, b.0, ty)
                 None -> e
               }
@@ -2459,7 +2526,7 @@ fn collect_expr_eq_vars(
         }
         let c_env2 =
           list.fold(c.prefix_bindings, c_env, fn(e, b) {
-            case infer_expr_type(b.1, c_env, fn_map, ctx) {
+            case infer_expr_type(b.1, e, fn_map, ctx) {
               Some(ty) -> dict.insert(e, b.0, ty)
               None -> e
             }
@@ -2515,7 +2582,23 @@ fn collect_expr_eq_vars(
     }
     IrBitString(segments:) ->
       list.fold(segments, acc, fn(a, seg) {
-        collect_expr_eq_vars(seg.0, env, fn_map, bounds_map, ctx, allowed, a)
+        let a1 =
+          collect_expr_eq_vars(seg.0, env, fn_map, bounds_map, ctx, allowed, a)
+        list.fold(seg.1, a1, fn(inner_a, opt) {
+          case opt {
+            glance.SizeValueOption(size_expr) ->
+              collect_expr_eq_vars(
+                size_expr,
+                env,
+                fn_map,
+                bounds_map,
+                ctx,
+                allowed,
+                inner_a,
+              )
+            _ -> inner_a
+          }
+        })
       })
     IrEcho(expr: inner, message:, ..) -> {
       let acc1 =
@@ -3227,7 +3310,15 @@ fn expr_any(expr: IrExpr, pred: fn(IrExpr) -> Bool) -> Bool {
           list.any(elements, fn(e) { expr_any(e, pred) })
           || option.map(tail, fn(e) { expr_any(e, pred) }) == Some(True)
         IrBitString(segments:) ->
-          list.any(segments, fn(s) { expr_any(s.0, pred) })
+          list.any(segments, fn(s) {
+            expr_any(s.0, pred)
+            || list.any(s.1, fn(opt) {
+              case opt {
+                glance.SizeValueOption(size_expr) -> expr_any(size_expr, pred)
+                _ -> False
+              }
+            })
+          })
         IrCall(function:, args:) ->
           expr_any(function, pred)
           || list.any(args, fn(a) { expr_any(a.value, pred) })
