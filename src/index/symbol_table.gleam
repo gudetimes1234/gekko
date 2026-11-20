@@ -9,7 +9,7 @@ import project/interface.{
   type PackageInterface, type ResolvedFunction, type ResolvedType,
   type ResolvedTypeDef, FnType, NamedType, TupleType, VariableType,
 }
-import project/prepass.{type FfiKind, type PrepassResult}
+import project/prepass.{type ExternalType, type FfiKind, type PrepassResult}
 
 /// Global symbol index for a Gleam package (and its staged/parsed modules).
 pub type SymbolTable {
@@ -68,6 +68,7 @@ pub type TypeInfo {
     variants: List(VariantInfo),
     is_single_variant: Bool,
     shared_fields: Dict(String, ResolvedType),
+    external_type: Option(ExternalType),
     has_function_field: Bool,
   )
 }
@@ -375,6 +376,7 @@ fn index_module(
       package_name,
       mod_name,
       active_custom_types,
+      prepass_res,
       mod_iface,
       alias_to_module,
       unqualified_types,
@@ -479,14 +481,21 @@ fn index_custom_types(
   package_name: String,
   mod_name: String,
   type_defs: List(glance.Definition(glance.CustomType)),
+  prepass_res: PrepassResult,
   mod_iface: Option(interface.ModuleInterface),
   alias_to_module: Dict(String, String),
   unqualified_types: Dict(String, #(String, String)),
 ) -> #(Dict(String, TypeInfo), Dict(String, ConstructorInfo)) {
+  let ext_type_map =
+    list.fold(prepass_res.external_types, dict.new(), fn(acc, entry) {
+      dict.insert(acc, entry.gleam_type_name, entry.target)
+    })
+
   list.fold(type_defs, #(dict.new(), dict.new()), fn(acc, def) {
     let #(types_acc, ctors_acc) = acc
     let ct = def.definition
     let iface_type = lookup_iface_type(mod_iface, ct.name)
+    let external_type = dict.get(ext_type_map, ct.name) |> option.from_result
 
     let variants =
       list.map(ct.variants, fn(variant) {
@@ -517,6 +526,7 @@ fn index_custom_types(
         variants:,
         is_single_variant:,
         shared_fields:,
+        external_type:,
         has_function_field: False,
       )
 
@@ -983,7 +993,10 @@ fn compute_transitive_type_flags(
   let all_types =
     dict.fold(modules, dict.new(), fn(acc, mod_name, mod_syms) {
       dict.fold(mod_syms.types, acc, fn(inner, type_name, type_info) {
-        dict.insert(inner, #(mod_name, type_name), type_info.variants)
+        dict.insert(inner, #(mod_name, type_name), #(
+          type_info.external_type,
+          type_info.variants,
+        ))
       })
     })
 
@@ -1004,7 +1017,7 @@ fn compute_transitive_type_flags(
 
 fn type_key_has_function_field(
   key: #(String, String),
-  all_types: Dict(#(String, String), List(VariantInfo)),
+  all_types: Dict(#(String, String), #(Option(ExternalType), List(VariantInfo))),
   visited: Set(#(String, String)),
 ) -> Bool {
   case set.contains(visited, key) {
@@ -1012,7 +1025,8 @@ fn type_key_has_function_field(
     False ->
       case dict.get(all_types, key) {
         Error(_) -> False
-        Ok(variants) -> {
+        Ok(#(Some(_), _)) -> True
+        Ok(#(None, variants)) -> {
           let next_visited = set.insert(visited, key)
           list.any(variants, fn(variant) {
             list.any(variant.fields, fn(field) {
@@ -1030,7 +1044,7 @@ fn type_key_has_function_field(
 
 fn resolved_type_has_function(
   ty: ResolvedType,
-  all_types: Dict(#(String, String), List(VariantInfo)),
+  all_types: Dict(#(String, String), #(Option(ExternalType), List(VariantInfo))),
   visited: Set(#(String, String)),
 ) -> Bool {
   case ty {

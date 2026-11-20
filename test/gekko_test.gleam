@@ -2495,6 +2495,7 @@ pub fn example_moonbit_ffi_e2e_test() {
   assert string.contains(run_wasm.output, "utf8_bytes=12")
   assert string.contains(run_wasm.output, "pow=1024.0")
   assert string.contains(run_wasm.output, "sin0=0.0,cos0=1.0")
+  assert string.contains(run_wasm.output, "counter_total=115")
 
   let run_js =
     cmd.run(
@@ -2505,10 +2506,155 @@ pub fn example_moonbit_ffi_e2e_test() {
   assert run_js.exit_code == 0
   assert string.contains(run_js.output, "shout=HELLO MOONBIT!")
   assert string.contains(run_js.output, "pow=1024.0")
+  assert string.contains(run_js.output, "counter_total=115")
 
   let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
   let _ =
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn external_type_opaque_alias_and_record_embedding_e2e_test() {
+  let root = "build/test_fixtures/ext_type_test"
+  let out_dir = "build/test_fixtures/ext_type_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  stage_offline_stdlib(root)
+  assert simplifile.create_directory_all(filepath.join(root, "src/ext_type"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      root,
+      "moonbit/native_box",
+    ))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"ext_type\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+
+  // Local MoonBit types deliberately do NOT derive Eq/Debug/Show.
+  let native_mbt =
+    "///|\n"
+    <> "pub struct OpaqueHandle {\n  id : Int64\n}\n\n"
+    <> "///|\n"
+    <> "pub fn make_handle(id : Int64) -> OpaqueHandle {\n  { id: id }\n}\n\n"
+    <> "///|\n"
+    <> "pub fn handle_id(h : OpaqueHandle) -> Int64 {\n  h.id\n}\n\n"
+    <> "///|\n"
+    <> "pub struct NativeBox[T] {\n  item : T\n}\n\n"
+    <> "///|\n"
+    <> "pub fn[T] wrap_box(item : T) -> NativeBox[T] {\n  { item: item }\n}\n\n"
+    <> "///|\n"
+    <> "pub fn[T] unwrap_box(b : NativeBox[T]) -> T {\n  b.item\n}\n"
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/native_box/native_box.mbt"),
+      contents: native_mbt,
+    )
+    == Ok(Nil)
+
+  let types_gleam =
+    "/// @external_type(moonbit, \"native_box\", \"OpaqueHandle\")\n"
+    <> "pub type Handle\n\n"
+    <> "@external_type(moonbit, \"native_box\", \"NativeBox\")\n"
+    <> "pub type Box(a)\n\n"
+    <> "/// @external(moonbit, \"native_box\", \"make_handle\")\n"
+    <> "pub fn make_handle(id: Int) -> Handle {\n"
+    <> "  let _ = id\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"native_box\", \"handle_id\")\n"
+    <> "pub fn handle_id(h: Handle) -> Int {\n"
+    <> "  let _ = h\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
+    <> "@external(moonbit, \"native_box\", \"wrap_box\")\n"
+    <> "pub fn wrap_box(x: a) -> Box(a)\n\n"
+    <> "@external(moonbit, \"native_box\", \"unwrap_box\")\n"
+    <> "pub fn unwrap_box(b: Box(a)) -> a\n"
+
+  let main_gleam =
+    "import ext_type/types.{type Box, type Handle}\n"
+    <> "import gleam/string\n\n"
+    <> "pub type Holder {\n"
+    <> "  Holder(tag: String, handle: Handle, history: List(Handle), boxed: Result(Box(String), String))\n"
+    <> "}\n\n"
+    <> "pub fn verify_opaque_types() -> Bool {\n"
+    <> "  let h1 = types.make_handle(10)\n"
+    <> "  let h2 = types.make_handle(25)\n"
+    <> "  let b = types.wrap_box(\"ok\")\n"
+    <> "  let holder = Holder(tag: \"k\", handle: h1, history: [h1, h2], boxed: Ok(b))\n"
+    <> "  let inspected = string.inspect(holder)\n"
+    <> "  let box_val = case holder.boxed {\n"
+    <> "    Ok(bx) -> types.unwrap_box(bx)\n"
+    <> "    Error(_) -> \"bad\"\n"
+    <> "  }\n"
+    <> "  types.handle_id(holder.handle) == 10\n"
+    <> "  && box_val == \"ok\"\n"
+    <> "  && string.contains(inspected, \"Holder(\\\"k\\\", \\\"//external\\\"\")\n"
+    <> "}\n"
+
+  let test_gleam =
+    "import ext_type\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn external_type_e2e_test() {\n"
+    <> "  assert ext_type.verify_opaque_types()\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/ext_type/types.gleam"),
+      contents: types_gleam,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/ext_type.gleam"),
+      contents: main_gleam,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/ext_type_test.gleam"),
+      contents: test_gleam,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  let assert Ok(types_mbt) =
+    simplifile.read(from: filepath.join(
+      out_dir,
+      "ext_type_types/ext_type_types.mbt",
+    ))
+  assert string.contains(
+    types_mbt,
+    "pub type Handle = @native_box.OpaqueHandle",
+  )
+  assert string.contains(
+    types_mbt,
+    "pub type Box[A] = @native_box.NativeBox[A]",
+  )
+
+  let assert Ok(main_mbt) =
+    simplifile.read(from: filepath.join(out_dir, "ext_type/ext_type.mbt"))
+  assert !string.contains(main_mbt, "#derive(Eq, Debug, Hash)")
+
+  let check_res =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_res.exit_code == 0
+
+  let test_wasm =
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
+  assert test_wasm.exit_code == 0
+  assert string.contains(test_wasm.output, "passed: 1, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }

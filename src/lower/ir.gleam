@@ -1,6 +1,6 @@
 import glance
 import gleam/option.{type Option}
-import project/prepass.{type FfiKind}
+import project/prepass.{type ExternalType, type FfiKind}
 
 /// Lowered MoonBit-ready representation of a single Gleam module.
 pub type IrModule {
@@ -30,6 +30,7 @@ pub type IrTypeDef {
     opaque_: Bool,
     type_params: List(String),
     variants: List(IrVariant),
+    external_type: Option(ExternalType),
     derive_eq_debug_hash: Bool,
   )
 }

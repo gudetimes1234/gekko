@@ -171,6 +171,7 @@ fn lower_type_def(type_info: TypeInfo, mod_syms: ModuleSymbols) -> IrTypeDef {
     opaque_: type_info.opaque_,
     type_params:,
     variants:,
+    external_type: type_info.external_type,
     derive_eq_debug_hash: !type_info.has_function_field,
   )
 }

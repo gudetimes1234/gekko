@@ -1,7 +1,34 @@
 import gleam/float
 import gleam/int
 import gleam/io
+import gleam/list
 import gleam/string
+
+/// @external_type(moonbit, "text_ffi", "Counter")
+pub type Counter
+
+pub type NamedCounter {
+  NamedCounter(name: String, counter: Counter)
+}
+
+/// @external(moonbit, "text_ffi", "new_counter")
+pub fn new_counter(start: Int) -> Counter {
+  let _ = start
+  panic as "Implemented in MoonBit"
+}
+
+/// @external(moonbit, "text_ffi", "increment_counter")
+pub fn increment_counter(c: Counter, delta: Int) -> Nil {
+  let _ = c
+  let _ = delta
+  panic as "Implemented in MoonBit"
+}
+
+/// @external(moonbit, "text_ffi", "read_counter")
+pub fn read_counter(c: Counter) -> Int {
+  let _ = c
+  panic as "Implemented in MoonBit"
+}
 
 /// @external(moonbit, "text_ffi", "shout")
 pub fn shout(s: String) -> String {
@@ -68,10 +95,20 @@ pub fn main() -> Nil {
   assert s0 == 0.0
   assert c0 == 1.0
 
+  let c1 = new_counter(10)
+  let c2 = new_counter(100)
+  increment_counter(c1, 5)
+  let named = NamedCounter(name: "hits", counter: c1)
+  let counters = [named.counter, c2]
+  let counter_total =
+    list.fold(counters, 0, fn(acc, c) { acc + read_counter(c) })
+  assert counter_total == 115
+
   io.println("shout=" <> greeting)
   io.println("upper=" <> string.join(words, ","))
   io.println("sum_squares=" <> int.to_string(sq_sum))
   io.println("utf8_bytes=" <> int.to_string(utf8_bytes))
   io.println("pow=" <> float.to_string(p))
   io.println("sin0=" <> float.to_string(s0) <> ",cos0=" <> float.to_string(c0))
+  io.println("counter_total=" <> int.to_string(counter_total))
 }

@@ -20,6 +20,11 @@ pub type FfiKind {
   WasmImport(wasm_module: String, import_name: String)
 }
 
+/// Target MoonBit type for an `@external_type(moonbit, "pkg", "Type")` directive.
+pub type ExternalType {
+  ExternalType(package: String, type_name: String)
+}
+
 /// How the FFI mapping was declared in the Gleam source file.
 pub type FfiSource {
   DocPragma
@@ -37,13 +42,32 @@ pub type FfiEntry {
   )
 }
 
+/// An extracted `@external_type(moonbit, ...)` mapping bound to a custom type.
+pub type ExternalTypeEntry {
+  ExternalTypeEntry(
+    module: String,
+    gleam_type_name: String,
+    target: ExternalType,
+    source: FfiSource,
+    line: Int,
+  )
+}
+
 /// Output of running the source pre-pass over a single Gleam module.
 pub type PrepassResult {
-  PrepassResult(cleaned_source: String, ffi_entries: List(FfiEntry))
+  PrepassResult(
+    cleaned_source: String,
+    ffi_entries: List(FfiEntry),
+    external_types: List(ExternalTypeEntry),
+  )
 }
 
 type PendingFfi {
   PendingFfi(kind: FfiKind, source: FfiSource, line: Int)
+}
+
+type PendingExternalType {
+  PendingExternalType(target: ExternalType, source: FfiSource, line: Int)
 }
 
 /// Parse a target string + function name into `PackageCall` or `WasmImport`.
@@ -54,21 +78,26 @@ pub fn parse_ffi_kind(target: String, function: String) -> FfiKind {
   }
 }
 
-/// Scan `source` for `/// @external(moonbit, ...)` doc-comment pragmas and raw
-/// `@external(moonbit, ...)` attributes, strip raw attributes while preserving
-/// exact line numbers, and inject `{ panic as "external" }` for bodyless FFI
-/// functions so `glance` and `gleam export package-interface` succeed.
+/// Scan `source` for `/// @external(moonbit, ...)` and `/// @external_type(moonbit, ...)`
+/// doc-comment pragmas and raw `@external(...)` / `@external_type(...)` attributes,
+/// strip raw attributes while preserving exact line numbers, and inject
+/// `{ panic as "external" }` for bodyless FFI functions so `glance` and
+/// `gleam export package-interface` succeed.
 pub fn preprocess_module(module_name: String, source: String) -> PrepassResult {
   let tokens =
     glexer.new(source)
     |> glexer.lex
 
-  let #(entries, edits) =
-    scan_tokens(tokens, source, module_name, 0, [], [], [])
+  let #(entries, ext_types, edits) =
+    scan_tokens(tokens, source, module_name, 0, [], [], [], [], [])
 
   let cleaned_source = apply_edits(source, edits)
 
-  PrepassResult(cleaned_source:, ffi_entries: list.reverse(entries))
+  PrepassResult(
+    cleaned_source:,
+    ffi_entries: list.reverse(entries),
+    external_types: list.reverse(ext_types),
+  )
 }
 
 /// Run the pre-pass and parse the cleaned source with `glance.module`.
@@ -86,12 +115,14 @@ fn scan_tokens(
   source: String,
   module_name: String,
   brace_depth: Int,
-  pending: List(PendingFfi),
+  pending_fns: List(PendingFfi),
+  pending_types: List(PendingExternalType),
   entries: List(FfiEntry),
+  ext_types: List(ExternalTypeEntry),
   edits: List(TextEdit),
-) -> #(List(FfiEntry), List(TextEdit)) {
+) -> #(List(FfiEntry), List(ExternalTypeEntry), List(TextEdit)) {
   case tokens {
-    [] -> #(entries, edits)
+    [] -> #(entries, ext_types, edits)
 
     [#(token.LeftBrace, _), ..rest] ->
       scan_tokens(
@@ -100,7 +131,9 @@ fn scan_tokens(
         module_name,
         brace_depth + 1,
         [],
+        [],
         entries,
+        ext_types,
         edits,
       )
 
@@ -111,11 +144,13 @@ fn scan_tokens(
         module_name,
         int.max(0, brace_depth - 1),
         [],
+        [],
         entries,
+        ext_types,
         edits,
       )
 
-    // Skip whitespace & regular/module comments without dropping pending FFI pragmas.
+    // Skip whitespace & regular/module comments without dropping pending pragmas.
     [#(token.Space(_), _), ..rest]
     | [#(token.CommentNormal(_), _), ..rest]
     | [#(token.CommentModule(_), _), ..rest] ->
@@ -124,32 +159,44 @@ fn scan_tokens(
         source,
         module_name,
         brace_depth,
-        pending,
+        pending_fns,
+        pending_types,
         entries,
+        ext_types,
         edits,
       )
 
-    // Doc comment at top level: check for `/// @external(moonbit, "pkg", "fn")`
+    // Doc comment at top level: check for `/// @external(...)` or `/// @external_type(...)`
     [#(token.CommentDoc(doc_text), pos), ..rest] if brace_depth == 0 -> {
-      let pending = case parse_doc_pragma(doc_text) {
-        Some(kind) -> {
-          let line = line_at_offset(source, pos.byte_offset)
-          [PendingFfi(kind:, source: DocPragma, line:), ..pending]
-        }
-        None -> pending
+      let line = line_at_offset(source, pos.byte_offset)
+      let pending_fns = case parse_doc_pragma(doc_text) {
+        Some(kind) -> [
+          PendingFfi(kind:, source: DocPragma, line:),
+          ..pending_fns
+        ]
+        None -> pending_fns
+      }
+      let pending_types = case parse_doc_external_type_pragma(doc_text) {
+        Some(target) -> [
+          PendingExternalType(target:, source: DocPragma, line:),
+          ..pending_types
+        ]
+        None -> pending_types
       }
       scan_tokens(
         rest,
         source,
         module_name,
         brace_depth,
-        pending,
+        pending_fns,
+        pending_types,
         entries,
+        ext_types,
         edits,
       )
     }
 
-    // Raw attribute at top level: check for `@external(moonbit, "pkg", "fn")`
+    // Raw attribute at top level: `@external(moonbit, ...)` or `@external_type(moonbit, ...)`
     [#(token.At, pos), ..after_at] if brace_depth == 0 -> {
       case match_raw_external_moonbit(after_at) {
         Some(#(kind, end_offset, remaining)) -> {
@@ -164,49 +211,127 @@ fn scan_tokens(
             )
           let edit =
             TextEdit(start: start_offset, end: end_offset, replacement:)
-          let pending = [
+          let pending_fns = [
             PendingFfi(kind:, source: RawAttribute, line:),
-            ..pending
+            ..pending_fns
           ]
           scan_tokens(
             remaining,
             source,
             module_name,
             brace_depth,
-            pending,
+            pending_fns,
+            pending_types,
             entries,
+            ext_types,
             [edit, ..edits],
           )
         }
         None ->
-          scan_tokens(
-            after_at,
-            source,
-            module_name,
-            brace_depth,
-            pending,
-            entries,
-            edits,
-          )
+          case match_raw_external_type_moonbit(after_at) {
+            Some(#(target, end_offset, remaining)) -> {
+              let start_offset = pos.byte_offset
+              let line = line_at_offset(source, start_offset)
+              let replacement =
+                stripped_comment_preserving_lines(
+                  source,
+                  start_offset,
+                  end_offset,
+                  "// @external_type_moonbit_stripped",
+                )
+              let edit =
+                TextEdit(start: start_offset, end: end_offset, replacement:)
+              let pending_types = [
+                PendingExternalType(target:, source: RawAttribute, line:),
+                ..pending_types
+              ]
+              scan_tokens(
+                remaining,
+                source,
+                module_name,
+                brace_depth,
+                pending_fns,
+                pending_types,
+                entries,
+                ext_types,
+                [edit, ..edits],
+              )
+            }
+            None ->
+              scan_tokens(
+                after_at,
+                source,
+                module_name,
+                brace_depth,
+                pending_fns,
+                pending_types,
+                entries,
+                ext_types,
+                edits,
+              )
+          }
       }
     }
 
-    // Top-level `pub fn <name>(...)` or `fn <name>(...)`
+    // Top-level `pub ...`
     [#(token.Pub, _), ..after_pub] if brace_depth == 0 -> {
       let after_ws = skip_trivia(after_pub)
       case after_ws {
         [#(token.Fn, _), ..after_fn] ->
-          handle_top_fn(after_fn, source, module_name, pending, entries, edits)
-        [#(token.Type, _), ..rest]
-        | [#(token.Opaque, _), ..rest]
-        | [#(token.Const, _), ..rest] ->
+          handle_top_fn(
+            after_fn,
+            source,
+            module_name,
+            pending_fns,
+            entries,
+            ext_types,
+            edits,
+          )
+        [#(token.Opaque, _), ..after_opaque] ->
+          case skip_trivia(after_opaque) {
+            [#(token.Type, _), ..after_type] ->
+              handle_top_type(
+                after_type,
+                source,
+                module_name,
+                pending_types,
+                entries,
+                ext_types,
+                edits,
+              )
+            other ->
+              scan_tokens(
+                other,
+                source,
+                module_name,
+                brace_depth,
+                [],
+                [],
+                entries,
+                ext_types,
+                edits,
+              )
+          }
+        [#(token.Type, _), ..after_type] ->
+          handle_top_type(
+            after_type,
+            source,
+            module_name,
+            pending_types,
+            entries,
+            ext_types,
+            edits,
+          )
+        [#(token.Const, _), ..rest] ->
           scan_tokens(
             rest,
             source,
             module_name,
             brace_depth,
             [],
+            [],
             entries,
+            ext_types,
             edits,
           )
         _ ->
@@ -216,22 +341,78 @@ fn scan_tokens(
             module_name,
             brace_depth,
             [],
+            [],
             entries,
+            ext_types,
             edits,
           )
       }
     }
 
     [#(token.Fn, _), ..after_fn] if brace_depth == 0 ->
-      handle_top_fn(after_fn, source, module_name, pending, entries, edits)
+      handle_top_fn(
+        after_fn,
+        source,
+        module_name,
+        pending_fns,
+        entries,
+        ext_types,
+        edits,
+      )
 
-    // Non-function top-level declaration clears any stray pending FFI pragma
-    [#(token.Type, _), ..rest]
-      | [#(token.Opaque, _), ..rest]
-      | [#(token.Const, _), ..rest]
+    [#(token.Opaque, _), ..after_opaque] if brace_depth == 0 ->
+      case skip_trivia(after_opaque) {
+        [#(token.Type, _), ..after_type] ->
+          handle_top_type(
+            after_type,
+            source,
+            module_name,
+            pending_types,
+            entries,
+            ext_types,
+            edits,
+          )
+        other ->
+          scan_tokens(
+            other,
+            source,
+            module_name,
+            brace_depth,
+            [],
+            [],
+            entries,
+            ext_types,
+            edits,
+          )
+      }
+
+    [#(token.Type, _), ..after_type] if brace_depth == 0 ->
+      handle_top_type(
+        after_type,
+        source,
+        module_name,
+        pending_types,
+        entries,
+        ext_types,
+        edits,
+      )
+
+    // Non-matching top-level declaration clears stray pending pragmas
+    [#(token.Const, _), ..rest]
       | [#(token.Import, _), ..rest]
       if brace_depth == 0
-    -> scan_tokens(rest, source, module_name, brace_depth, [], entries, edits)
+    ->
+      scan_tokens(
+        rest,
+        source,
+        module_name,
+        brace_depth,
+        [],
+        [],
+        entries,
+        ext_types,
+        edits,
+      )
 
     [_, ..rest] ->
       scan_tokens(
@@ -239,8 +420,62 @@ fn scan_tokens(
         source,
         module_name,
         brace_depth,
-        pending,
+        pending_fns,
+        pending_types,
         entries,
+        ext_types,
+        edits,
+      )
+  }
+}
+
+fn handle_top_type(
+  after_type: List(#(Token, glexer.Position)),
+  source: String,
+  module_name: String,
+  pending_types: List(PendingExternalType),
+  entries: List(FfiEntry),
+  ext_types: List(ExternalTypeEntry),
+  edits: List(TextEdit),
+) -> #(List(FfiEntry), List(ExternalTypeEntry), List(TextEdit)) {
+  case skip_trivia(after_type) {
+    [#(token.UpperName(type_name), _), ..rest] -> {
+      let new_ext_types =
+        pending_types
+        |> list.reverse
+        |> list.map(fn(p) {
+          ExternalTypeEntry(
+            module: module_name,
+            gleam_type_name: type_name,
+            target: p.target,
+            source: p.source,
+            line: p.line,
+          )
+        })
+      let ext_types =
+        list.fold(new_ext_types, ext_types, fn(acc, e) { [e, ..acc] })
+      scan_tokens(
+        rest,
+        source,
+        module_name,
+        0,
+        [],
+        [],
+        entries,
+        ext_types,
+        edits,
+      )
+    }
+    other ->
+      scan_tokens(
+        other,
+        source,
+        module_name,
+        0,
+        [],
+        [],
+        entries,
+        ext_types,
         edits,
       )
   }
@@ -252,8 +487,9 @@ fn handle_top_fn(
   module_name: String,
   pending: List(PendingFfi),
   entries: List(FfiEntry),
+  ext_types: List(ExternalTypeEntry),
   edits: List(TextEdit),
-) -> #(List(FfiEntry), List(TextEdit)) {
+) -> #(List(FfiEntry), List(ExternalTypeEntry), List(TextEdit)) {
   case skip_trivia(after_fn) {
     [#(token.Name(fn_name), _), ..after_name] -> {
       case skip_trivia(after_name) {
@@ -293,18 +529,66 @@ fn handle_top_fn(
                 None -> #(edits, params_tokens)
               }
           }
-          scan_tokens(remaining, source, module_name, 0, [], entries, edits)
+          scan_tokens(
+            remaining,
+            source,
+            module_name,
+            0,
+            [],
+            [],
+            entries,
+            ext_types,
+            edits,
+          )
         }
-        other -> scan_tokens(other, source, module_name, 0, [], entries, edits)
+        other ->
+          scan_tokens(
+            other,
+            source,
+            module_name,
+            0,
+            [],
+            [],
+            entries,
+            ext_types,
+            edits,
+          )
       }
     }
-    other -> scan_tokens(other, source, module_name, 0, [], entries, edits)
+    other ->
+      scan_tokens(
+        other,
+        source,
+        module_name,
+        0,
+        [],
+        [],
+        entries,
+        ext_types,
+        edits,
+      )
   }
 }
 
 fn parse_doc_pragma(doc_text: String) -> Option(FfiKind) {
+  use #(arg1, arg2) <- option.then(parse_doc_directive(doc_text, "external"))
+  Some(parse_ffi_kind(arg1, arg2))
+}
+
+fn parse_doc_external_type_pragma(doc_text: String) -> Option(ExternalType) {
+  use #(pkg, type_name) <- option.then(parse_doc_directive(
+    doc_text,
+    "external_type",
+  ))
+  Some(ExternalType(package: pkg, type_name:))
+}
+
+fn parse_doc_directive(
+  doc_text: String,
+  directive_name: String,
+) -> Option(#(String, String)) {
   let trimmed = string.trim(doc_text)
-  case string.starts_with(trimmed, "@external") {
+  case string.starts_with(trimmed, "@" <> directive_name) {
     False -> None
     True -> {
       let tokens =
@@ -312,10 +596,10 @@ fn parse_doc_pragma(doc_text: String) -> Option(FfiKind) {
         |> glexer.lex
       case tokens {
         [#(token.At, _), ..after_at] ->
-          case match_raw_external_moonbit(after_at) {
-            Some(#(kind, _, remaining)) ->
+          case match_raw_moonbit_directive(directive_name, after_at) {
+            Some(#(arg1, arg2, _, remaining)) ->
               case skip_trivia(remaining) {
-                [] -> Some(kind)
+                [] -> Some(#(arg1, arg2))
                 _ -> None
               }
             None -> None
@@ -329,8 +613,27 @@ fn parse_doc_pragma(doc_text: String) -> Option(FfiKind) {
 fn match_raw_external_moonbit(
   tokens: List(#(Token, glexer.Position)),
 ) -> Option(#(FfiKind, Int, List(#(Token, glexer.Position)))) {
+  use #(target, fn_name, end_offset, rest) <- option.then(
+    match_raw_moonbit_directive("external", tokens),
+  )
+  Some(#(parse_ffi_kind(target, fn_name), end_offset, rest))
+}
+
+fn match_raw_external_type_moonbit(
+  tokens: List(#(Token, glexer.Position)),
+) -> Option(#(ExternalType, Int, List(#(Token, glexer.Position)))) {
+  use #(pkg, type_name, end_offset, rest) <- option.then(
+    match_raw_moonbit_directive("external_type", tokens),
+  )
+  Some(#(ExternalType(package: pkg, type_name:), end_offset, rest))
+}
+
+fn match_raw_moonbit_directive(
+  directive_name: String,
+  tokens: List(#(Token, glexer.Position)),
+) -> Option(#(String, String, Int, List(#(Token, glexer.Position)))) {
   case skip_trivia(tokens) {
-    [#(token.Name("external"), _), ..rest] ->
+    [#(token.Name(name), _), ..rest] if name == directive_name ->
       case skip_trivia(rest) {
         [#(token.LeftParen, _), ..rest] ->
           case skip_trivia(rest) {
@@ -338,15 +641,12 @@ fn match_raw_external_moonbit(
               case skip_trivia(rest) {
                 [#(token.Comma, _), ..rest] ->
                   case skip_trivia(rest) {
-                    [#(token.String(target), _), ..rest] ->
+                    [#(token.String(arg1), _), ..rest] ->
                       case skip_trivia(rest) {
                         [#(token.Comma, _), ..rest] ->
                           case skip_trivia(rest) {
-                            [#(token.String(fn_name), _), ..rest] ->
-                              match_trailing_close_paren(
-                                rest,
-                                parse_ffi_kind(target, fn_name),
-                              )
+                            [#(token.String(arg2), _), ..rest] ->
+                              match_trailing_close_paren(rest, arg1, arg2)
                             _ -> None
                           }
                         _ -> None
@@ -365,17 +665,18 @@ fn match_raw_external_moonbit(
 
 fn match_trailing_close_paren(
   tokens: List(#(Token, glexer.Position)),
-  kind: FfiKind,
-) -> Option(#(FfiKind, Int, List(#(Token, glexer.Position)))) {
+  arg1: String,
+  arg2: String,
+) -> Option(#(String, String, Int, List(#(Token, glexer.Position)))) {
   case skip_trivia(tokens) {
     [#(token.Comma, _), ..rest] ->
       case skip_trivia(rest) {
         [#(token.RightParen, pos), ..after] ->
-          Some(#(kind, pos.byte_offset + 1, after))
+          Some(#(arg1, arg2, pos.byte_offset + 1, after))
         _ -> None
       }
     [#(token.RightParen, pos), ..after] ->
-      Some(#(kind, pos.byte_offset + 1, after))
+      Some(#(arg1, arg2, pos.byte_offset + 1, after))
     _ -> None
   }
 }

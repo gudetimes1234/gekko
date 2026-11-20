@@ -26,12 +26,13 @@ import lower/ir.{
   LetAssertAbort, PanicAbort, TodoAbort,
 }
 import lower/mangle
-import project/prepass.{PackageCall, WasmImport}
+import project/prepass.{ExternalType, PackageCall, WasmImport}
 
 type EmitCtx {
   EmitCtx(
     current_module: String,
     local_ctors: dict.Dict(String, List(Option(String))),
+    local_external_types: Set(String),
     table: Option(SymbolTable),
     pkg_to_alias: dict.Dict(String, String),
     used_aliases: Set(String),
@@ -72,10 +73,20 @@ fn emit_module_inner(
       })
     })
 
+  let local_external_types =
+    list.filter_map(module.types, fn(td) {
+      case td.external_type {
+        Some(_) -> Ok(td.name)
+        None -> Error(Nil)
+      }
+    })
+    |> set.from_list
+
   let ctx0 =
     EmitCtx(
       current_module: module.module_name,
       local_ctors:,
+      local_external_types:,
       table:,
       pkg_to_alias: dict.new(),
       used_aliases: set.from_list(["gprelude"]),
@@ -191,32 +202,121 @@ fn safe_alias(alias: String) -> String {
 }
 
 fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
-  let vis = case td.publicity, td.opaque_ {
-    glance.Public, False -> "pub(all) "
-    glance.Public, True -> "pub "
-    glance.Private, _ -> "priv "
-  }
-  let derive_line = case td.derive_eq_debug_hash {
-    True -> "#derive(Eq, Debug, Hash)\n"
-    False -> ""
-  }
   let generics = format_type_params(td.type_params)
-  let #(variant_lines, ctx1) = map_acc(td.variants, ctx, emit_variant)
-  let body = case variant_lines {
-    [] -> "{}"
-    lines -> "{\n" <> string.join(lines, "\n") <> "\n}"
+  case td.external_type {
+    Some(ExternalType(package:, type_name:)) -> {
+      let vis = case td.publicity {
+        glance.Public -> "pub "
+        glance.Private -> "priv "
+      }
+      let #(target_str, ctx1) = case package {
+        "" | "builtin" -> #(type_name <> generics, ctx)
+        _ -> {
+          let default_alias = mangle.module_to_alias(package)
+          let #(ffi_alias, ctx_imp) =
+            register_import(ctx, package, default_alias, default_alias)
+          #("@" <> ffi_alias <> "." <> type_name <> generics, ctx_imp)
+        }
+      }
+      #(
+        "///|\n" <> vis <> "type " <> td.name <> generics <> " = " <> target_str,
+        ctx1,
+      )
+    }
+
+    None -> {
+      let vis = case td.publicity, td.opaque_ {
+        glance.Public, False -> "pub(all) "
+        glance.Public, True -> "pub "
+        glance.Private, _ -> "priv "
+      }
+      let derive_line = case td.derive_eq_debug_hash {
+        True -> "#derive(Eq, Debug, Hash)\n"
+        False -> ""
+      }
+      let #(variant_lines, ctx1) = map_acc(td.variants, ctx, emit_variant)
+      let body = case variant_lines {
+        [] -> "{}"
+        lines -> "{\n" <> string.join(lines, "\n") <> "\n}"
+      }
+      let enum_decl =
+        "///|\n"
+        <> derive_line
+        <> vis
+        <> "enum "
+        <> td.name
+        <> generics
+        <> " "
+        <> body
+      let #(inspect_impl, ctx2) = emit_type_inspect_impl(td, ctx1)
+      #(enum_decl <> "\n\n" <> inspect_impl, ctx2)
+    }
   }
-  let enum_decl =
-    "///|\n"
-    <> derive_line
-    <> vis
-    <> "enum "
-    <> td.name
-    <> generics
-    <> " "
-    <> body
-  let #(inspect_impl, ctx2) = emit_type_inspect_impl(td, ctx1)
-  #(enum_decl <> "\n\n" <> inspect_impl, ctx2)
+}
+
+type FieldInspectKind {
+  Inspectable
+  UninspectableFn
+  UninspectableExternal
+}
+
+fn classify_inspect_kind(ty: IrType, ctx: EmitCtx) -> FieldInspectKind {
+  case ty {
+    IrTypeFn(_, _) -> UninspectableFn
+    IrTypeList(inner) -> classify_inspect_kind(inner, ctx)
+    IrTypeResult(ok_t, err_t) ->
+      case classify_inspect_kind(ok_t, ctx) {
+        Inspectable -> classify_inspect_kind(err_t, ctx)
+        other -> other
+      }
+    IrTypeTuple(els) -> classify_list_inspect_kind(els, ctx)
+    IrTypeNamed(module:, name:, args:, ..) ->
+      case is_external_named_type(module, name, ctx) {
+        True -> UninspectableExternal
+        False -> classify_list_inspect_kind(args, ctx)
+      }
+    _ -> Inspectable
+  }
+}
+
+fn classify_list_inspect_kind(
+  types: List(IrType),
+  ctx: EmitCtx,
+) -> FieldInspectKind {
+  case types {
+    [] -> Inspectable
+    [head, ..tail] ->
+      case classify_inspect_kind(head, ctx) {
+        Inspectable -> classify_list_inspect_kind(tail, ctx)
+        other -> other
+      }
+  }
+}
+
+fn is_external_named_type(module: String, name: String, ctx: EmitCtx) -> Bool {
+  case
+    module == ctx.current_module && set.contains(ctx.local_external_types, name)
+  {
+    True -> True
+    False ->
+      case ctx.table {
+        None -> False
+        Some(tbl) ->
+          case dict.get(tbl.modules, module) {
+            Error(_) -> False
+            Ok(ms) ->
+              case dict.get(ms.types, name) {
+                Ok(ti) -> option.is_some(ti.external_type)
+                Error(_) ->
+                  dict.values(ms.types)
+                  |> list.any(fn(ti) {
+                    mangle.mangle_type_name(ti.name) == name
+                    && option.is_some(ti.external_type)
+                  })
+              }
+          }
+      }
+  }
 }
 
 fn emit_type_inspect_impl(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
@@ -228,7 +328,10 @@ fn emit_type_inspect_impl(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
   let inspectable_vars =
     list.fold(td.variants, set.new(), fn(acc, v) {
       list.fold(v.fields, acc, fn(inner, f) {
-        collect_non_fn_type_vars(f.field_type, inner)
+        case classify_inspect_kind(f.field_type, ctx) {
+          Inspectable -> collect_non_fn_type_vars(f.field_type, ctx, inner)
+          _ -> inner
+        }
       })
     })
   let impl_generics = case td.type_params {
@@ -258,24 +361,22 @@ fn emit_type_inspect_impl(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
               let #(pat_parts, expr_parts) =
                 list.index_fold(fields, #([], []), fn(acc, f, idx) {
                   let #(pats, exprs) = acc
-                  let is_fn = case f.field_type {
-                    IrTypeFn(_, _) -> True
-                    _ -> False
-                  }
-                  let bind_name = case is_fn {
-                    True -> "_"
-                    False -> "f" <> int.to_string(idx)
+                  let inspect_kind = classify_inspect_kind(f.field_type, ctx)
+                  let bind_name = case inspect_kind {
+                    Inspectable -> "f" <> int.to_string(idx)
+                    _ -> "_"
                   }
                   let pat_part = case f.label {
                     Some(lbl) -> lbl <> "=" <> bind_name
                     None -> bind_name
                   }
-                  let expr_part = case is_fn {
-                    True -> "\"\\\"//fn(...) { ... }\\\"\""
-                    False ->
+                  let expr_part = case inspect_kind {
+                    Inspectable ->
                       "@gprelude.GleamInspect::gleam_inspect("
                       <> bind_name
                       <> ")"
+                    UninspectableFn -> "\"\\\"//fn(...) { ... }\\\"\""
+                    UninspectableExternal -> "\"\\\"//external\\\"\""
                   }
                   #([pat_part, ..pats], [expr_part, ..exprs])
                 })
@@ -314,18 +415,29 @@ fn emit_type_inspect_impl(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
   #(code, ctx1)
 }
 
-fn collect_non_fn_type_vars(ty: IrType, acc: Set(String)) -> Set(String) {
-  case ty {
-    IrTypeVar(v) -> set.insert(acc, v)
-    IrTypeFn(_, _) -> acc
-    IrTypeList(inner) -> collect_non_fn_type_vars(inner, acc)
-    IrTypeResult(ok_t, err_t) ->
-      collect_non_fn_type_vars(err_t, collect_non_fn_type_vars(ok_t, acc))
-    IrTypeTuple(els) ->
-      list.fold(els, acc, fn(s, e) { collect_non_fn_type_vars(e, s) })
-    IrTypeNamed(args:, ..) ->
-      list.fold(args, acc, fn(s, a) { collect_non_fn_type_vars(a, s) })
-    _ -> acc
+fn collect_non_fn_type_vars(
+  ty: IrType,
+  ctx: EmitCtx,
+  acc: Set(String),
+) -> Set(String) {
+  case classify_inspect_kind(ty, ctx) {
+    UninspectableFn | UninspectableExternal -> acc
+    Inspectable ->
+      case ty {
+        IrTypeVar(v) -> set.insert(acc, v)
+        IrTypeList(inner) -> collect_non_fn_type_vars(inner, ctx, acc)
+        IrTypeResult(ok_t, err_t) ->
+          collect_non_fn_type_vars(
+            err_t,
+            ctx,
+            collect_non_fn_type_vars(ok_t, ctx, acc),
+          )
+        IrTypeTuple(els) ->
+          list.fold(els, acc, fn(s, e) { collect_non_fn_type_vars(e, ctx, s) })
+        IrTypeNamed(args:, ..) ->
+          list.fold(args, acc, fn(s, a) { collect_non_fn_type_vars(a, ctx, s) })
+        _ -> acc
+      }
   }
 }
 
@@ -1574,7 +1686,9 @@ fn format_function_type_params(
       let dict_vals = collect_dict_val_only_vars(f.params, f.return_type)
       let non_fn_vars =
         list.append(list.map(f.params, fn(p) { p.param_type }), [f.return_type])
-        |> list.fold(set.new(), fn(acc, t) { collect_non_fn_type_vars(t, acc) })
+        |> list.fold(set.new(), fn(acc, t) {
+          collect_non_fn_type_vars(t, ctx, acc)
+        })
       let #(rev_formatted, final_ctx) =
         list.fold(tps, #([], ctx), fn(acc, tp) {
           let #(parts, cur_ctx) = acc
