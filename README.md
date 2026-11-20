@@ -133,7 +133,7 @@ function = "read_to_string"
 
 ## Examples
 
-Standalone example projects have moved to [`gekko_examples`](../gekko_examples) (`https://github.com/spiral-nights/gekko_examples`):
+Standalone example projects are hosted in [`gekko_examples`](https://github.com/spiral-nights/gekko_examples):
 
 - **Gleam Tour** — Pure Gleam language tour (basics, TCO loops, records, `echo`, stdlib)
 - **Weather App** — `gleam/json` & `gleam/dynamic/decode` with custom records and pipelines
