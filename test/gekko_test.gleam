@@ -3,6 +3,7 @@ import emit/pkg_config
 import emit/prelude_runtime
 import emit/wit_bridge
 import filepath
+import gekko
 import glance
 import gleam/dict
 import gleam/list
@@ -1565,6 +1566,21 @@ pub fn golden_pure_gleam_e2e_test() {
     cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
   assert check_res.exit_code == 0
 
+  let build_res =
+    cmd.run(
+      command: "moon",
+      args: ["build", "--target", "wasm-gc"],
+      cwd: out_dir,
+    )
+  assert build_res.exit_code == 0
+
+  assert_golden_snapshots(out_dir, filepath.join(fixture_dir, "expected"), [
+    "pure_gleam/pure_gleam.mbt",
+    "pure_gleam_math/pure_gleam_math.mbt",
+    "pure_gleam_models/pure_gleam_models.mbt",
+    "test_pure_gleam_test/test_pure_gleam_test.mbt",
+  ])
+
   let test_wasm =
     cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
   assert test_wasm.exit_code == 0
@@ -1742,6 +1758,20 @@ pub fn golden_stdlib_and_deps_e2e_test() {
   let check_res =
     cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
   assert check_res.exit_code == 0
+
+  let build_res =
+    cmd.run(
+      command: "moon",
+      args: ["build", "--target", "wasm-gc"],
+      cwd: out_dir,
+    )
+  assert build_res.exit_code == 0
+
+  assert_golden_snapshots(out_dir, filepath.join(fixture_dir, "expected"), [
+    "stdlib_and_deps/stdlib_and_deps.mbt",
+    "tiny_slug/tiny_slug.mbt",
+    "test_stdlib_and_deps_test/test_stdlib_and_deps_test.mbt",
+  ])
 
   let test_wasm =
     cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
@@ -3823,4 +3853,69 @@ pub fn gleam_stdlib_bit_array_tier2_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
+}
+
+fn assert_golden_snapshots(
+  out_dir: String,
+  expected_dir: String,
+  rel_paths: List(String),
+) -> Nil {
+  let update = cmd.get_env("GEKKO_UPDATE_GOLDEN") == Ok("1")
+  list.each(rel_paths, fn(rel_path) {
+    let actual_path = filepath.join(out_dir, rel_path)
+    let expected_path = filepath.join(expected_dir, rel_path)
+    let assert Ok(actual) = simplifile.read(from: actual_path)
+    case update {
+      True -> {
+        let parent = filepath.directory_name(expected_path)
+        assert simplifile.create_directory_all(parent) == Ok(Nil)
+        assert simplifile.write(to: expected_path, contents: actual) == Ok(Nil)
+      }
+      False -> {
+        let assert Ok(expected) = simplifile.read(from: expected_path)
+        assert actual == expected
+      }
+    }
+  })
+}
+
+pub fn cli_parse_args_help_and_version_test() {
+  assert gekko.parse_args([]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["--help"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["-h"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["help"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["check", "--help"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["build", "-h"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["wit", "build", "--help"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["moonbit", "bind", "--help"]) == Ok(gekko.HelpAction)
+
+  assert gekko.parse_args(["--version"]) == Ok(gekko.VersionAction)
+  assert gekko.parse_args(["-V"]) == Ok(gekko.VersionAction)
+  assert gekko.parse_args(["version"]) == Ok(gekko.VersionAction)
+
+  assert gekko.parse_args(["build", "--root", "app", "--target", "native"])
+    == Ok(gekko.BuildAction(root: "app", out: None, target: "native"))
+  assert gekko.parse_args(["build"])
+    == Ok(gekko.BuildAction(root: ".", out: None, target: "wasm-gc"))
+}
+
+pub fn cmd_require_tools_and_find_executable_test() {
+  let assert Ok(_) = cmd.find_executable("gleam")
+  let assert Ok(_) = cmd.find_executable("moon")
+  assert cmd.find_executable("definitely_nonexistent_gekko_tool_xyz")
+    == Error(Nil)
+
+  let ok_finder = fn(_name) { Ok("/usr/bin/tool") }
+  assert cmd.require_tools_with(["gleam", "moon"], ok_finder) == Ok(Nil)
+
+  let partial_finder = fn(name) {
+    case name {
+      "gleam" -> Ok("/usr/bin/gleam")
+      _ -> Error(Nil)
+    }
+  }
+  let assert Error(msg) =
+    cmd.require_tools_with(["gleam", "moon", "wasm-tools"], partial_finder)
+  assert string.contains(msg, "moon, wasm-tools")
+  assert !string.contains(msg, "gleam")
 }

@@ -12,7 +12,9 @@ import project/workspace
 import wit/gleam_gen
 import wit/parser as wit_parser
 
-type CliAction {
+pub const version = "0.1.0"
+
+pub type CliAction {
   CheckAction(root: String, out: Option(String), target: Option(String))
   BuildAction(root: String, out: Option(String), target: String)
   TestAction(root: String, out: Option(String), target: Option(String))
@@ -38,6 +40,7 @@ type CliAction {
     out: Option(String),
   )
   HelpAction
+  VersionAction
 }
 
 type BindFlags {
@@ -68,13 +71,21 @@ pub fn main() -> Nil {
       halt(1)
     }
     Ok(HelpAction) -> print_usage()
-    Ok(CheckAction(root:, out:, target:)) ->
+    Ok(VersionAction) -> io.println("gekko " <> version)
+    Ok(CheckAction(root:, out:, target:)) -> {
+      require_tools_or_halt(["gleam", "moon"])
       run_moon_workflow(root, out, "check", None, target)
-    Ok(BuildAction(root:, out:, target:)) ->
+    }
+    Ok(BuildAction(root:, out:, target:)) -> {
+      require_tools_or_halt(["gleam", "moon"])
       run_moon_workflow(root, out, "build", None, Some(target))
-    Ok(TestAction(root:, out:, target:)) ->
+    }
+    Ok(TestAction(root:, out:, target:)) -> {
+      require_tools_or_halt(["gleam", "moon"])
       run_moon_workflow(root, out, "test", None, target)
-    Ok(RunAction(root:, out:, target:)) ->
+    }
+    Ok(RunAction(root:, out:, target:)) -> {
+      require_tools_or_halt(["gleam", "moon"])
       run_moon_workflow(
         root,
         out,
@@ -82,14 +93,31 @@ pub fn main() -> Nil {
         Some(pkg_config.module_to_pkg_dir),
         target,
       )
+    }
     Ok(WitGenAction(root:, wit_dir:, world:)) ->
       run_wit_gen(root, wit_dir, world)
-    Ok(WitCheckAction(root:, wit_dir:, world:, out:)) ->
+    Ok(WitCheckAction(root:, wit_dir:, world:, out:)) -> {
+      require_tools_or_halt(["gleam", "moon", "wit-bindgen"])
       run_wit_check(root, wit_dir, world, out)
-    Ok(WitBuildAction(root:, wit_dir:, world:, out:, output:)) ->
+    }
+    Ok(WitBuildAction(root:, wit_dir:, world:, out:, output:)) -> {
+      require_tools_or_halt(["gleam", "moon", "wit-bindgen", "wasm-tools"])
       run_wit_build(root, wit_dir, world, out, output)
-    Ok(MoonbitBindAction(root:, package:, module:, out:)) ->
+    }
+    Ok(MoonbitBindAction(root:, package:, module:, out:)) -> {
+      require_tools_or_halt(["moon"])
       run_moonbit_bind(root, package, module, out)
+    }
+  }
+}
+
+fn require_tools_or_halt(tools: List(String)) -> Nil {
+  case cmd.require_tools(tools) {
+    Ok(Nil) -> Nil
+    Error(msg) -> {
+      io.println_error("gekko error: " <> msg)
+      halt(1)
+    }
   }
 }
 
@@ -241,67 +269,92 @@ fn run_moonbit_bind(
   }
 }
 
-fn parse_args(args: List(String)) -> Result(CliAction, String) {
-  case args {
-    [] | ["--help"] | ["-h"] | ["help"] -> Ok(HelpAction)
-    ["check", ..rest] -> {
-      use #(root, out, target) <- result.try(parse_flags(rest, ".", None, None))
-      Ok(CheckAction(root:, out:, target:))
-    }
-    ["build", ..rest] -> {
-      use #(root, out, target) <- result.try(parse_flags(rest, ".", None, None))
-      Ok(BuildAction(root:, out:, target: option.unwrap(target, "wasm-gc")))
-    }
-    ["test", ..rest] -> {
-      use #(root, out, target) <- result.try(parse_flags(rest, ".", None, None))
-      Ok(TestAction(root:, out:, target:))
-    }
-    ["run", ..rest] -> {
-      use #(root, out, target) <- result.try(parse_flags(rest, ".", None, None))
-      Ok(RunAction(root:, out:, target:))
-    }
-    ["wit", "gen", ..rest] -> {
-      use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
-      Ok(WitGenAction(root: f.root, wit_dir: f.wit_dir, world: f.world))
-    }
-    ["wit", "check", ..rest] -> {
-      use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
-      Ok(WitCheckAction(
-        root: f.root,
-        wit_dir: f.wit_dir,
-        world: f.world,
-        out: f.out,
-      ))
-    }
-    ["wit", "build", ..rest] -> {
-      use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
-      Ok(WitBuildAction(
-        root: f.root,
-        wit_dir: f.wit_dir,
-        world: f.world,
-        out: f.out,
-        output: f.output,
-      ))
-    }
-    ["wit", ..] -> Error("Expected `gekko wit <gen|check|build> [flags]`")
-    ["moonbit", "bind", ..rest] -> {
-      use f <- result.try(parse_bind_flags(
-        rest,
-        BindFlags(root: ".", package: None, module: None, out: None),
-      ))
-      case f.package {
-        Some(pkg) ->
-          Ok(MoonbitBindAction(
+pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
+  case list.any(args, fn(a) { a == "--help" || a == "-h" }) {
+    True -> Ok(HelpAction)
+    False ->
+      case args {
+        [] | ["help", ..] -> Ok(HelpAction)
+        ["--version"] | ["-V"] | ["version"] -> Ok(VersionAction)
+        ["check", ..rest] -> {
+          use #(root, out, target) <- result.try(parse_flags(
+            rest,
+            ".",
+            None,
+            None,
+          ))
+          Ok(CheckAction(root:, out:, target:))
+        }
+        ["build", ..rest] -> {
+          use #(root, out, target) <- result.try(parse_flags(
+            rest,
+            ".",
+            None,
+            None,
+          ))
+          Ok(BuildAction(root:, out:, target: option.unwrap(target, "wasm-gc")))
+        }
+        ["test", ..rest] -> {
+          use #(root, out, target) <- result.try(parse_flags(
+            rest,
+            ".",
+            None,
+            None,
+          ))
+          Ok(TestAction(root:, out:, target:))
+        }
+        ["run", ..rest] -> {
+          use #(root, out, target) <- result.try(parse_flags(
+            rest,
+            ".",
+            None,
+            None,
+          ))
+          Ok(RunAction(root:, out:, target:))
+        }
+        ["wit", "gen", ..rest] -> {
+          use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
+          Ok(WitGenAction(root: f.root, wit_dir: f.wit_dir, world: f.world))
+        }
+        ["wit", "check", ..rest] -> {
+          use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
+          Ok(WitCheckAction(
             root: f.root,
-            package: pkg,
-            module: f.module,
+            wit_dir: f.wit_dir,
+            world: f.world,
             out: f.out,
           ))
-        None -> Error("Expected `<pkg>` after `gekko moonbit bind`")
+        }
+        ["wit", "build", ..rest] -> {
+          use f <- result.try(parse_wit_flags(rest, default_wit_flags()))
+          Ok(WitBuildAction(
+            root: f.root,
+            wit_dir: f.wit_dir,
+            world: f.world,
+            out: f.out,
+            output: f.output,
+          ))
+        }
+        ["wit", ..] -> Error("Expected `gekko wit <gen|check|build> [flags]`")
+        ["moonbit", "bind", ..rest] -> {
+          use f <- result.try(parse_bind_flags(
+            rest,
+            BindFlags(root: ".", package: None, module: None, out: None),
+          ))
+          case f.package {
+            Some(pkg) ->
+              Ok(MoonbitBindAction(
+                root: f.root,
+                package: pkg,
+                module: f.module,
+                out: f.out,
+              ))
+            None -> Error("Expected `<pkg>` after `gekko moonbit bind`")
+          }
+        }
+        ["moonbit", ..] -> Error("Expected `gekko moonbit bind <pkg> [flags]`")
+        [unknown, ..] -> Error("Unknown subcommand: " <> unknown)
       }
-    }
-    ["moonbit", ..] -> Error("Expected `gekko moonbit bind <pkg> [flags]`")
-    [unknown, ..] -> Error("Unknown subcommand: " <> unknown)
   }
 }
 
@@ -375,7 +428,7 @@ fn parse_flags(
 
 fn print_usage() -> Nil {
   let lines = [
-    "gekko - Gleam-to-MoonBit & Wasm Component transpiler",
+    "gekko " <> version <> " - Gleam-to-MoonBit & Wasm Component transpiler",
     "",
     "Usage:",
     "  gekko check     [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
@@ -386,6 +439,8 @@ fn print_usage() -> Nil {
     "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]",
     "  gekko wit build    [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>] [--output <file.wasm>]",
     "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--out <dir>]",
+    "  gekko --version | -V",
+    "  gekko --help    | -h",
   ]
   list.each(lines, io.println)
 }

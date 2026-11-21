@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gekko
+    steps:
+      - name: Checkout gekko
+        uses: actions/checkout@v4
+        with:
+          path: gekko
+
+      - name: Checkout gleam_stdlib fork
+        uses: actions/checkout@v4
+        with:
+          repository: spiral-nights/gleam_stdlib
+          path: gleam_stdlib
+
+      - name: Checkout gleam_json fork
+        uses: actions/checkout@v4
+        with:
+          repository: spiral-nights/gleam_json
+          path: gleam_json
+
+      - name: Setup Erlang and Gleam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          gleam-version: "1.19.2"
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Install Wasm component tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools,wit-bindgen-cli,wasmtime
+
+      - name: Check formatting and types
+        run: |
+          gleam format --check src test
+          gleam check
+
+      - name: Run test suite (including golden fixtures)
+        run: gleam test
+
+      - name: Install launcher and smoke-test CLI
+        run: |
+          scripts/install.sh "$HOME/.local/bin"
+          "$HOME/.local/bin/gekko" --version
+          "$HOME/.local/bin/gekko" --help
+          "$HOME/.local/bin/gekko" check --help

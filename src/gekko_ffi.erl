@@ -1,5 +1,5 @@
 -module(gekko_ffi).
--export([run_command/3, get_env/1]).
+-export([run_command/3, get_env/1, find_executable/1]).
 
 run_command(Command, Args, Cwd) ->
     CmdStr = unicode:characters_to_list(Command, utf8),
@@ -48,4 +48,11 @@ get_env(Name) ->
     case os:getenv(NameStr) of
         false -> {error, nil};
         Val -> {ok, unicode:characters_to_binary(Val)}
+    end.
+
+find_executable(Command) ->
+    CmdStr = unicode:characters_to_list(Command, utf8),
+    case resolve_executable(CmdStr) of
+        false -> {error, nil};
+        Exe -> {ok, unicode:characters_to_binary(Exe)}
     end.
