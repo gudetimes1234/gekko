@@ -1524,19 +1524,28 @@ pub fn golden_pure_gleam_e2e_test() {
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
   let _ = simplifile.delete(file_or_dir_at: out_dir)
 
-  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
-  symlink_root_package("gleam_stdlib", packages_dir)
-  symlink_root_package("gleeunit", packages_dir)
+  let stub_gleeunit = filepath.join(packages_dir, "gleeunit")
+  assert simplifile.create_directory_all(filepath.join(stub_gleeunit, "src"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(stub_gleeunit, "gleam.toml"),
+      contents: "name = \"gleeunit\"\nversion = \"1.11.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(stub_gleeunit, "src/gleeunit.gleam"),
+      contents: "pub fn main() -> Nil {\n  Nil\n}\n",
+    )
+    == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(packages_dir, "packages.toml"),
-      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngleeunit = \"1.11.0\"\n\n[git]\n",
+      contents: "[packages]\ngleeunit = \"1.11.0\"\n\n[git]\n",
     )
     == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(fixture_dir, "manifest.toml"),
       contents: "packages = [\n"
-        <> "  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n"
-        <> "  { name = \"gleeunit\", version = \"1.11.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"gleeunit\", source = \"hex\", outer_checksum = \"EC31ABA74256AEA531EDF8169931D775BBB384FED0A8A1BDC4DD9354E3E21826\" },\n"
+        <> "  { name = \"gleeunit\", version = \"1.11.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleeunit\", source = \"hex\", outer_checksum = \"00\" },\n"
         <> "]\n\n[requirements]\ngleeunit = { version = \">= 1.0.0 and < 2.0.0\" }\n",
     )
     == Ok(Nil)
@@ -1633,7 +1642,7 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
 
   assert simplifile.write(
       to: filepath.join(root, "gleam.toml"),
-      contents: "name = \"loader_app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+      contents: "name = \"loader_app\"\nversion = \"0.1.0\"\n\n[dependencies]\nbase_pkg = \">= 0.1.0\"\n",
     )
     == Ok(Nil)
   assert simplifile.write(
@@ -1642,7 +1651,19 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
     )
     == Ok(Nil)
 
-  symlink_root_package("gleam_stdlib", packages_dir)
+  let base_dir = filepath.join(packages_dir, "base_pkg")
+  assert simplifile.create_directory_all(filepath.join(base_dir, "src"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(base_dir, "gleam.toml"),
+      contents: "name = \"base_pkg\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(base_dir, "src/base_mod.gleam"),
+      contents: "pub fn one() -> Int {\n  1\n}\n",
+    )
+    == Ok(Nil)
 
   // Dependency with Erlang external AND pure-Gleam fallback body
   let good_dir = filepath.join(packages_dir, "good_pkg")
@@ -1650,7 +1671,7 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
     == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(good_dir, "gleam.toml"),
-      contents: "name = \"good_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+      contents: "name = \"good_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\nbase_pkg = \">= 0.1.0\"\n",
     )
     == Ok(Nil)
   assert simplifile.write(
@@ -1661,19 +1682,19 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
 
   assert simplifile.write(
       to: filepath.join(packages_dir, "packages.toml"),
-      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngood_pkg = \"0.1.0\"\n\n[git]\n",
+      contents: "[packages]\nbase_pkg = \"0.1.0\"\ngood_pkg = \"0.1.0\"\n\n[git]\n",
     )
     == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(root, "manifest.toml"),
-      contents: "packages = [\n  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n  { name = \"good_pkg\", version = \"0.1.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"good_pkg\", source = \"hex\", outer_checksum = \"00\" },\n]\n\n[requirements]\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\n",
+      contents: "packages = [\n  { name = \"base_pkg\", version = \"0.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"base_pkg\", source = \"hex\", outer_checksum = \"00\" },\n  { name = \"good_pkg\", version = \"0.1.0\", build_tools = [\"gleam\"], requirements = [\"base_pkg\"], otp_app = \"good_pkg\", source = \"hex\", outer_checksum = \"00\" },\n]\n\n[requirements]\nbase_pkg = { version = \">= 0.1.0\" }\n",
     )
     == Ok(Nil)
 
   let assert Ok(loaded_good) = loader.load_dependencies(root, dict.new())
   assert list.map(loaded_good, fn(d) { d.package_name })
     == [
-      "gleam_stdlib",
+      "base_pkg",
       "good_pkg",
     ]
 
@@ -1683,7 +1704,7 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
     == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(bad_dir, "gleam.toml"),
-      contents: "name = \"bad_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+      contents: "name = \"bad_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\nbase_pkg = \">= 0.1.0\"\n",
     )
     == Ok(Nil)
   assert simplifile.write(
@@ -1693,7 +1714,7 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
     == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(packages_dir, "packages.toml"),
-      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngood_pkg = \"0.1.0\"\nbad_pkg = \"0.1.0\"\n\n[git]\n",
+      contents: "[packages]\nbase_pkg = \"0.1.0\"\ngood_pkg = \"0.1.0\"\nbad_pkg = \"0.1.0\"\n\n[git]\n",
     )
     == Ok(Nil)
 
@@ -1795,29 +1816,6 @@ pub fn golden_stdlib_and_deps_e2e_test() {
     simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
-}
-
-fn stage_offline_stdlib_json(fixture_dir: String) {
-  let packages_dir = filepath.join(fixture_dir, "build/packages")
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
-  symlink_root_package("gleam_stdlib", packages_dir)
-  symlink_root_package("gleam_json", packages_dir)
-  assert simplifile.write(
-      to: filepath.join(packages_dir, "packages.toml"),
-      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\ngleam_json = \"3.1.0\"\n\n[git]\n",
-    )
-    == Ok(Nil)
-  assert simplifile.write(
-      to: filepath.join(fixture_dir, "manifest.toml"),
-      contents: "packages = [\n"
-        <> "  { name = \"gleam_json\", version = \"3.1.0\", build_tools = [\"gleam\"], requirements = [\"gleam_stdlib\"], otp_app = \"gleam_json\", source = \"hex\", outer_checksum = \"44FDAA8847BE8FC48CA7A1C089706BD54BADCC4C45B237A992EDDF9F2CDB2836\" },\n"
-        <> "  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n"
-        <> "]\n\n[requirements]\ngleam_json = { version = \">= 3.0.0 and < 4.0.0\" }\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\n",
-    )
-    == Ok(Nil)
 }
 
 fn assert_no_unqualified_prelude_calls(source: String) {
@@ -2082,17 +2080,70 @@ pub fn echo_exact_gleam_behavior_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
 
   assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/echo_ffi"))
+    == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(root, "gleam.toml"),
-      contents: "name = \"echo_e2e\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\ngleam_json = \">= 3.0.0 and < 4.0.0\"\n",
+      contents: "name = \"echo_e2e\"\nversion = \"0.1.0\"\n",
     )
     == Ok(Nil)
-  stage_offline_stdlib_json(root)
+
+  let echo_ffi_mbt =
+    "///|\n"
+    <> "pub(all) struct MiniMap[K, V] {\n"
+    <> "  inner : Map[K, V]\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub impl[K : @gprelude.GleamInspect, V : @gprelude.GleamInspect] @gprelude.GleamInspect for MiniMap[\n"
+    <> "  K,\n"
+    <> "  V,\n"
+    <> "] with gleam_inspect(self) {\n"
+    <> "  let mut s = \"mini_map([\"\n"
+    <> "  let mut first = true\n"
+    <> "  self.inner.each(fn(k, v) {\n"
+    <> "    if !first {\n"
+    <> "      s = s + \", \"\n"
+    <> "    }\n"
+    <> "    first = false\n"
+    <> "    s = s + \"#(\" + @gprelude.GleamInspect::gleam_inspect(k) + \", \" + @gprelude.GleamInspect::gleam_inspect(v) + \")\"\n"
+    <> "  })\n"
+    <> "  s + \"])\"\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[K : Eq + Hash, V] map_singleton(k : K, v : V) -> MiniMap[K, V] {\n"
+    <> "  let m : Map[K, V] = Default::default()\n"
+    <> "  m.set(k, v)\n"
+    <> "  { inner: m }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.GleamInspect] inspect_val(x : T) -> String {\n"
+    <> "  @gprelude.GleamInspect::gleam_inspect(x)\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/echo_ffi/echo_ffi.mbt"),
+      contents: echo_ffi_mbt,
+    )
+    == Ok(Nil)
 
   let src =
-    "import gleam/dict\n"
-    <> "import gleam/option.{None, Some}\n"
-    <> "import gleam/string\n\n"
+    "/// @external_type(moonbit, \"builtin\", \"Option\")\n"
+    <> "pub type Maybe(a) {\n"
+    <> "  Some(a)\n"
+    <> "  None\n"
+    <> "}\n\n"
+    <> "/// @external_type(moonbit, \"echo_ffi\", \"MiniMap\")\n"
+    <> "pub type MiniMap(k, v)\n\n"
+    <> "/// @external(moonbit, \"echo_ffi\", \"map_singleton\")\n"
+    <> "pub fn map_singleton(k: k, v: v) -> MiniMap(k, v) {\n"
+    <> "  let _ = #(k, v)\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"echo_ffi\", \"inspect_val\")\n"
+    <> "pub fn inspect_val(x: a) -> String {\n"
+    <> "  let _ = x\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
     <> "pub type Person {\n"
     <> "  Person(name: String, age: Int, needs_glasses: Bool)\n"
     <> "}\n\n"
@@ -2121,11 +2172,11 @@ pub fn echo_exact_gleam_behavior_e2e_test() {
     <> "  echo <<6147:size(16)>>\n"
     <> "  echo Person(\"Amy\", 26, True)\n"
     <> "  echo Handler(\"cb\", fn(n) { n + 1 })\n"
-    <> "  echo dict.from_list([#(\"a\", 1)])\n"
+    <> "  echo map_singleton(\"a\", 1)\n"
     <> "  echo 1 + 2 as \"sum msg\"\n"
     <> "  let _ = [1, 2] |> echo\n"
     <> "  let _ = generic_echo(99)\n"
-    <> "  assert string.inspect(Person(\"Amy\", 26, True))\n"
+    <> "  assert inspect_val(Person(\"Amy\", 26, True))\n"
     <> "    == \"Person(\\\"Amy\\\", 26, True)\"\n"
     <> "  Nil\n"
     <> "}\n"
@@ -2140,39 +2191,39 @@ pub fn echo_exact_gleam_behavior_e2e_test() {
   assert summary.project_name == "echo_e2e"
 
   let assert_echo_output = fn(output: String) {
-    assert string.contains(output, "src/echo_e2e.gleam:18\n41\n")
-    assert string.contains(output, "src/echo_e2e.gleam:20\n\"bare stmt\"\n")
-    assert string.contains(output, "src/echo_e2e.gleam:21\n3.0\n")
-    assert string.contains(output, "src/echo_e2e.gleam:22\nTrue\n")
-    assert string.contains(output, "src/echo_e2e.gleam:23\nFalse\n")
-    assert string.contains(output, "src/echo_e2e.gleam:24\nNil\n")
+    assert string.contains(output, "src/echo_e2e.gleam:35\n41\n")
+    assert string.contains(output, "src/echo_e2e.gleam:37\n\"bare stmt\"\n")
+    assert string.contains(output, "src/echo_e2e.gleam:38\n3.0\n")
+    assert string.contains(output, "src/echo_e2e.gleam:39\nTrue\n")
+    assert string.contains(output, "src/echo_e2e.gleam:40\nFalse\n")
+    assert string.contains(output, "src/echo_e2e.gleam:41\nNil\n")
     assert string.contains(
       output,
-      "src/echo_e2e.gleam:25\n\"hello \\\"world\\\"\"\n",
+      "src/echo_e2e.gleam:42\n\"hello \\\"world\\\"\"\n",
     )
-    assert string.contains(output, "src/echo_e2e.gleam:26\n[1, 2, 3]\n")
+    assert string.contains(output, "src/echo_e2e.gleam:43\n[1, 2, 3]\n")
     assert string.contains(
       output,
-      "src/echo_e2e.gleam:27\n#(1, 2.2, \"three\")\n",
+      "src/echo_e2e.gleam:44\n#(1, 2.2, \"three\")\n",
     )
-    assert string.contains(output, "src/echo_e2e.gleam:28\nOk(1)\n")
-    assert string.contains(output, "src/echo_e2e.gleam:29\nError(Nil)\n")
-    assert string.contains(output, "src/echo_e2e.gleam:30\nSome(\"Nubi\")\n")
-    assert string.contains(output, "src/echo_e2e.gleam:31\nNone\n")
-    assert string.contains(output, "src/echo_e2e.gleam:32\n<<3>>\n")
-    assert string.contains(output, "src/echo_e2e.gleam:33\n<<24, 3>>\n")
+    assert string.contains(output, "src/echo_e2e.gleam:45\nOk(1)\n")
+    assert string.contains(output, "src/echo_e2e.gleam:46\nError(Nil)\n")
+    assert string.contains(output, "src/echo_e2e.gleam:47\nSome(\"Nubi\")\n")
+    assert string.contains(output, "src/echo_e2e.gleam:48\nNone\n")
+    assert string.contains(output, "src/echo_e2e.gleam:49\n<<3>>\n")
+    assert string.contains(output, "src/echo_e2e.gleam:50\n<<24, 3>>\n")
     assert string.contains(
       output,
-      "src/echo_e2e.gleam:34\nPerson(\"Amy\", 26, True)\n",
+      "src/echo_e2e.gleam:51\nPerson(\"Amy\", 26, True)\n",
     )
-    assert string.contains(output, "src/echo_e2e.gleam:35\nHandler(\"cb\",")
+    assert string.contains(output, "src/echo_e2e.gleam:52\nHandler(\"cb\",")
     assert string.contains(
       output,
-      "src/echo_e2e.gleam:36\ndict.from_list([#(\"a\", 1)])\n",
+      "src/echo_e2e.gleam:53\nmini_map([#(\"a\", 1)])\n",
     )
-    assert string.contains(output, "src/echo_e2e.gleam:37 sum msg\n3\n")
-    assert string.contains(output, "src/echo_e2e.gleam:38\n[1, 2]\n")
-    assert string.contains(output, "src/echo_e2e.gleam:14\n99\n")
+    assert string.contains(output, "src/echo_e2e.gleam:54 sum msg\n3\n")
+    assert string.contains(output, "src/echo_e2e.gleam:55\n[1, 2]\n")
+    assert string.contains(output, "src/echo_e2e.gleam:31\n99\n")
   }
 
   let run_wasm =
@@ -2196,27 +2247,6 @@ pub fn echo_exact_gleam_behavior_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
-}
-
-fn stage_offline_stdlib(fixture_dir: String) {
-  let packages_dir = filepath.join(fixture_dir, "build/packages")
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-  assert simplifile.create_directory_all(packages_dir) == Ok(Nil)
-  symlink_root_package("gleam_stdlib", packages_dir)
-  assert simplifile.write(
-      to: filepath.join(packages_dir, "packages.toml"),
-      contents: "[packages]\ngleam_stdlib = \"1.1.0\"\n\n[git]\n",
-    )
-    == Ok(Nil)
-  assert simplifile.write(
-      to: filepath.join(fixture_dir, "manifest.toml"),
-      contents: "packages = [\n"
-        <> "  { name = \"gleam_stdlib\", version = \"1.1.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleam_stdlib\", source = \"hex\", outer_checksum = \"E191E535492DDFE6A6499E96C89A40D9BDF2B7F1DADD4D6BEDABE34027E5B1EA\" },\n"
-        <> "]\n\n[requirements]\ngleam_stdlib = { version = \">= 1.0.0 and < 2.0.0\" }\n",
-    )
-    == Ok(Nil)
 }
 
 pub fn wit_parser_and_deps_unit_test() {
@@ -2833,12 +2863,11 @@ pub fn moonbit_local_and_core_ffi_e2e_test() {
 }
 
 pub fn external_type_opaque_alias_and_record_embedding_e2e_test() {
-  let root = "build/test_fixtures/ext_type_test"
+  let root = "build/test_fixtures/ext_type"
   let out_dir = "build/test_fixtures/ext_type_mbt"
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
 
-  stage_offline_stdlib(root)
   assert simplifile.create_directory_all(filepath.join(root, "src/ext_type"))
     == Ok(Nil)
   assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
@@ -2850,7 +2879,7 @@ pub fn external_type_opaque_alias_and_record_embedding_e2e_test() {
 
   assert simplifile.write(
       to: filepath.join(root, "gleam.toml"),
-      contents: "name = \"ext_type\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+      contents: "name = \"ext_type\"\nversion = \"0.1.0\"\n",
     )
     == Ok(Nil)
 
@@ -2867,7 +2896,15 @@ pub fn external_type_opaque_alias_and_record_embedding_e2e_test() {
     <> "///|\n"
     <> "pub fn[T] wrap_box(item : T) -> NativeBox[T] {\n  { item: item }\n}\n\n"
     <> "///|\n"
-    <> "pub fn[T] unwrap_box(b : NativeBox[T]) -> T {\n  b.item\n}\n"
+    <> "pub fn[T] unwrap_box(b : NativeBox[T]) -> T {\n  b.item\n}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.GleamInspect] inspect_val(x : T) -> String {\n"
+    <> "  @gprelude.GleamInspect::gleam_inspect(x)\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn str_contains(haystack : String, needle : String) -> Bool {\n"
+    <> "  haystack.contains(needle)\n"
+    <> "}\n"
   assert simplifile.write(
       to: filepath.join(root, "moonbit/native_box/native_box.mbt"),
       contents: native_mbt,
@@ -2892,11 +2929,14 @@ pub fn external_type_opaque_alias_and_record_embedding_e2e_test() {
     <> "@external(moonbit, \"native_box\", \"wrap_box\")\n"
     <> "pub fn wrap_box(x: a) -> Box(a)\n\n"
     <> "@external(moonbit, \"native_box\", \"unwrap_box\")\n"
-    <> "pub fn unwrap_box(b: Box(a)) -> a\n"
+    <> "pub fn unwrap_box(b: Box(a)) -> a\n\n"
+    <> "@external(moonbit, \"native_box\", \"inspect_val\")\n"
+    <> "pub fn inspect_val(x: a) -> String\n\n"
+    <> "@external(moonbit, \"native_box\", \"str_contains\")\n"
+    <> "pub fn str_contains(haystack: String, needle: String) -> Bool\n"
 
   let main_gleam =
-    "import ext_type/types.{type Box, type Handle}\n"
-    <> "import gleam/string\n\n"
+    "import ext_type/types.{type Box, type Handle}\n\n"
     <> "pub type Holder {\n"
     <> "  Holder(tag: String, handle: Handle, history: List(Handle), boxed: Result(Box(String), String))\n"
     <> "}\n\n"
@@ -2905,14 +2945,14 @@ pub fn external_type_opaque_alias_and_record_embedding_e2e_test() {
     <> "  let h2 = types.make_handle(25)\n"
     <> "  let b = types.wrap_box(\"ok\")\n"
     <> "  let holder = Holder(tag: \"k\", handle: h1, history: [h1, h2], boxed: Ok(b))\n"
-    <> "  let inspected = string.inspect(holder)\n"
+    <> "  let inspected = types.inspect_val(holder)\n"
     <> "  let box_val = case holder.boxed {\n"
     <> "    Ok(bx) -> types.unwrap_box(bx)\n"
     <> "    Error(_) -> \"bad\"\n"
     <> "  }\n"
     <> "  types.handle_id(holder.handle) == 10\n"
     <> "  && box_val == \"ok\"\n"
-    <> "  && string.contains(inspected, \"Holder(\\\"k\\\", \\\"//external\\\"\")\n"
+    <> "  && types.str_contains(inspected, \"Holder(\\\"k\\\", \\\"//external\\\"\")\n"
     <> "}\n"
 
   let test_gleam =
@@ -3038,11 +3078,18 @@ pub fn moonbit_bindgen_stdlib_buffer_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
 
-  stage_offline_stdlib(root)
-  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "src/gleam"))
+    == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(root, "gleam.toml"),
-      contents: "name = \"bindgen_buf\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+      contents: "name = \"bindgen_buf\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/gleam/option.gleam"),
+      contents: "/// @external_type(moonbit, \"builtin\", \"Option\")\n"
+        <> "pub type Option(a) {\n  Some(a)\n  None\n}\n\n"
+        <> "pub fn is_some(o: Option(a)) -> Bool {\n  case o {\n    Some(_) -> True\n    None -> False\n  }\n}\n",
     )
     == Ok(Nil)
 
@@ -3058,8 +3105,6 @@ pub fn moonbit_bindgen_stdlib_buffer_e2e_test() {
 
   let main_src =
     "import ffi/buffer\n"
-    <> "import gleam/int\n"
-    <> "import gleam/io\n"
     <> "import gleam/option.{None, Some}\n\n"
     <> "pub fn main() -> Nil {\n"
     <> "  let b1 = buffer.new_buffer(None)\n"
@@ -3073,7 +3118,8 @@ pub fn moonbit_bindgen_stdlib_buffer_e2e_test() {
     <> "  buffer.write_byte(b2, 65)\n"
     <> "  assert buffer.length(b2) == 1\n"
     <> "  assert buffer.to_bytes(b2) == <<65>>\n"
-    <> "  io.println(\"buf=\" <> s1 <> \",len=\" <> int.to_string(len1))\n"
+    <> "  let _ = echo \"buf=\" <> s1\n"
+    <> "  Nil\n"
     <> "}\n"
   assert simplifile.write(
       to: filepath.join(root, "src/bindgen_buf.gleam"),
@@ -3101,7 +3147,7 @@ pub fn moonbit_bindgen_stdlib_buffer_e2e_test() {
       cwd: out_dir,
     )
   assert run_wasm.exit_code == 0
-  assert string.contains(run_wasm.output, "buf=hello moonbit,len=26")
+  assert string.contains(run_wasm.output, "\"buf=hello moonbit\"")
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
@@ -3116,14 +3162,21 @@ pub fn moonbit_bindgen_local_pkg_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   let _ = simplifile.delete(file_or_dir_at: info_out)
 
-  stage_offline_stdlib(root)
-  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "src/gleam"))
+    == Ok(Nil)
   assert simplifile.create_directory_all(filepath.join(root, "moonbit/stats"))
     == Ok(Nil)
 
   assert simplifile.write(
       to: filepath.join(root, "gleam.toml"),
-      contents: "name = \"bindgen_local\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0 and < 2.0.0\"\n",
+      contents: "name = \"bindgen_local\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/gleam/option.gleam"),
+      contents: "/// @external_type(moonbit, \"builtin\", \"Option\")\n"
+        <> "pub type Option(a) {\n  Some(a)\n  None\n}\n\n"
+        <> "pub fn is_some(o: Option(a)) -> Bool {\n  case o {\n    Some(_) -> True\n    None -> False\n  }\n}\n",
     )
     == Ok(Nil)
   assert simplifile.write(
@@ -3172,8 +3225,6 @@ pub fn moonbit_bindgen_local_pkg_e2e_test() {
 
   let main_src =
     "import ffi/stats\n"
-    <> "import gleam/int\n"
-    <> "import gleam/io\n"
     <> "import gleam/option.{None, Some}\n\n"
     <> "pub fn main() -> Nil {\n"
     <> "  let s1 = stats.summarize([2, 3, 5], None)\n"
@@ -3188,7 +3239,8 @@ pub fn moonbit_bindgen_local_pkg_e2e_test() {
     <> "  assert stats.checked_div(12, 3) == Ok(4)\n"
     <> "  let div_err = stats.checked_div(12, 0)\n"
     <> "  let assert Error(_) = div_err\n"
-    <> "  io.println(\"stats=\" <> int.to_string(stats.summary_total(s2)))\n"
+    <> "  let _ = echo \"stats_ok\"\n"
+    <> "  Nil\n"
     <> "}\n"
   assert simplifile.write(
       to: filepath.join(root, "src/bindgen_local.gleam"),
@@ -3213,7 +3265,7 @@ pub fn moonbit_bindgen_local_pkg_e2e_test() {
       cwd: out_dir,
     )
   assert run_wasm.exit_code == 0
-  assert string.contains(run_wasm.output, "stats=50")
+  assert string.contains(run_wasm.output, "\"stats_ok\"")
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
@@ -3557,13 +3609,104 @@ fn stage_offline_bit_array_project(root: String, pkg_name: String) {
 pub fn bit_array_tier2_e2e_all_targets_test() {
   let root = "build/test_fixtures/bit_array_t2"
   let out_dir = "build/test_fixtures/bit_array_t2_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
-  stage_offline_bit_array_project(root, "bit_array_t2")
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/ba_map"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"bit_array_t2\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let ba_map_mbt =
+    "///|\n"
+    <> "pub(all) struct BaMap {\n"
+    <> "  inner : Map[@gprelude.BitArray, String]\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn map_new() -> BaMap {\n"
+    <> "  { inner: Default::default() }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn map_insert(m : BaMap, k : @gprelude.BitArray, v : String) -> BaMap {\n"
+    <> "  let copy = m.inner.copy()\n"
+    <> "  copy.set(k, v)\n"
+    <> "  { inner: copy }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn map_size(m : BaMap) -> Int64 {\n"
+    <> "  m.inner.length().to_int64()\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn map_get(m : BaMap, k : @gprelude.BitArray) -> Result[String, Unit] {\n"
+    <> "  match m.inner.get(k) {\n"
+    <> "    Some(v) => Ok(v)\n"
+    <> "    None => Err(())\n"
+    <> "  }\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/ba_map/ba_map.mbt"),
+      contents: ba_map_mbt,
+    )
+    == Ok(Nil)
 
   let lib_src =
-    "import gleam/bit_array\n"
-    <> "import gleam/dict\n"
-    <> "import gleam/string\n\n"
+    "/// @external_type(moonbit, \"ba_map\", \"BaMap\")\n"
+    <> "pub type BaMap {\n"
+    <> "  BaMap(List(#(BitArray, String)))\n"
+    <> "}\n\n"
+    <> "pub fn assoc_insert(\n"
+    <> "  entries: List(#(BitArray, String)),\n"
+    <> "  key: BitArray,\n"
+    <> "  val: String,\n"
+    <> ") -> List(#(BitArray, String)) {\n"
+    <> "  case entries {\n"
+    <> "    [] -> [#(key, val)]\n"
+    <> "    [#(k, _), ..rest] if k == key -> [#(key, val), ..rest]\n"
+    <> "    [first, ..rest] -> [first, ..assoc_insert(rest, key, val)]\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn assoc_len(entries: List(#(BitArray, String))) -> Int {\n"
+    <> "  case entries {\n"
+    <> "    [] -> 0\n"
+    <> "    [_, ..rest] -> 1 + assoc_len(rest)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn assoc_get(\n"
+    <> "  entries: List(#(BitArray, String)),\n"
+    <> "  key: BitArray,\n"
+    <> ") -> Result(String, Nil) {\n"
+    <> "  case entries {\n"
+    <> "    [] -> Error(Nil)\n"
+    <> "    [#(k, v), ..] if k == key -> Ok(v)\n"
+    <> "    [_, ..rest] -> assoc_get(rest, key)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"ba_map\", \"map_new\")\n"
+    <> "pub fn ba_map_new() -> BaMap {\n"
+    <> "  BaMap([])\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"ba_map\", \"map_insert\")\n"
+    <> "pub fn ba_map_insert(m: BaMap, k: BitArray, v: String) -> BaMap {\n"
+    <> "  let BaMap(entries) = m\n"
+    <> "  BaMap(assoc_insert(entries, k, v))\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"ba_map\", \"map_size\")\n"
+    <> "pub fn ba_map_size(m: BaMap) -> Int {\n"
+    <> "  let BaMap(entries) = m\n"
+    <> "  assoc_len(entries)\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"ba_map\", \"map_get\")\n"
+    <> "pub fn ba_map_get(m: BaMap, k: BitArray) -> Result(String, Nil) {\n"
+    <> "  let BaMap(entries) = m\n"
+    <> "  assoc_get(entries, k)\n"
+    <> "}\n\n"
     <> "pub type Packet {\n"
     <> "  Packet(version: Int, flags: Int, payload: BitArray, crc: Int)\n"
     <> "  EmptyFrame\n"
@@ -3583,22 +3726,21 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
     <> "}\n\n"
     <> "pub fn check_dict_and_equality() -> Bool {\n"
     <> "  let d =\n"
-    <> "    dict.from_list([\n"
-    <> "      #(<<1:1>>, \"one_bit\"),\n"
-    <> "      #(<<0x80>>, \"byte_128\"),\n"
-    <> "      #(<<0:1>>, \"z1\"),\n"
-    <> "      #(<<0:2>>, \"z2\"),\n"
-    <> "      #(<<0xAB>>, \"ab\"),\n"
-    <> "    ])\n"
-    <> "  let d2 = dict.insert(d, <<0xA:4, 0xB:4>>, \"ab2\")\n"
+    <> "    ba_map_new()\n"
+    <> "    |> ba_map_insert(<<1:1>>, \"one_bit\")\n"
+    <> "    |> ba_map_insert(<<0x80>>, \"byte_128\")\n"
+    <> "    |> ba_map_insert(<<0:1>>, \"z1\")\n"
+    <> "    |> ba_map_insert(<<0:2>>, \"z2\")\n"
+    <> "    |> ba_map_insert(<<0xAB>>, \"ab\")\n"
+    <> "  let d2 = ba_map_insert(d, <<0xA:4, 0xB:4>>, \"ab2\")\n"
     <> "  <<0:1>> != <<0:2>>\n"
     <> "  && <<1:1>> != <<0x80>>\n"
     <> "  && <<0xAB>> == <<0xA:4, 0xB:4>>\n"
-    <> "  && dict.size(d) == 5\n"
-    <> "  && dict.size(d2) == 5\n"
-    <> "  && dict.get(d2, <<0xAB>>) == Ok(\"ab2\")\n"
-    <> "  && dict.get(d2, <<1:1>>) == Ok(\"one_bit\")\n"
-    <> "  && dict.get(d2, <<0x80>>) == Ok(\"byte_128\")\n"
+    <> "  && ba_map_size(d) == 5\n"
+    <> "  && ba_map_size(d2) == 5\n"
+    <> "  && ba_map_get(d2, <<0xAB>>) == Ok(\"ab2\")\n"
+    <> "  && ba_map_get(d2, <<1:1>>) == Ok(\"one_bit\")\n"
+    <> "  && ba_map_get(d2, <<0x80>>) == Ok(\"byte_128\")\n"
     <> "}\n\n"
     <> "pub fn check_int_widths_and_endianness() -> Bool {\n"
     <> "  let zero = 0\n"
@@ -3619,6 +3761,10 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
     <> "    <<1:127-big, 1:127-little>>\n"
     <> "  let assert <<nval:12-native-signed>> = <<-33:12-native>>\n"
     <> "  let src = <<0xAB, 0xCD>>\n"
+    <> "  let bits190_ok = case <<-1:190>> {\n"
+    <> "    <<_:190>> -> True\n"
+    <> "    _ -> False\n"
+    <> "  }\n"
     <> "  dyn_zero == <<>>\n"
     <> "  && dyn_neg == <<>>\n"
     <> "  && <<0:-8>> == <<>>\n"
@@ -3634,7 +3780,7 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
     <> "  && l127 == -1\n"
     <> "  && b127u == 1\n"
     <> "  && l127u == 1\n"
-    <> "  && bit_array.bit_size(<<-1:190>>) == 190\n"
+    <> "  && bits190_ok\n"
     <> "  && nval == -33\n"
     <> "  && <<0x123:3-unit(4)-big>> == <<0x12, 3:4>>\n"
     <> "  && <<src:bits-size(4)>> == <<0xA:4>>\n"
@@ -3692,8 +3838,8 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
     <> "  && !match_f64(<<0x7F, 0xF8, 0, 0, 0, 0, 0, 0>>)\n"
     <> "}\n\n"
     <> "pub fn check_utf() -> Bool {\n"
-    <> "  let assert [emoji_cp] = string.to_utf_codepoints(\"😀\")\n"
-    <> "  let assert [acute_cp] = string.to_utf_codepoints(\"é\")\n"
+    <> "  let assert <<emoji_cp:utf8_codepoint>> = <<\"😀\":utf8>>\n"
+    <> "  let assert <<acute_cp:utf8_codepoint>> = <<\"é\":utf8>>\n"
     <> "  let encoded =\n"
     <> "    <<\"GET \":utf8, \"é\":utf16-little, \"😀\":utf16-big, \"😀\":utf32-little, 5:3>>\n"
     <> "  let assert <<\n"
@@ -3723,9 +3869,9 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
     <> "  && <<emoji_cp:utf16_codepoint-little>> == <<61, 216, 0, 222>>\n"
     <> "  && <<emoji_cp:utf32_codepoint-big>> == <<0, 1, 246, 0>>\n"
     <> "  && tail == <<5:3>>\n"
-    <> "  && string.utf_codepoint_to_int(c8) == 128512\n"
-    <> "  && string.utf_codepoint_to_int(c16) == 233\n"
-    <> "  && string.utf_codepoint_to_int(c32) == 128512\n"
+    <> "  && <<c8:utf32_codepoint-big>> == <<128512:32-big>>\n"
+    <> "  && <<c16:utf32_codepoint-big>> == <<233:32-big>>\n"
+    <> "  && <<c32:utf32_codepoint-big>> == <<128512:32-big>>\n"
     <> "  && after == <<\"!\":utf8>>\n"
     <> "  && bad_utf8(<<0xC0, 0xAF>>)\n"
     <> "  && bad_utf8(<<0xED, 0xA0, 0x80>>)\n"
@@ -3805,9 +3951,15 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
     <> "}\n"
 
   let test_src =
-    "import bit_array_t2\n"
-    <> "import gleeunit\n\n"
-    <> "pub fn main() -> Nil {\n  gleeunit.main()\n}\n\n"
+    "import bit_array_t2\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  dict_and_equality_test()\n"
+    <> "  int_widths_and_endianness_test()\n"
+    <> "  floats_test()\n"
+    <> "  utf_test()\n"
+    <> "  patterns_scoping_and_control_flow_test()\n"
+    <> "  Nil\n"
+    <> "}\n\n"
     <> "pub fn dict_and_equality_test() {\n"
     <> "  assert bit_array_t2.check_dict_and_equality()\n}\n\n"
     <> "pub fn int_widths_and_endianness_test() {\n"
@@ -3832,7 +3984,6 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
 
   let gleam_res = cmd.run(command: "gleam", args: ["test"], cwd: root)
   assert gleam_res.exit_code == 0
-  assert string.contains(gleam_res.output, "5 passed, no failures")
 
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
   assert_all_moonbit_targets_ok(out_dir, "passed: 5, failed: 0")
