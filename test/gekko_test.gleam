@@ -4251,3 +4251,82 @@ fn run_stdlib_full_parity_target(target: String) {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
+
+pub fn int_div_rem_int64_min_e2e_test() {
+  let root = "build/test_fixtures/int_div_min"
+  let out_dir = "build/test_fixtures/int_div_min_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"int_div_min\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let lib_src =
+    "pub fn div(a: Int, b: Int) -> Int {\n"
+    <> "  a / b\n"
+    <> "}\n\n"
+    <> "pub fn rem(a: Int, b: Int) -> Int {\n"
+    <> "  a % b\n"
+    <> "}\n"
+
+  let test_src =
+    "import int_div_min\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  Nil\n"
+    <> "}\n\n"
+    <> "pub fn int_div_rem_min_test() {\n"
+    <> "  let min = -9_223_372_036_854_775_808\n"
+    <> "  assert int_div_min.div(min, -1) == min\n"
+    <> "  assert int_div_min.rem(min, -1) == 0\n"
+    <> "  assert -9_223_372_036_854_775_808 / -1 == min\n"
+    <> "  assert -9_223_372_036_854_775_808 % -1 == 0\n"
+    <> "  assert int_div_min.div(min, 0) == 0\n"
+    <> "  assert int_div_min.rem(min, 0) == 0\n"
+    <> "  assert int_div_min.div(10, -1) == -10\n"
+    <> "  assert int_div_min.div(-10, -1) == 10\n"
+    <> "  assert int_div_min.rem(10, -1) == 0\n"
+    <> "  assert int_div_min.rem(-10, -1) == 0\n"
+    <> "  let matched = case min {\n"
+    <> "    -9_223_372_036_854_775_808 -> True\n"
+    <> "    _ -> False\n"
+    <> "  }\n"
+    <> "  assert matched\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/int_div_min.gleam"),
+      contents: lib_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/int_div_min_test.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  list.each(["wasm", "wasm-gc", "js", "native"], fn(target) {
+    let chk =
+      cmd.run(
+        command: "moon",
+        args: ["check", "--deny-warn", "--target", target],
+        cwd: out_dir,
+      )
+    assert chk.exit_code == 0
+
+    let run =
+      cmd.run(command: "moon", args: ["test", "--target", target], cwd: out_dir)
+    assert run.exit_code == 0
+    assert string.contains(run.output, "passed: 1, failed: 0")
+  })
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}

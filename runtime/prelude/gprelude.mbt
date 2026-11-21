@@ -959,6 +959,8 @@ pub impl Hash for Dynamic with hash_combine(self, hasher) {
 pub fn int_div(a : Int64, b : Int64) -> Int64 {
   if b == 0L {
     0L
+  } else if b == -1L {
+    -a
   } else {
     a / b
   }
@@ -966,7 +968,7 @@ pub fn int_div(a : Int64, b : Int64) -> Int64 {
 
 ///|
 pub fn int_rem(a : Int64, b : Int64) -> Int64 {
-  if b == 0L {
+  if b == 0L || b == -1L {
     0L
   } else {
     a % b
