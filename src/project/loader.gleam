@@ -105,6 +105,15 @@ pub fn load_dependencies(
   project_root: String,
   ffi_overrides: Dict(String, FfiKind),
 ) -> Result(List(LoadedDependency), String) {
+  load_dependencies_with_options(project_root, ffi_overrides, True)
+}
+
+/// Discover and load dependencies with configurable test/dev-dependency inclusion.
+pub fn load_dependencies_with_options(
+  project_root: String,
+  ffi_overrides: Dict(String, FfiKind),
+  include_tests: Bool,
+) -> Result(List(LoadedDependency), String) {
   use #(root_name, _) <- result.try(read_project_meta(project_root))
   let packages_dir =
     project_root
@@ -118,6 +127,7 @@ pub fn load_dependencies(
   use local_pkgs <- result.try(discover_local_path_packages(
     project_root,
     root_name,
+    include_tests,
   ))
 
   let combined_map =
@@ -141,6 +151,7 @@ pub fn load_dependencies(
 fn discover_local_path_packages(
   project_root: String,
   root_name: String,
+  include_tests: Bool,
 ) -> Result(List(DiscoveredPkg), String) {
   let manifest_path = filepath.join(project_root, "manifest.toml")
   use from_manifest <- result.try(case simplifile.is_file(manifest_path) {
@@ -148,9 +159,12 @@ fn discover_local_path_packages(
       read_local_packages_from_manifest(manifest_path, project_root, root_name)
     _ -> Ok([])
   })
+  let abs_root = simplifile.resolve(project_root) |> result.unwrap(project_root)
   use from_toml <- result.try(collect_gleam_toml_path_deps(
     [project_root],
     root_name,
+    abs_root,
+    include_tests,
     set.new(),
     dict.new(),
   ))
@@ -232,6 +246,8 @@ fn read_local_packages_from_manifest(
 fn collect_gleam_toml_path_deps(
   queue: List(String),
   root_name: String,
+  abs_root: String,
+  include_tests: Bool,
   visited_roots: Set(String),
   acc: Dict(String, DiscoveredPkg),
 ) -> Result(Dict(String, DiscoveredPkg), String) {
@@ -241,29 +257,49 @@ fn collect_gleam_toml_path_deps(
       let norm_root = simplifile.resolve(cur_root) |> result.unwrap(cur_root)
       case set.contains(visited_roots, norm_root) {
         True ->
-          collect_gleam_toml_path_deps(rest, root_name, visited_roots, acc)
+          collect_gleam_toml_path_deps(
+            rest,
+            root_name,
+            abs_root,
+            include_tests,
+            visited_roots,
+            acc,
+          )
         False -> {
           let next_visited = set.insert(visited_roots, norm_root)
           let toml_path = filepath.join(norm_root, "gleam.toml")
           case simplifile.read(toml_path) {
             Error(_) ->
-              collect_gleam_toml_path_deps(rest, root_name, next_visited, acc)
+              collect_gleam_toml_path_deps(
+                rest,
+                root_name,
+                abs_root,
+                include_tests,
+                next_visited,
+                acc,
+              )
             Ok(content) ->
               case tom.parse(content) {
                 Error(_) ->
                   collect_gleam_toml_path_deps(
                     rest,
                     root_name,
+                    abs_root,
+                    include_tests,
                     next_visited,
                     acc,
                   )
                 Ok(parsed) -> {
-                  let dep_tables =
-                    [
+                  let raw_dep_tables = case
+                    include_tests && norm_root == abs_root
+                  {
+                    True -> [
                       tom.get_table(parsed, ["dependencies"]),
                       tom.get_table(parsed, ["dev-dependencies"]),
                     ]
-                    |> list.filter_map(fn(r) { r })
+                    False -> [tom.get_table(parsed, ["dependencies"])]
+                  }
+                  let dep_tables = list.filter_map(raw_dep_tables, fn(r) { r })
                   let #(next_queue, next_acc) =
                     list.fold(dep_tables, #(rest, acc), fn(st, tbl) {
                       dict.fold(tbl, st, fn(st_inner, dep_name, val) {
@@ -302,6 +338,8 @@ fn collect_gleam_toml_path_deps(
                   collect_gleam_toml_path_deps(
                     next_queue,
                     root_name,
+                    abs_root,
+                    include_tests,
                     next_visited,
                     next_acc,
                   )

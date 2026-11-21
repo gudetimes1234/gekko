@@ -80,9 +80,10 @@ pub fn bridge_wit_workspace(
   world_name: Option(String),
 ) -> Result(WitBridgeSummary, String) {
   use resolved <- result.try(parser.load_wit_dir(wit_dir, world_name))
-  use transpile_summary <- result.try(workspace.transpile_project(
+  use transpile_summary <- result.try(workspace.transpile_project_with_tests(
     project_root,
     out_dir,
+    False,
   ))
 
   let bindgen_probe =
@@ -283,15 +284,17 @@ pub fn bundle_component(
   })
 
   let out_parent = filepath.directory_name(output_wasm)
-  use _ <- result.try(
-    simplifile.create_directory_all(out_parent)
-    |> result.map_error(fn(err) {
-      "Failed to create component output directory '"
-      <> out_parent
-      <> "': "
-      <> simplifile.describe_error(err)
-    }),
-  )
+  use _ <- result.try(case out_parent {
+    "" | "." -> Ok(Nil)
+    _ ->
+      simplifile.create_directory_all(out_parent)
+      |> result.map_error(fn(err) {
+        "Failed to create component output directory '"
+        <> out_parent
+        <> "': "
+        <> simplifile.describe_error(err)
+      })
+  })
 
   let new_res =
     cmd.run(

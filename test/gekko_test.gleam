@@ -3787,6 +3787,93 @@ pub fn cli_parse_args_help_and_version_test() {
     == Ok(gekko.BuildAction(root: "app", out: None, target: "native"))
   assert gekko.parse_args(["build"])
     == Ok(gekko.BuildAction(root: ".", out: None, target: "wasm-gc"))
+  assert gekko.parse_args(["build", "--out", "myfile.exe", "--target", "native"])
+    == Ok(gekko.BuildAction(
+      root: ".",
+      out: Some("myfile.exe"),
+      target: "native",
+    ))
+  assert gekko.parse_args(["build", "-o", "out.wasm"])
+    == Ok(gekko.BuildAction(root: ".", out: Some("out.wasm"), target: "wasm-gc"))
+  assert gekko.parse_args([
+      "build",
+      "--root=app",
+      "--out=myfile.exe",
+      "--target=native",
+    ])
+    == Ok(gekko.BuildAction(
+      root: "app",
+      out: Some("myfile.exe"),
+      target: "native",
+    ))
+
+  // All subcommands default --root to "."
+  assert gekko.parse_args(["check"])
+    == Ok(gekko.CheckAction(root: ".", out: None, target: None))
+  assert gekko.parse_args(["test"])
+    == Ok(gekko.TestAction(root: ".", out: None, target: None))
+  assert gekko.parse_args(["run"])
+    == Ok(gekko.RunAction(root: ".", out: None, target: None))
+  assert gekko.parse_args(["wit", "gen"])
+    == Ok(gekko.WitGenAction(root: ".", wit_dir: None, world: None))
+  assert gekko.parse_args(["wit", "check"])
+    == Ok(gekko.WitCheckAction(root: ".", wit_dir: None, world: None, out: None))
+  assert gekko.parse_args(["wit", "build"])
+    == Ok(gekko.WitBuildAction(
+      root: ".",
+      wit_dir: None,
+      world: None,
+      out: None,
+      output: None,
+    ))
+  assert gekko.parse_args(["moonbit", "bind", "pkg"])
+    == Ok(gekko.MoonbitBindAction(
+      root: ".",
+      package: "pkg",
+      module: None,
+      out: None,
+    ))
+
+  // Parse `moon build` artifact lines
+  let sample_build_out =
+    "Finished. moon: ran 2 tasks, now up to date\n"
+    <> "Artifacts:\n"
+    <> "  app/app  native  /tmp/my dir/build/native/app.exe\n"
+    <> "  app/helper  wasm  /tmp/other/helper.wasm\n"
+  assert gekko.parse_moon_build_artifacts(sample_build_out)
+    == [
+      #("app/app", "native", "/tmp/my dir/build/native/app.exe"),
+      #("app/helper", "wasm", "/tmp/other/helper.wasm"),
+    ]
+  assert gekko.parse_moon_build_artifacts(
+      "Finished. moon: ran 5 tasks, now up to date\n",
+    )
+    == []
+
+  // Resolve output path rules
+  assert gekko.resolve_build_output_path(None, "app.exe", fn(_) { False })
+    == Ok("app.exe")
+  assert gekko.resolve_build_output_path(Some("myfile.exe"), "app.exe", fn(_) {
+      False
+    })
+    == Ok("myfile.exe")
+  assert gekko.resolve_build_output_path(
+      Some("dist/myfile.exe"),
+      "app.exe",
+      fn(_) { False },
+    )
+    == Ok("dist/myfile.exe")
+  assert gekko.resolve_build_output_path(Some("dist/"), "app.exe", fn(_) {
+      True
+    })
+    == Ok("dist/app.exe")
+  assert gekko.resolve_build_output_path(Some(""), "app.exe", fn(_) { False })
+    == Error("Output path cannot be empty.")
+  let assert Error(dir_err) =
+    gekko.resolve_build_output_path(Some("dist"), "app.exe", fn(p) {
+      p == "dist"
+    })
+  assert string.contains(dir_err, "existing directory")
 }
 
 pub fn cmd_require_tools_and_find_executable_test() {
@@ -4560,5 +4647,157 @@ pub fn int_literal_range_diagnostic_e2e_test() {
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn build_outputs_artifact_and_skips_tests_e2e_test() {
+  let root = "build/test_fixtures/build_cli_app"
+  let out_cwd = "build/test_fixtures/build_cli_out"
+  let tmp_check_out = "build/test_fixtures/build_cli_check_out"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_cwd)
+  let _ = simplifile.delete(file_or_dir_at: tmp_check_out)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(out_cwd) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"build_cli_app\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/build_cli_app.gleam"),
+      contents: "pub fn main() -> Nil {\n  echo \"build_cli_ok\"\n  Nil\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/overflow_test.gleam"),
+      contents: "pub fn huge_test() -> Int {\n  9_223_372_036_854_775_808\n}\n",
+    )
+    == Ok(Nil)
+
+  // `transpile_project` (and `gekko check` / `gekko test`) still includes `test/`
+  let assert Error(test_err) = workspace.transpile_project(root, tmp_check_out)
+  assert string.contains(test_err, "Integer literal")
+
+  // `gekko build` skips `test/` and places native `--out myfile.exe` in cwd cleanly
+  let assert Ok(gekko.BuiltArtifact(path: native_custom_path, ..)) =
+    gekko.build_project_in_dir(root, Some("myfile.exe"), "native", out_cwd)
+  assert native_custom_path == "myfile.exe"
+  let custom_exe_fs = filepath.join(out_cwd, "myfile.exe")
+  assert simplifile.is_file(custom_exe_fs) == Ok(True)
+  assert simplifile.is_directory(custom_exe_fs) == Ok(False)
+  let run_custom = cmd.run(command: custom_exe_fs, args: [], cwd: ".")
+  assert run_custom.exit_code == 0
+  assert string.contains(run_custom.output, "build_cli_ok")
+
+  // Default `--out` puts `<project>.exe` in cwd
+  let assert Ok(gekko.BuiltArtifact(path: native_default_path, ..)) =
+    gekko.build_project_in_dir(root, None, "native", out_cwd)
+  assert native_default_path == "build_cli_app.exe"
+  let default_exe_fs = filepath.join(out_cwd, "build_cli_app.exe")
+  assert simplifile.is_file(default_exe_fs) == Ok(True)
+  let run_default = cmd.run(command: default_exe_fs, args: [], cwd: ".")
+  assert run_default.exit_code == 0
+  assert string.contains(run_default.output, "build_cli_ok")
+
+  // `--target wasm --out nested/custom.wasm`
+  let assert Ok(gekko.BuiltArtifact(path: wasm_custom_path, ..)) =
+    gekko.build_project_in_dir(
+      root,
+      Some("nested/custom.wasm"),
+      "wasm",
+      out_cwd,
+    )
+  assert wasm_custom_path == "nested/custom.wasm"
+  let custom_wasm_fs = filepath.join(out_cwd, "nested/custom.wasm")
+  assert simplifile.is_file(custom_wasm_fs) == Ok(True)
+  let run_wasm = cmd.run(command: "moonrun", args: [custom_wasm_fs], cwd: ".")
+  assert run_wasm.exit_code == 0
+  assert string.contains(run_wasm.output, "build_cli_ok")
+
+  // Default wasm-gc and js outputs
+  let assert Ok(gekko.BuiltArtifact(path: wasm_gc_default_path, ..)) =
+    gekko.build_project_in_dir(root, None, "wasm-gc", out_cwd)
+  assert wasm_gc_default_path == "build_cli_app.wasm"
+  assert simplifile.is_file(filepath.join(out_cwd, "build_cli_app.wasm"))
+    == Ok(True)
+
+  let assert Ok(gekko.BuiltArtifact(path: js_default_path, ..)) =
+    gekko.build_project_in_dir(root, None, "js", out_cwd)
+  assert js_default_path == "build_cli_app.js"
+  assert simplifile.is_file(filepath.join(out_cwd, "build_cli_app.js"))
+    == Ok(True)
+
+  // Existing directory without trailing slash errors; with trailing slash places inside dir
+  let existing_dir = filepath.join(out_cwd, "existing_dir")
+  assert simplifile.create_directory_all(existing_dir) == Ok(Nil)
+  let assert Error(dir_err) =
+    gekko.build_project_in_dir(root, Some("existing_dir"), "wasm", out_cwd)
+  assert string.contains(dir_err, "existing directory")
+  let assert Ok(gekko.BuiltArtifact(path: in_dir_path, ..)) =
+    gekko.build_project_in_dir(root, Some("existing_dir/"), "wasm", out_cwd)
+  assert in_dir_path == "existing_dir/build_cli_app.wasm"
+  assert simplifile.is_file(filepath.join(existing_dir, "build_cli_app.wasm"))
+    == Ok(True)
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_cwd)
+  let _ = simplifile.delete(file_or_dir_at: tmp_check_out)
+  Nil
+}
+
+pub fn build_library_and_stale_test_cleanup_e2e_test() {
+  let root = "build/test_fixtures/build_lib_pkg"
+  let out_cwd = "build/test_fixtures/build_lib_out"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_cwd)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(out_cwd) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"build_lib_pkg\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/build_lib_pkg.gleam"),
+      contents: "pub fn helper(x: Int) -> Int {\n  x + 1\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/lib_sample_test.gleam"),
+      contents: "pub fn ok_test() -> Nil {\n  assert 1 == 1\n}\n",
+    )
+    == Ok(Nil)
+
+  let work_dir = filepath.join(root, "build/moonbit")
+  let assert Ok(_) = workspace.transpile_project(root, work_dir)
+  assert simplifile.is_directory(filepath.join(work_dir, "test_lib_sample_test"))
+    == Ok(True)
+
+  // Now put an out-of-range test literal in test/ and run `build` (without `--out`)
+  assert simplifile.write(
+      to: filepath.join(root, "test/lib_sample_test.gleam"),
+      contents: "pub fn huge_test() -> Int {\n  9_223_372_036_854_775_808\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(gekko.BuiltLibrary(project_name: "build_lib_pkg", ..)) =
+    gekko.build_project_in_dir(root, None, "wasm", out_cwd)
+  assert simplifile.is_directory(filepath.join(work_dir, "test_lib_sample_test"))
+    == Ok(False)
+
+  // Explicit `--out` on a library project without `pub fn main()` reports a clear error
+  let assert Error(lib_err) =
+    gekko.build_project_in_dir(root, Some("lib.wasm"), "wasm", out_cwd)
+  assert string.contains(lib_err, "pub fn main()")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_cwd)
   Nil
 }

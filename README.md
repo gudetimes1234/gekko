@@ -73,14 +73,17 @@ Because the package names remain `gleam_stdlib` and `gleam_json`, any transitive
 ## CLI Usage
 
 ```bash
-# Type-check transpiled MoonBit output for a Gleam project
+# Type-check transpiled MoonBit output for a Gleam project (--root defaults to `.`)
 gekko check [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]
 
-# Transpile and build targeting wasm-gc (default), wasm, js, or native
+# Transpile and build targeting wasm-gc (default), wasm, js, or native.
+# Writes the compiled artifact (<name>.wasm / .js / .exe) into the current
+# directory by default (or to --out / -o), keeping intermediates in build/moonbit.
+gekko build [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <file> | -o <file>]
 gekko build --target wasm-gc
 gekko build --target wasm
 gekko build --target js
-gekko build --target native
+gekko build --target native --out myfile.exe
 
 # Run tests or execute `main()` through MoonBit
 gekko test [--target <wasm-gc|wasm|js|native>] [--root <dir>]

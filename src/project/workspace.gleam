@@ -34,11 +34,21 @@ pub type TranspileSummary {
   )
 }
 
-/// Transpile a Gleam project at `project_root` into a complete MoonBit
-/// workspace at `out_dir`.
+/// Transpile a Gleam project at `project_root` (including `test/` modules) into
+/// a complete MoonBit workspace at `out_dir`.
 pub fn transpile_project(
   project_root: String,
   out_dir: String,
+) -> Result(TranspileSummary, String) {
+  transpile_project_with_tests(project_root, out_dir, True)
+}
+
+/// Transpile a Gleam project at `project_root` into a complete MoonBit workspace
+/// at `out_dir`, optionally including `test/` modules.
+pub fn transpile_project_with_tests(
+  project_root: String,
+  out_dir: String,
+  include_tests: Bool,
 ) -> Result(TranspileSummary, String) {
   use #(project_name, version) <- result.try(loader.read_project_meta(
     project_root,
@@ -49,9 +59,10 @@ pub fn transpile_project(
   use root_moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
     project_root,
   ))
-  use loaded_deps <- result.try(loader.load_dependencies(
+  use loaded_deps <- result.try(loader.load_dependencies_with_options(
     project_root,
     ffi_overrides,
+    include_tests,
   ))
   use dep_moonbit_deps <- result.try(
     list.try_map(loaded_deps, fn(dep) {
@@ -68,9 +79,10 @@ pub fn transpile_project(
     |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
 
   let staging_dir = filepath.join(project_root, "build/.gekko_staging")
-  use root_iface <- result.try(staging.extract_project_interface(
+  use root_iface <- result.try(staging.extract_project_interface_with_options(
     project_root,
     staging_dir,
+    include_tests,
   ))
   let merged_iface = merge_package_interfaces(root_iface, loaded_deps)
 
@@ -78,13 +90,18 @@ pub fn transpile_project(
   use src_modules <- result.try(loader.discover_and_parse(src_dir, None))
 
   let test_dir = filepath.join(project_root, "test")
-  use test_modules <- result.try(case simplifile.is_directory(test_dir) {
-    Ok(True) -> {
-      use parsed <- result.try(loader.discover_and_parse(test_dir, Some("test")))
-      Ok(list.map(parsed, strip_gleeunit_harness))
-    }
-    _ -> Ok([])
-  })
+  use test_modules <- result.try(
+    case include_tests, simplifile.is_directory(test_dir) {
+      True, Ok(True) -> {
+        use parsed <- result.try(loader.discover_and_parse(
+          test_dir,
+          Some("test"),
+        ))
+        Ok(list.map(parsed, strip_gleeunit_harness))
+      }
+      _, _ -> Ok([])
+    },
+  )
 
   let dep_tagged =
     list.flat_map(loaded_deps, fn(dep) {
@@ -210,6 +227,26 @@ pub fn transpile_project(
     list.append(copied_dep_pkgs, root_moonbit_packages)
     |> list.sort(string.compare)
 
+  let local_top_dirs =
+    list.map(local_moonbit_packages, fn(pkg) {
+      case string.split_once(pkg, "/") {
+        Ok(#(top, _)) -> top
+        Error(_) -> pkg
+      }
+    })
+  let new_generated_dirs =
+    list.append(module_pkg_dirs, local_top_dirs)
+    |> list.filter(fn(d) { d != "" && d != "gprelude" })
+    |> set.from_list
+    |> set.to_list
+    |> list.sort(string.compare)
+
+  use _ <- result.try(clean_stale_generated_dirs(
+    out_dir,
+    new_generated_dirs,
+    include_tests,
+  ))
+
   Ok(TranspileSummary(
     project_name:,
     version:,
@@ -217,6 +254,76 @@ pub fn transpile_project(
     emitted_modules: list.reverse(rev_emitted),
     local_moonbit_packages:,
   ))
+}
+
+fn clean_stale_generated_dirs(
+  out_dir: String,
+  new_generated_dirs: List(String),
+  include_tests: Bool,
+) -> Result(Nil, String) {
+  let manifest_path = filepath.join(out_dir, ".gekko_generated")
+  let from_manifest = case simplifile.read(from: manifest_path) {
+    Ok(content) ->
+      content
+      |> string.split("\n")
+      |> list.map(string.trim)
+      |> list.filter(fn(line) { line != "" })
+    Error(_) -> []
+  }
+
+  let legacy_test_dirs = case include_tests {
+    True -> []
+    False ->
+      case simplifile.read_directory(at: out_dir) {
+        Ok(entries) ->
+          list.filter(entries, fn(entry) {
+            case string.starts_with(entry, "test_") {
+              False -> False
+              True -> {
+                let entry_dir = filepath.join(out_dir, entry)
+                let pkg_file = filepath.join(entry_dir, "moon.pkg")
+                simplifile.is_directory(entry_dir) == Ok(True)
+                && simplifile.is_file(pkg_file) == Ok(True)
+              }
+            }
+          })
+        Error(_) -> []
+      }
+  }
+
+  let protected =
+    ["", ".", "..", "_build", ".mooncakes", "gprelude", ".gekko_generated"]
+    |> set.from_list
+  let keep = set.union(protected, set.from_list(new_generated_dirs))
+
+  let stale =
+    list.append(from_manifest, legacy_test_dirs)
+    |> set.from_list
+    |> set.to_list
+    |> list.filter(fn(dir) { !set.contains(keep, dir) })
+
+  use _ <- result.try(
+    list.try_each(stale, fn(dir) {
+      let path = filepath.join(out_dir, dir)
+      case simplifile.is_directory(path) {
+        Ok(True) ->
+          simplifile.delete(file_or_dir_at: path)
+          |> result.map_error(fn(err) {
+            "Failed to clean stale package directory "
+            <> path
+            <> ": "
+            <> simplifile.describe_error(err)
+          })
+        _ -> Ok(Nil)
+      }
+    }),
+  )
+
+  let manifest_body = case new_generated_dirs {
+    [] -> ""
+    _ -> string.join(new_generated_dirs, "\n") <> "\n"
+  }
+  write_text_file(manifest_path, manifest_body)
 }
 
 fn merge_package_interfaces(

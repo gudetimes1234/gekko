@@ -319,9 +319,10 @@ fn locate_mbti_source(
           {
             True, Ok(found) -> Ok(found)
             _, _ -> {
-              use _ <- result.try(workspace.transpile_project(
+              use _ <- result.try(workspace.transpile_project_with_tests(
                 project_root,
                 out_dir,
+                False,
               ))
               let info_res =
                 cmd.run(command: "moon", args: ["info"], cwd: out_dir)

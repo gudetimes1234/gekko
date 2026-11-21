@@ -220,7 +220,23 @@ pub fn extract_project_interface(
   project_root: String,
   staging_dir: String,
 ) -> Result(PackageInterface, String) {
-  extract_package_interface_with_deps(project_root, project_root, staging_dir)
+  extract_project_interface_with_options(project_root, staging_dir, True)
+}
+
+/// Stage a transformed copy of `project_root` inside `staging_dir` (optionally
+/// including `test/` modules and `[dev-dependencies]`), run
+/// `gleam export package-interface --out interface.json`, and decode the result.
+pub fn extract_project_interface_with_options(
+  project_root: String,
+  staging_dir: String,
+  include_tests: Bool,
+) -> Result(PackageInterface, String) {
+  extract_package_interface_impl(
+    project_root,
+    project_root,
+    staging_dir,
+    include_tests,
+  )
 }
 
 /// Stage `pkg_root` inside `staging_dir` while resolving `manifest.toml` and
@@ -232,10 +248,25 @@ pub fn extract_package_interface_with_deps(
   staging_dir: String,
 ) -> Result(PackageInterface, String) {
   let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
+  extract_package_interface_impl(pkg_root, deps_root, staging_dir, is_root_pkg)
+}
+
+fn extract_package_interface_impl(
+  pkg_root: String,
+  deps_root: String,
+  staging_dir: String,
+  include_tests: Bool,
+) -> Result(PackageInterface, String) {
+  let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
   use _ <- result.try(prepare_staging_dir(staging_dir))
-  use _ <- result.try(stage_toml_and_deps(pkg_root, deps_root, staging_dir))
+  use _ <- result.try(stage_toml_and_deps(
+    pkg_root,
+    deps_root,
+    staging_dir,
+    include_tests,
+  ))
   use _ <- result.try(stage_sources(pkg_root, staging_dir))
-  use staged_test_mods <- result.try(case is_root_pkg {
+  use staged_test_mods <- result.try(case is_root_pkg && include_tests {
     True -> stage_test_sources(pkg_root, staging_dir)
     False -> Ok([])
   })
@@ -297,6 +328,7 @@ fn stage_toml_and_deps(
   pkg_root: String,
   deps_root: String,
   staging_dir: String,
+  include_tests: Bool,
 ) -> Result(Nil, String) {
   let abs_pkg = resolve_abs_dir(pkg_root)
   let abs_deps = resolve_abs_dir(deps_root)
@@ -344,11 +376,12 @@ fn stage_toml_and_deps(
 
   case is_dep_staging {
     False -> {
-      let rewritten_toml =
-        toml_content
-        |> resolve_toml_relative_paths(abs_pkg)
-        |> merge_dev_dependencies_into_dependencies
-        |> override_gleam_toml_internal_modules
+      let base_toml = resolve_toml_relative_paths(toml_content, abs_pkg)
+      let with_deps_toml = case include_tests {
+        True -> merge_dev_dependencies_into_dependencies(base_toml)
+        False -> base_toml
+      }
+      let rewritten_toml = override_gleam_toml_internal_modules(with_deps_toml)
       use _ <- result.try(
         simplifile.write(to: dest_gleam_toml, contents: rewritten_toml)
         |> result.map_error(fn(err) {
