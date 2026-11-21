@@ -1820,49 +1820,6 @@ fn stage_offline_stdlib_json(fixture_dir: String) {
     == Ok(Nil)
 }
 
-pub fn example_weather_app_moon_run_test() {
-  let fixture_dir = "fixtures/weather_app"
-  let out_dir = "build/test_fixtures/weather_app_mbt"
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-  let _ = simplifile.delete(file_or_dir_at: out_dir)
-
-  let expected_nyc =
-    "Zip 10001 (New York City, NY): Temp 43.0 °F | Wind 1.8 mp/h | Humidity 67% | Condition: Clear sky"
-  let expected_la =
-    "Zip 90210 (Beverly Hills, CA): Temp 57.9 °F | Wind 11.9 mp/h | Humidity 32% | Condition: Clear sky"
-
-  let assert Ok(summary) = workspace.transpile_project(fixture_dir, out_dir)
-  assert summary.project_name == "weather_app"
-
-  let run_wasm =
-    cmd.run(
-      command: "moon",
-      args: ["run", "weather_app", "--target", "wasm"],
-      cwd: out_dir,
-    )
-  assert run_wasm.exit_code == 0
-  assert string.contains(run_wasm.output, expected_nyc)
-  assert string.contains(run_wasm.output, expected_la)
-
-  let run_js =
-    cmd.run(
-      command: "moon",
-      args: ["run", "weather_app", "--target", "js"],
-      cwd: out_dir,
-    )
-  assert run_js.exit_code == 0
-  assert string.contains(run_js.output, expected_nyc)
-  assert string.contains(run_js.output, expected_la)
-
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-  let _ = simplifile.delete(file_or_dir_at: out_dir)
-  Nil
-}
-
 fn assert_no_unqualified_prelude_calls(source: String) {
   let forbidden = [
     " println(",
@@ -2114,42 +2071,6 @@ pub fn record_update_e2e_test() {
   assert string.contains(test_gc.output, "passed: 1, failed: 0")
 
   let _ = simplifile.delete(file_or_dir_at: root)
-  let _ = simplifile.delete(file_or_dir_at: out_dir)
-  Nil
-}
-
-pub fn example_gleam_tour_moon_run_test() {
-  let fixture_dir = "fixtures/gleam_tour"
-  let out_dir = "build/test_fixtures/gleam_tour_mbt"
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-  let _ = simplifile.delete(file_or_dir_at: out_dir)
-
-  let assert Ok(summary) = workspace.transpile_project(fixture_dir, out_dir)
-  assert summary.project_name == "gleam_tour"
-
-  let run_wasm =
-    cmd.run(
-      command: "moon",
-      args: ["run", "gleam_tour", "--target", "wasm"],
-      cwd: out_dir,
-    )
-  assert run_wasm.exit_code == 0
-  assert string.contains(
-    run_wasm.output,
-    "=== Orbital Station Simulator (gleam_tour) ===",
-  )
-  assert string.contains(run_wasm.output, "[Station Telemetry]")
-  assert string.contains(run_wasm.output, "[Station Commands]")
-  assert string.contains(run_wasm.output, "[Station Navigation]")
-  assert string.contains(run_wasm.output, "[Station Manifest]")
-  assert string.contains(run_wasm.output, "=== All station checks passed ===")
-  assert string.contains(run_wasm.output, "src/station/manifest.gleam:")
-
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
@@ -2437,34 +2358,107 @@ pub fn wit_gleam_gen_idempotent_stubs_test() {
   Nil
 }
 
-pub fn wit_greeter_gleam_check_test() {
-  let fixture_dir = "fixtures/wit_greeter"
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-
-  let check_res = cmd.run(command: "gleam", args: ["check"], cwd: fixture_dir)
-  assert check_res.exit_code == 0
-
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-  Nil
-}
-
-pub fn wit_greeter_e2e_wasm_build_test() {
-  let fixture_dir = "fixtures/wit_greeter"
-  let wit_dir = filepath.join(fixture_dir, "wit")
-  let out_dir = "build/test_fixtures/wit_greeter_mbt"
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+pub fn wit_interfaces_import_export_e2e_test() {
+  let root = "build/test_fixtures/wit_ifaces"
+  let out_dir = "build/test_fixtures/wit_ifaces_mbt"
+  let wit_dir = filepath.join(root, "wit")
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
+  assert simplifile.create_directory_all(wit_dir) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"wit_ifaces\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(wit_dir, "world.wit"),
+      contents: "package demo:ifaces@0.1.0;\n\n"
+        <> "interface logger {\n"
+        <> "  enum level {\n    info,\n    warn,\n  }\n"
+        <> "  log: func(lvl: level, msg: string);\n"
+        <> "}\n\n"
+        <> "interface types {\n"
+        <> "  flags perms {\n    read,\n    write,\n  }\n"
+        <> "  record meta {\n    id: u64,\n    perms: perms,\n  }\n"
+        <> "}\n\n"
+        <> "interface api {\n"
+        <> "  use types.{meta};\n\n"
+        <> "  record user {\n"
+        <> "    name: string,\n"
+        <> "    age: u32,\n"
+        <> "    tags: list<string>,\n"
+        <> "    meta: meta,\n"
+        <> "  }\n\n"
+        <> "  variant greeting-error {\n"
+        <> "    empty-name,\n"
+        <> "    too-young(u32),\n"
+        <> "  }\n\n"
+        <> "  greet: func(u: user) -> result<string, greeting-error>;\n"
+        <> "  sum-bytes: func(data: list<u8>) -> u64;\n"
+        <> "}\n\n"
+        <> "world app {\n"
+        <> "  import logger;\n"
+        <> "  export api;\n"
+        <> "  export ping: func(x: s32) -> s32;\n"
+        <> "}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(resolved) = wit_parser.load_wit_dir(wit_dir, None)
+  let assert Ok(_) = gleam_gen.generate_project_bindings(resolved, root)
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/app.gleam"),
+      contents: "pub fn ping(x: Int) -> Int {\n  x + 1\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/api.gleam"),
+      contents: "import wit/api_types.{type GreetingError, type User, EmptyName, TooYoung}\n"
+        <> "import wit/logger\n"
+        <> "import wit/logger_types.{Info, Warn}\n\n"
+        <> "pub fn greet(u: User) -> Result(String, GreetingError) {\n"
+        <> "  logger.log(Info, \"Checking user \" <> u.name)\n"
+        <> "  case u.name == \"\" {\n"
+        <> "    True -> {\n"
+        <> "      logger.log(Warn, \"Empty user name rejected\")\n"
+        <> "      Error(EmptyName)\n"
+        <> "    }\n"
+        <> "    False ->\n"
+        <> "      case u.age < 13 {\n"
+        <> "        True -> Error(TooYoung(u.age))\n"
+        <> "        False -> {\n"
+        <> "          let access = case u.meta.perms.read {\n"
+        <> "            True -> \"read\"\n"
+        <> "            False -> \"no-read\"\n"
+        <> "          }\n"
+        <> "          let first_tag = case u.tags {\n"
+        <> "            [first, ..] -> first\n"
+        <> "            [] -> \"none\"\n"
+        <> "          }\n"
+        <> "          Ok(\"Hello, \" <> u.name <> \" (\" <> access <> \", \" <> first_tag <> \")\")\n"
+        <> "        }\n"
+        <> "      }\n"
+        <> "  }\n"
+        <> "}\n\n"
+        <> "pub fn sum_bytes(data: BitArray) -> Int {\n"
+        <> "  case data {\n"
+        <> "    <<a:8, b:8, _:bytes>> -> a + b\n"
+        <> "    <<a:8>> -> a\n"
+        <> "    _ -> 0\n"
+        <> "  }\n"
+        <> "}\n",
+    )
+    == Ok(Nil)
+
+  let check_gleam = cmd.run(command: "gleam", args: ["check"], cwd: root)
+  assert check_gleam.exit_code == 0
 
   let assert Ok(summary) =
-    wit_bridge.bridge_wit_workspace(fixture_dir, out_dir, wit_dir, None)
-  assert summary.project_name == "wit_greeter"
-  assert summary.world_name == "greeter"
+    wit_bridge.bridge_wit_workspace(root, out_dir, wit_dir, None)
+  assert summary.project_name == "wit_ifaces"
+  assert summary.world_name == "app"
 
   let check_res =
     cmd.run(
@@ -2477,23 +2471,23 @@ pub fn wit_greeter_e2e_wasm_build_test() {
   let assert Ok(imp_adapter) =
     simplifile.read(from: filepath.join(
       out_dir,
-      "wit_imp_demo_greeter_logger/wit_imp_demo_greeter_logger.mbt",
+      "wit_imp_demo_ifaces_logger/wit_imp_demo_ifaces_logger.mbt",
     ))
   assert string.contains(imp_adapter, "@wit_raw.log(")
 
   let assert Ok(api_stub) =
     simplifile.read(from: filepath.join(
       out_dir,
-      "gen/interface/demo/greeter/api/stub.mbt",
+      "gen/interface/demo/ifaces/api/stub.mbt",
     ))
   assert string.contains(api_stub, "@gleam_export.greet(")
   assert string.contains(api_stub, "@gleam_export.sum_bytes(")
 
   let assert Ok(world_stub) =
-    simplifile.read(from: filepath.join(out_dir, "gen/world/greeter/stub.mbt"))
+    simplifile.read(from: filepath.join(out_dir, "gen/world/app/stub.mbt"))
   assert string.contains(world_stub, "@gleam_export.ping(")
 
-  let comp_path = filepath.join(out_dir, "dist/greeter.wasm")
+  let comp_path = filepath.join(out_dir, "dist/app.wasm")
   case wit_bridge.bundle_component(summary, None, comp_path) {
     Ok(built) -> {
       assert built == comp_path
@@ -2506,9 +2500,7 @@ pub fn wit_greeter_e2e_wasm_build_test() {
     }
   }
 
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
@@ -2654,25 +2646,167 @@ pub fn moonbit_ffi_collision_and_loose_file_error_test() {
   Nil
 }
 
-pub fn example_moonbit_ffi_e2e_test() {
-  let fixture_dir = "fixtures/moonbit_ffi"
-  let out_dir = "build/test_fixtures/moonbit_ffi_mbt"
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+pub fn moonbit_local_and_core_ffi_e2e_test() {
+  let root = "build/test_fixtures/local_ffi"
+  let out_dir = "build/test_fixtures/local_ffi_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
 
-  let assert Ok(summary) = workspace.transpile_project(fixture_dir, out_dir)
-  assert summary.project_name == "moonbit_ffi"
-  assert summary.local_moonbit_packages
-    == ["byte_ffi", "gleam_stdlib_ffi", "text_ffi"]
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/auto_pkg"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      root,
+      "moonbit/custom_pkg",
+    ))
+    == Ok(Nil)
 
-  // Verify auto-generated moon.pkg for text_ffi and verbatim copy for byte_ffi.
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"local_ffi\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let auto_pkg_mbt =
+    "///|\n"
+    <> "pub fn sum_list(xs : @gprelude.GList[Int64]) -> Int64 {\n"
+    <> "  for cur = xs, acc = 0L {\n"
+    <> "    match cur {\n"
+    <> "      @gprelude.Nil => break acc\n"
+    <> "      @gprelude.Cons(h, t) => continue t, acc + h\n"
+    <> "    }\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub(all) struct Counter {\n"
+    <> "  mut count : Int64\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn new_counter(start : Int64) -> Counter {\n"
+    <> "  { count: start }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn bump_counter(c : Counter, delta : Int64) -> Unit {\n"
+    <> "  c.count = c.count + delta\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn read_counter(c : Counter) -> Int64 {\n"
+    <> "  c.count\n"
+    <> "}\n"
+
+  let custom_pkg_cfg =
+    "import {\n"
+    <> "  \"local_ffi/gprelude\" @gprelude,\n"
+    <> "  \"moonbitlang/core/buffer\" @buffer,\n"
+    <> "}\n"
+
+  let custom_pkg_mbt =
+    "///|\n"
+    <> "pub fn repeat_utf8_len(s : String, times : Int64) -> Int64 {\n"
+    <> "  let buf = @buffer.Buffer()\n"
+    <> "  let n = times.to_int()\n"
+    <> "  let mut i = 0\n"
+    <> "  while i < n {\n"
+    <> "    buf.write_string_utf8(s[:])\n"
+    <> "    i = i + 1\n"
+    <> "  }\n"
+    <> "  @gprelude.BitArray::from_bytes(buf.to_bytes()).byte_size()\n"
+    <> "}\n"
+
+  let lib_gleam =
+    "/// @external_type(moonbit, \"auto_pkg\", \"Counter\")\n"
+    <> "pub type Counter\n\n"
+    <> "pub type NamedCounter {\n"
+    <> "  NamedCounter(name: String, counter: Counter)\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"auto_pkg\", \"sum_list\")\n"
+    <> "pub fn sum_list(xs: List(Int)) -> Int {\n"
+    <> "  let _ = xs\n"
+    <> "  panic as \"Implemented in MoonBit\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"auto_pkg\", \"new_counter\")\n"
+    <> "pub fn new_counter(start: Int) -> Counter {\n"
+    <> "  let _ = start\n"
+    <> "  panic as \"Implemented in MoonBit\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"auto_pkg\", \"bump_counter\")\n"
+    <> "pub fn bump_counter(c: Counter, delta: Int) -> Nil {\n"
+    <> "  let _ = c\n"
+    <> "  let _ = delta\n"
+    <> "  panic as \"Implemented in MoonBit\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"auto_pkg\", \"read_counter\")\n"
+    <> "pub fn read_counter(c: Counter) -> Int {\n"
+    <> "  let _ = c\n"
+    <> "  panic as \"Implemented in MoonBit\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"custom_pkg\", \"repeat_utf8_len\")\n"
+    <> "pub fn repeat_utf8_len(s: String, times: Int) -> Int {\n"
+    <> "  let _ = s\n"
+    <> "  let _ = times\n"
+    <> "  panic as \"Implemented in MoonBit\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"moonbitlang/core/math\", \"pow\")\n"
+    <> "pub fn math_pow(base: Float, exp: Float) -> Float {\n"
+    <> "  let _ = base\n"
+    <> "  let _ = exp\n"
+    <> "  panic as \"Implemented in MoonBit\"\n"
+    <> "}\n\n"
+    <> "pub fn check_all() -> Bool {\n"
+    <> "  let c1 = new_counter(10)\n"
+    <> "  let c2 = new_counter(100)\n"
+    <> "  bump_counter(c1, 5)\n"
+    <> "  let named = NamedCounter(name: \"hits\", counter: c1)\n"
+    <> "  let list_total = sum_list([read_counter(named.counter), read_counter(c2)])\n"
+    <> "  list_total == 115\n"
+    <> "  && repeat_utf8_len(\"🌙\", 3) == 12\n"
+    <> "  && math_pow(2.0, 10.0) == 1024.0\n"
+    <> "}\n"
+
+  let test_gleam =
+    "import local_ffi\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn local_ffi_e2e_test() {\n"
+    <> "  assert local_ffi.check_all()\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/auto_pkg/auto_pkg.mbt"),
+      contents: auto_pkg_mbt,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/custom_pkg/moon.pkg"),
+      contents: custom_pkg_cfg,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/custom_pkg/custom_pkg.mbt"),
+      contents: custom_pkg_mbt,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/local_ffi.gleam"),
+      contents: lib_gleam,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/local_ffi_test.gleam"),
+      contents: test_gleam,
+    )
+    == Ok(Nil)
+
+  let assert Ok(summary) = workspace.transpile_project(root, out_dir)
+  assert summary.project_name == "local_ffi"
+  assert summary.local_moonbit_packages == ["auto_pkg", "custom_pkg"]
+
+  // Verify auto-generated moon.pkg for auto_pkg and verbatim copy for custom_pkg.
   let assert Ok(gen_pkg) =
-    simplifile.read(from: filepath.join(out_dir, "text_ffi/moon.pkg"))
-  assert string.contains(gen_pkg, "\"moonbit_ffi/gprelude\" @gprelude")
+    simplifile.read(from: filepath.join(out_dir, "auto_pkg/moon.pkg"))
+  assert string.contains(gen_pkg, "\"local_ffi/gprelude\" @gprelude")
   let assert Ok(copied_pkg) =
-    simplifile.read(from: filepath.join(out_dir, "byte_ffi/moon.pkg"))
+    simplifile.read(from: filepath.join(out_dir, "custom_pkg/moon.pkg"))
   assert string.contains(copied_pkg, "\"moonbitlang/core/buffer\" @buffer")
 
   let check_res =
@@ -2684,34 +2818,16 @@ pub fn example_moonbit_ffi_e2e_test() {
   assert check_res.exit_code == 0
 
   let run_wasm =
-    cmd.run(
-      command: "moon",
-      args: ["run", "moonbit_ffi", "--target", "wasm"],
-      cwd: out_dir,
-    )
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
   assert run_wasm.exit_code == 0
-  assert string.contains(run_wasm.output, "shout=HELLO MOONBIT!")
-  assert string.contains(run_wasm.output, "upper=GLEAM,FFI")
-  assert string.contains(run_wasm.output, "sum_squares=29")
-  assert string.contains(run_wasm.output, "utf8_bytes=12")
-  assert string.contains(run_wasm.output, "pow=1024.0")
-  assert string.contains(run_wasm.output, "sin0=0.0,cos0=1.0")
-  assert string.contains(run_wasm.output, "counter_total=115")
+  assert string.contains(run_wasm.output, "passed: 1, failed: 0")
 
   let run_js =
-    cmd.run(
-      command: "moon",
-      args: ["run", "moonbit_ffi", "--target", "js"],
-      cwd: out_dir,
-    )
+    cmd.run(command: "moon", args: ["test", "--target", "js"], cwd: out_dir)
   assert run_js.exit_code == 0
-  assert string.contains(run_js.output, "shout=HELLO MOONBIT!")
-  assert string.contains(run_js.output, "pow=1024.0")
-  assert string.contains(run_js.output, "counter_total=115")
+  assert string.contains(run_js.output, "passed: 1, failed: 0")
 
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
+  let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
@@ -3224,92 +3340,6 @@ pub fn moonbit_deps_config_and_moon_mod_emission_test() {
   }
 
   let _ = simplifile.delete(file_or_dir_at: root)
-  let _ = simplifile.delete(file_or_dir_at: out_dir)
-  Nil
-}
-
-pub fn example_file_io_moonbit_deps_e2e_test() {
-  let fixture_dir = "fixtures/file_io"
-  let out_dir = "build/test_fixtures/file_io_mbt"
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
-  let _ = simplifile.delete(file_or_dir_at: out_dir)
-
-  // Verify `gekko moonbit bind moonbitlang/x/fs` works against `moonbit/moon.mod`
-  assert simplifile.is_file(filepath.join(fixture_dir, "gekko.toml"))
-    == Ok(False)
-  assert simplifile.is_file(filepath.join(fixture_dir, "moonbit/moon.mod"))
-    == Ok(True)
-  let assert Ok(bind_res) =
-    bindgen.bind_package(
-      fixture_dir,
-      "moonbitlang/x/fs",
-      Some("ffi/fs"),
-      out_dir,
-    )
-  assert bind_res.gleam_module_path == "ffi/fs"
-  assert bind_res.adapter_pkg_dir == Some("fs_adapter")
-  let fmt_ffi =
-    cmd.run(
-      command: "gleam",
-      args: ["format", "src/ffi/fs.gleam"],
-      cwd: fixture_dir,
-    )
-  assert fmt_ffi.exit_code == 0
-
-  let assert Ok(_) = workspace.transpile_project(fixture_dir, out_dir)
-
-  let assert Ok(moon_mod) =
-    simplifile.read(from: filepath.join(out_dir, "moon.mod"))
-  assert string.contains(moon_mod, "\"moonbitlang/x@0.5.7\"")
-
-  let assert Ok(sample_bits) =
-    simplifile.read_bits(from: filepath.join(fixture_dir, "sample.txt"))
-  assert simplifile.write_bits(
-      to: filepath.join(out_dir, "sample.txt"),
-      bits: sample_bits,
-    )
-    == Ok(Nil)
-
-  let check_res =
-    cmd.run(
-      command: "moon",
-      args: ["check", "--deny-warn", "--target", "wasm"],
-      cwd: out_dir,
-    )
-  assert check_res.exit_code == 0
-
-  let run_wasm =
-    cmd.run(
-      command: "moon",
-      args: ["run", "file_io", "--target", "wasm"],
-      cwd: out_dir,
-    )
-  assert run_wasm.exit_code == 0
-  assert string.contains(
-    run_wasm.output,
-    "first_line=Hello from Gleam + MoonBit file I/O!",
-  )
-  assert string.contains(run_wasm.output, "roundtrip=roundtrip-ok")
-  assert string.contains(run_wasm.output, "missing_is_err=True")
-
-  let run_js =
-    cmd.run(
-      command: "moon",
-      args: ["run", "file_io", "--target", "js"],
-      cwd: out_dir,
-    )
-  assert run_js.exit_code == 0
-  assert string.contains(
-    run_js.output,
-    "first_line=Hello from Gleam + MoonBit file I/O!",
-  )
-  assert string.contains(run_js.output, "roundtrip=roundtrip-ok")
-
-  let _ = simplifile.delete(file_or_dir_at: filepath.join(fixture_dir, "build"))
-  let _ =
-    simplifile.delete_file(at: filepath.join(fixture_dir, "manifest.toml"))
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }

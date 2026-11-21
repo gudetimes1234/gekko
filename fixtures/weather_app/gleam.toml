@@ -1,6 +1,0 @@
-name = "weather_app"
-version = "0.1.0"
-
-[dependencies]
-gleam_stdlib = { path = "../../../gleam_stdlib" }
-gleam_json = { path = "../../../gleam_json" }
