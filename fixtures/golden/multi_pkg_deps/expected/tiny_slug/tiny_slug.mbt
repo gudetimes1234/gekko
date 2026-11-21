@@ -1,6 +1,6 @@
 ///|
-pub fn slugify(text : String) -> String {
-  @string.replace(@string.lowercase(@string.trim(text)), " ", "-")
+pub fn slugify(title : String) -> String {
+  @text.trim_lower_dash(title)
 }
 
 ///|

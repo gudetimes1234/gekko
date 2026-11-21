@@ -1,11 +1,8 @@
-import gleam/string
+import mini_ffi/text
 
 /// Turn a title string into a URL-friendly slug.
-pub fn slugify(text: String) -> String {
-  text
-  |> string.trim
-  |> string.lowercase
-  |> string.replace(each: " ", with: "-")
+pub fn slugify(title: String) -> String {
+  text.trim_lower_dash(title)
 }
 
 /// Reverse a list, falling back to pure Gleam when Erlang BIFs are unavailable.

@@ -13,6 +13,14 @@ gleam format --check src test
 gleam test
 ```
 
+For optional full-ecosystem regression verification across `gekko_gleam_stdlib`, `gekko_gleam_json`, and `gekko_examples`:
+
+```sh
+./scripts/test_ecosystem.sh
+```
+
+Override repository locations via `GEKKO_STDLIB_DIR`, `GEKKO_JSON_DIR`, and `GEKKO_EXAMPLES_DIR` (or refs via `GEKKO_STDLIB_REF`, `GEKKO_JSON_REF`, `GEKKO_EXAMPLES_REF`); unset variables clone over HTTPS into a temporary directory.
+
 ## Key Conventions & Invariants
 
 - **Prelude sync**: `runtime/prelude/gprelude.mbt` and `src/emit/prelude_runtime.gleam` must remain byte-identical. This is enforced by `prelude_runtime_matches_disk_files_test`.

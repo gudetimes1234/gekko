@@ -1,9 +1,8 @@
-name = "stdlib_and_deps"
+name = "multi_pkg_deps"
 version = "0.1.0"
 
 [dependencies]
-gleam_stdlib = { path = "../../../../gleam_stdlib" }
-gleam_json = { path = "../../../../gleam_json" }
+mini_ffi = { path = "vendor/mini_ffi" }
 tiny_slug = { path = "vendor/tiny_slug" }
 
 [dev-dependencies]
