@@ -12,6 +12,7 @@ import gleam/string
 import index/symbol_table
 import lower/desugar
 import lower/tco
+import lower/validate
 import project/ffi_config
 import project/interface.{type PackageInterface, PackageInterface}
 import project/loader.{type LoadedDependency}
@@ -105,6 +106,8 @@ pub fn transpile_project(
       Some(merged_iface),
       ffi_overrides,
     )
+
+  use _ <- result.try(validate_all_int_literals(all_modules, table))
 
   use _ <- result.try(
     simplifile.create_directory_all(out_dir)
@@ -254,6 +257,31 @@ fn calls_gleeunit_main(stmts: List(glance.Statement)) -> Bool {
       )),
     ] -> True
     _ -> False
+  }
+}
+
+fn validate_all_int_literals(
+  all_modules: List(#(String, String, glance.Module, PrepassResult)),
+  table: symbol_table.SymbolTable,
+) -> Result(Nil, String) {
+  let errors =
+    list.filter_map(all_modules, fn(entry) {
+      let #(pkg_name, mod_name, ast_mod, _) = entry
+      case
+        validate.validate_module_int_literals_in_package(
+          pkg_name,
+          ast_mod,
+          table,
+          mod_name,
+        )
+      {
+        Ok(Nil) -> Error(Nil)
+        Error(err) -> Ok(err)
+      }
+    })
+  case errors {
+    [] -> Ok(Nil)
+    _ -> Error(string.join(errors, "\n"))
   }
 }
 

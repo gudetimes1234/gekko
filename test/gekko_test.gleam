@@ -17,6 +17,7 @@ import lower/ir
 import lower/mangle
 import lower/pattern
 import lower/tco
+import lower/validate
 import moonbit/bindgen
 import moonbit/mbti
 import project/cmd
@@ -4325,6 +4326,156 @@ pub fn int_div_rem_int64_min_e2e_test() {
     assert run.exit_code == 0
     assert string.contains(run.output, "passed: 1, failed: 0")
   })
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
+pub fn validate_int_literals_unit_test() {
+  assert validate.parse_gleam_int_literal("0") == Ok(0)
+  assert validate.parse_gleam_int_literal("9_223_372_036_854_775_807")
+    == Ok(validate.int64_max)
+  assert validate.parse_gleam_int_literal("-9_223_372_036_854_775_808")
+    == Ok(validate.int64_min)
+  assert validate.parse_gleam_int_literal("0x7fff_ffff_ffff_ffff")
+    == Ok(validate.int64_max)
+  assert validate.parse_gleam_int_literal("-0x8000_0000_0000_0000")
+    == Ok(validate.int64_min)
+  assert validate.parse_gleam_int_literal("0o777777777777777777777")
+    == Ok(validate.int64_max)
+  assert validate.parse_gleam_int_literal("-0o1000000000000000000000")
+    == Ok(validate.int64_min)
+
+  let ok_src =
+    "pub const c_min = -9_223_372_036_854_775_808\n"
+    <> "pub const c_max = 9_223_372_036_854_775_807\n"
+    <> "pub fn boundaries(x: Int) -> Int {\n"
+    <> "  let _ = 0\n"
+    <> "  let _ = 9223372036854775807\n"
+    <> "  let _ = 9_223_372_036_854_775_807\n"
+    <> "  let _ = -9223372036854775808\n"
+    <> "  let _ = -9_223_372_036_854_775_808\n"
+    <> "  let _ = 0x7fff_ffff_ffff_ffff\n"
+    <> "  let _ = -0x8000_0000_0000_0000\n"
+    <> "  let _ = 0o777777777777777777777\n"
+    <> "  let _ = -0o1000000000000000000000\n"
+    <> "  let _ = 0b111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111\n"
+    <> "  let _ = -0b1000000000000000000000000000000000000000000000000000000000000000\n"
+    <> "  case x {\n"
+    <> "    -9223372036854775808 -> -1\n"
+    <> "    9223372036854775807 -> 1\n"
+    <> "    _ -> 0\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let assert Ok(#(ok_ast, ok_pre)) = prepass.parse_module("ok_mod", ok_src)
+  let ok_table =
+    symbol_table.index_project(
+      "ok_pkg",
+      [#("ok_mod", ok_ast, ok_pre)],
+      None,
+      dict.new(),
+    )
+  assert validate.validate_module_int_literals(ok_ast, ok_table, "ok_mod")
+    == Ok(Nil)
+
+  let bad_src =
+    "pub const too_big = 9_223_372_036_854_775_808\n"
+    <> "pub fn bad_cases(x: Int, b: BitArray) -> Int {\n"
+    <> "  let _ = 9223372036854775808\n"
+    <> "  let _ = -9223372036854775809\n"
+    <> "  let _ = 0x8000_0000_0000_0000\n"
+    <> "  let _ = -0x8000_0000_0000_0001\n"
+    <> "  let _ = 0o1000000000000000000000\n"
+    <> "  let _ = 0b1000000000000000000000000000000000000000000000000000000000000000\n"
+    <> "  let _ = <<9223372036854775808:size(64)>>\n"
+    <> "  let _ = <<x:size(9223372036854775808)>>\n"
+    <> "  let _ = case b {\n"
+    <> "    <<9223372036854775808:size(8)>> -> 1\n"
+    <> "    <<y:size(9223372036854775808)>> -> y\n"
+    <> "    _ -> 0\n"
+    <> "  }\n"
+    <> "  case x {\n"
+    <> "    9223372036854775808 -> 1\n"
+    <> "    _ -> 0\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let assert Ok(#(bad_ast, bad_pre)) = prepass.parse_module("mod", bad_src)
+  let bad_table =
+    symbol_table.index_project(
+      "app",
+      [#("mod", bad_ast, bad_pre)],
+      None,
+      dict.new(),
+    )
+  let assert Error(err) =
+    validate.validate_module_int_literals(bad_ast, bad_table, "mod")
+
+  let expected_fragments = [
+    "src/mod.gleam:1:21: Integer literal `9_223_372_036_854_775_808`",
+    "src/mod.gleam:3:11: Integer literal `9223372036854775808`",
+    "src/mod.gleam:4:11: Integer literal `-9223372036854775809`",
+    "src/mod.gleam:5:11: Integer literal `0x8000_0000_0000_0000`",
+    "src/mod.gleam:6:11: Integer literal `-0x8000_0000_0000_0001`",
+    "src/mod.gleam:7:11: Integer literal `0o1000000000000000000000`",
+    "src/mod.gleam:8:11: Integer literal `0b1000000000000000000000000000000000000000000000000000000000000000`",
+    "src/mod.gleam:9:13: Integer literal `9223372036854775808`",
+    "src/mod.gleam:10:20: Integer literal `9223372036854775808`",
+    "src/mod.gleam:12:7: Integer literal `9223372036854775808`",
+    "src/mod.gleam:13:14: Integer literal `9223372036854775808`",
+    "src/mod.gleam:17:5: Integer literal `9223372036854775808`",
+  ]
+  list.each(expected_fragments, fn(frag) {
+    assert string.contains(err, frag)
+  })
+
+  let skip_src =
+    "@target(javascript)\n"
+    <> "pub fn js_only() -> Int {\n"
+    <> "  9223372036854775808\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"mbt_ffi\", \"ffi_fn\")\n"
+    <> "pub fn ffi_fallback() -> Int {\n"
+    <> "  9223372036854775808\n"
+    <> "}\n"
+  let assert Ok(#(skip_ast, skip_pre)) =
+    prepass.parse_module("skip_mod", skip_src)
+  let skip_table =
+    symbol_table.index_project(
+      "app",
+      [#("skip_mod", skip_ast, skip_pre)],
+      None,
+      dict.new(),
+    )
+  assert validate.validate_module_int_literals(skip_ast, skip_table, "skip_mod")
+    == Ok(Nil)
+}
+
+pub fn int_literal_range_diagnostic_e2e_test() {
+  let root = "build/test_fixtures/int_lit_range"
+  let out_dir = "build/test_fixtures/int_lit_range_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"int_lit_range\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/int_lit_range.gleam"),
+      contents: "pub fn huge() -> Int {\n  9_223_372_036_854_775_808\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Error(err) = workspace.transpile_project(root, out_dir)
+  assert string.contains(err, "src/int_lit_range.gleam:2:3")
+  assert string.contains(err, "9_223_372_036_854_775_808")
+  assert string.contains(err, "-9223372036854775808..9223372036854775807")
+  assert simplifile.is_directory(out_dir) != Ok(True)
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
