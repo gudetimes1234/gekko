@@ -95,12 +95,80 @@ gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--out <dir>]
 # Generate WIT bindings, type-check, and bundle a Wasm Component (WIT / WASI Preview 2)
 gekko wit gen   [--root <dir>] [--wit <dir>] [--world <name>]
 gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]
-gekko wit build [--root <dir>] [--wit <dir>] [--world <name>] [--output dist/app.wasm]
+gekko wit build [--root <dir>] [--wit <dir>] [--world <name>] [--output <file.wasm> | -o <file.wasm>]
 
 # Show version or help
 gekko --version
 gekko --help
 ```
+
+---
+
+## WebAssembly Components (`gekko wit`)
+
+While `gekko build --target wasm` produces a standalone core WebAssembly module (`wasi_snapshot_preview1` / `pub fn main()`), the `gekko wit` commands compile a Gleam library or application against a [WIT (WebAssembly Interface Types)](https://component-model.bytecodealliance.org/design/wit.html) schema (`wit/*.wit`) and package it into a **WASI 0.2 / Component Model** `.wasm` component with typed host imports and exports.
+
+> **Prerequisites for `gekko wit`:**
+> - `gekko wit gen` requires no external tools (uses `gekko`'s built-in WIT parser).
+> - `gekko wit check` additionally requires [`wit-bindgen`](https://github.com/bytecodealliance/wit-bindgen) (`cargo install wit-bindgen-cli`).
+> - `gekko wit build` additionally requires [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) (`cargo install wasm-tools`).
+
+### The 3-Step `gekko wit` Workflow
+
+Suppose your project has a WIT file at `wit/world.wit` defining a `world` with imported host interfaces (e.g. `import logger;`) and exported interfaces or functions (e.g. `export api;`, `export ping: func(x: s32) -> s32;`):
+
+#### 1. `gekko wit gen` — Generate Gleam types, import bindings, and export stubs
+
+```bash
+gekko wit gen [--root <dir>] [--wit <dir>] [--world <name>]
+```
+
+Parses `<root>/wit/*.wit` (or `--wit <dir>`) and generates Gleam source files under `<root>/src/`:
+
+- **`src/wit/<iface>_types.gleam` *(auto-regenerated — do not edit)*:** Gleam custom types for WIT `record`, `variant`, `enum`, `flags`, and `type` aliases (with WIT `list<u8>` mapped to `BitArray`, `list<T>` to `List(T)`, `option<T>` to `Option(T)`, `result<T, E>` to `Result(T, E)`, integer types to `Int`, and floats to `Float`).
+- **`src/wit/<iface>.gleam` *(auto-regenerated — do not edit)*:** Callable Gleam functions for every WIT `import`, wired via `/// @external(moonbit, ...)` to the generated Canonical ABI import adapters.
+- **`src/<iface>.gleam` / `src/<world>.gleam` *(created once — safe to edit)*:** Starter Gleam modules containing `todo` stubs with the exact function signatures required for each exported WIT interface or world-level function. Re-running `gekko wit gen` after updating your `.wit` file refreshes `src/wit/*.gleam` without overwriting your implementations in `src/<iface>.gleam`.
+
+#### 2. `gekko wit check` — Bridge and type-check the MoonBit + WIT workspace
+
+```bash
+gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]
+```
+
+Validates that your Gleam export implementations match the WIT contract and type-checks the full generated workspace (`<root>/build/moonbit` by default):
+
+1. Transpiles your Gleam project and dependencies to MoonBit.
+2. Runs `wit-bindgen moonbit` on the WIT directory to emit low-level Canonical ABI FFI glue.
+3. Generates MoonBit adapter packages that convert between `gekko`'s Gleam representation (`Int64`, `GList[T]`, `BitArray`, uniform enums) and `wit-bindgen`'s MoonBit types (`Int`, `UInt`, `FixedArray[T]`, `Bytes`, etc.) for both imports and exports.
+4. Runs `moon check --target wasm` to verify that all types and signatures match.
+
+#### 3. `gekko wit build` — Compile and bundle the `.wasm` Component
+
+```bash
+gekko wit build [--root <dir>] [--wit <dir>] [--world <name>] [--output <file.wasm> | -o <file.wasm>]
+```
+
+Performs the full bridge pipeline from `gekko wit check`, then:
+
+1. Compiles the core linear-memory Wasm module via `moon build --target wasm`.
+2. Embeds the WIT component type metadata into the core Wasm binary via `wasm-tools component embed --encoding utf16`.
+3. Wraps the embedded module into a WebAssembly Component via `wasm-tools component new`, writing the final component to `<root>/dist/<world>.wasm` by default (or to the path passed via `--output` / `-o`).
+
+You can inspect the resulting component's typed interface with:
+
+```bash
+wasm-tools component wit dist/<world>.wasm
+```
+
+### Common `gekko wit` Flags
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--root <dir>` | `.` | Path to the Gleam project root directory. |
+| `--wit <dir>` | `<root>/wit` | Directory containing `.wit` files. |
+| `--world <name>` | Only world in `--wit` | Selects which WIT `world` to target when multiple worlds exist. |
+| `--output <file>`, `-o <file>` | `<root>/dist/<world>.wasm` | Output `.wasm` file path for `gekko wit build`. |
+| `--out <dir>` | `<root>/build/moonbit` | Intermediate MoonBit workspace directory (`wit check` / `wit build`). |
 
 ---
 
