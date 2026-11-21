@@ -11,7 +11,7 @@
 - **Keep standard Gleam tooling:** Target projects stay 100% valid Gleam. `gleam check`, `gleam test`, and `gleam format` continue to work without modification.
 - **Target WebAssembly & native via MoonBit:** Leverage MoonBit's compact, fast codegen across `wasm-gc`, linear `wasm`, JavaScript, and native binaries without maintaining a custom code generator or GC runtime.
 - **Zero-boilerplate Wasm Component Model:** Generate WIT bindings via `wit-bindgen moonbit` and bundle WASI Preview 2 components with `wasm-tools`.
-- **Standard library & JSON support:** Transpile MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gleam_json) forks (`/// @external(moonbit, ...)` + `moonbit/` FFI packages backed by `Map`, `@json.Json`, `Bytes`) with faithful Gleam semantics (see [`docs/SEMANTICS.md`](./docs/SEMANTICS.md) for documented differences).
+- **Standard library & JSON support:** Transpile MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gekko_gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gekko_gleam_json) forks (`/// @external(moonbit, ...)` + `moonbit/` FFI packages backed by `Map`, `@json.Json`, `Bytes`) with faithful Gleam semantics (see [`docs/SEMANTICS.md`](./docs/SEMANTICS.md) for documented differences).
 
 ---
 
@@ -36,7 +36,7 @@ flowchart TD
 2. **Uniform Enums & Uniform Getters:** Every Gleam custom type—single-variant or multi-variant—compiles to a MoonBit `pub(all) enum` with synthesized `.field()` getter methods, eliminating constructor/pattern syntax splits and receiver-type ambiguity at dot-access sites.
 3. **Functional `for` Loop TCO:** Self-tail-recursive Gleam functions lower to MoonBit functional `for` state loops (`for a = a, b = b { ... => continue ... }`), guaranteeing $O(1)$ stack space across all MoonBit targets (`wasm-gc`, `wasm`, `js`, `native`).
 4. **Persistent Lists (`GList[T]`):** Gleam `List(a)` maps to a persistent singly-linked `@prelude.GList[T]` (`Nil` / `Cons`) instead of MoonBit's mutable `Array[T]`, preserving $O(1)$ prepends and pattern deconstruction.
-5. **Self-Contained MoonBit Packages (`gleam_stdlib` & `gleam_json`):** Instead of hardcoding standard-library or JSON shims inside the compiler, `gekko` transpiles the MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gleam_json) forks directly, copying their bundled `moonbit/` FFI packages only for leaf `@external(moonbit, ...)` primitives.
+5. **Self-Contained MoonBit Packages (`gleam_stdlib` & `gleam_json`):** Instead of hardcoding standard-library or JSON shims inside the compiler, `gekko` transpiles the MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gekko_gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gekko_gleam_json) forks directly, copying their bundled `moonbit/` FFI packages only for leaf `@external(moonbit, ...)` primitives.
 
 ---
 
@@ -62,8 +62,8 @@ Target projects should point `gleam_stdlib` (and `gleam_json`, if used) at the M
 
 ```toml
 [dependencies]
-gleam_stdlib = { git = "https://github.com/spiral-nights/gleam_stdlib.git", ref = "main" }
-gleam_json = { git = "https://github.com/spiral-nights/gleam_json.git", ref = "main" }
+gleam_stdlib = { git = "https://github.com/spiral-nights/gekko_gleam_stdlib.git", ref = "main" }
+gleam_json = { git = "https://github.com/spiral-nights/gekko_gleam_json.git", ref = "main" }
 ```
 
 Because the package names remain `gleam_stdlib` and `gleam_json`, any transitive Hex dependencies resolve automatically against these forks without version or module conflicts (as long as the fork version satisfies their SemVer constraint).

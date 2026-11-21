@@ -20,13 +20,13 @@ jobs:
       - name: Checkout gleam_stdlib fork
         uses: actions/checkout@v4
         with:
-          repository: spiral-nights/gleam_stdlib
+          repository: spiral-nights/gekko_gleam_stdlib
           path: gleam_stdlib
 
       - name: Checkout gleam_json fork
         uses: actions/checkout@v4
         with:
-          repository: spiral-nights/gleam_json
+          repository: spiral-nights/gekko_gleam_json
           path: gleam_json
 
       - name: Setup Erlang and Gleam
