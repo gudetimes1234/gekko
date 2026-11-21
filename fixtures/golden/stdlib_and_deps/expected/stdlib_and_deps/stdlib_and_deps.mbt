@@ -63,10 +63,10 @@ pub fn decode_user(raw : String) -> Result[User, @json.DecodeError] {
 ///|
 pub fn summarize_scores(raw_values : @gprelude.GList[String]) -> (Int64, Int64) {
   let parsed = @list.sort(@list.filter_map(raw_values, @int.parse), @int.compare)
-  let total = @list.fold(parsed, 0L, fn(acc, x) {
+  let total = @list.fold(parsed, 0L, fn(acc : Int64, x : Int64) {
   (acc + x)
 })
-  let first_large = @result.unwrap(@list.find_map(parsed, fn(x) {
+  let first_large = @result.unwrap(@list.find_map(parsed, fn(x : Int64) {
   @bool.guard_((x < 10L), Err(()), fn() {
   Ok(x)
 })

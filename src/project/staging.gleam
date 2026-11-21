@@ -4,11 +4,17 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
 import glexer
 import glexer/token.{type Token}
 import project/cmd
-import project/interface.{type PackageInterface}
+import project/interface.{
+  type ModuleInterface, type PackageInterface, type ResolvedType, FnType,
+  ModuleInterface, NamedType, PackageInterface, ResolvedConstant,
+  ResolvedFunction, ResolvedParam, ResolvedTypeAlias, ResolvedTypeDef,
+  ResolvedVariant, ResolvedVariantField, TupleType, VariableType,
+}
 import project/prepass
 import project/text_edit.{
   type TextEdit, TextEdit, apply_edits, skip_trivia, token_end,
@@ -39,6 +45,175 @@ pub fn override_gleam_toml_internal_modules(toml_src: String) -> String {
   "internal_modules = []\n" <> string.join(filtered, "\n")
 }
 
+/// Merge `[dev-dependencies]` entries into `[dependencies]` (creating
+/// `[dependencies]` if missing) and remove `[dev-dependencies]` so staged
+/// `test/` modules have access to dev-dependencies during
+/// `gleam export package-interface`.
+pub fn merge_dev_dependencies_into_dependencies(toml_src: String) -> String {
+  let lines = string.split(toml_src, "\n")
+  let #(deps_keys, dev_lines, stripped_lines) =
+    extract_dev_deps_and_keys(lines, 0, set.new(), [], [])
+  let missing_dev_lines =
+    list.filter(dev_lines, fn(line) {
+      case parse_toml_key(line) {
+        Some(key) -> !set.contains(deps_keys, key)
+        None -> False
+      }
+    })
+  case missing_dev_lines {
+    [] -> string.join(stripped_lines, "\n")
+    _ -> insert_into_dependencies_section(stripped_lines, missing_dev_lines)
+  }
+}
+
+fn extract_dev_deps_and_keys(
+  lines: List(String),
+  section: Int,
+  deps_keys: Set(String),
+  rev_dev_lines: List(String),
+  rev_out: List(String),
+) -> #(Set(String), List(String), List(String)) {
+  // section: 0 = other, 1 = [dependencies], 2 = [dev-dependencies]
+  case lines {
+    [] -> #(deps_keys, list.reverse(rev_dev_lines), list.reverse(rev_out))
+    [line, ..rest] -> {
+      let trimmed = string.trim(line)
+      case
+        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+      {
+        True ->
+          case trimmed {
+            "[dependencies]" ->
+              extract_dev_deps_and_keys(rest, 1, deps_keys, rev_dev_lines, [
+                line,
+                ..rev_out
+              ])
+            "[dev-dependencies]" ->
+              extract_dev_deps_and_keys(
+                rest,
+                2,
+                deps_keys,
+                rev_dev_lines,
+                rev_out,
+              )
+            _ ->
+              extract_dev_deps_and_keys(rest, 0, deps_keys, rev_dev_lines, [
+                line,
+                ..rev_out
+              ])
+          }
+        False ->
+          case section {
+            1 -> {
+              let next_keys = case parse_toml_key(trimmed) {
+                Some(k) -> set.insert(deps_keys, k)
+                None -> deps_keys
+              }
+              extract_dev_deps_and_keys(rest, 1, next_keys, rev_dev_lines, [
+                line,
+                ..rev_out
+              ])
+            }
+            2 -> {
+              let next_dev = case
+                trimmed != "" && !string.starts_with(trimmed, "#")
+              {
+                True -> [line, ..rev_dev_lines]
+                False -> rev_dev_lines
+              }
+              extract_dev_deps_and_keys(rest, 2, deps_keys, next_dev, rev_out)
+            }
+            _ ->
+              extract_dev_deps_and_keys(rest, 0, deps_keys, rev_dev_lines, [
+                line,
+                ..rev_out
+              ])
+          }
+      }
+    }
+  }
+}
+
+fn parse_toml_key(line: String) -> Option(String) {
+  let trimmed = string.trim(line)
+  case trimmed == "" || string.starts_with(trimmed, "#") {
+    True -> None
+    False ->
+      case string.split_once(trimmed, "=") {
+        Ok(#(lhs, _)) -> {
+          let key = string.trim(lhs)
+          case key == "" {
+            True -> None
+            False -> Some(key)
+          }
+        }
+        Error(_) -> None
+      }
+  }
+}
+
+fn insert_into_dependencies_section(
+  lines: List(String),
+  dev_lines: List(String),
+) -> String {
+  let #(found, rev_out) = insert_deps_loop(lines, False, False, dev_lines, [])
+  let final_lines = case found {
+    True -> list.reverse(rev_out)
+    False ->
+      list.flatten([
+        list.reverse(rev_out),
+        ["", "[dependencies]", ..dev_lines],
+      ])
+  }
+  string.join(final_lines, "\n")
+}
+
+fn insert_deps_loop(
+  lines: List(String),
+  in_deps: Bool,
+  inserted: Bool,
+  dev_lines: List(String),
+  rev_acc: List(String),
+) -> #(Bool, List(String)) {
+  case lines {
+    [] ->
+      case in_deps && !inserted {
+        True -> #(True, list.append(list.reverse(dev_lines), rev_acc))
+        False -> #(inserted, rev_acc)
+      }
+    [line, ..rest] -> {
+      let trimmed = string.trim(line)
+      case
+        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+      {
+        True ->
+          case in_deps && !inserted {
+            True -> {
+              let with_dev = list.append(list.reverse(dev_lines), rev_acc)
+              insert_deps_loop(
+                rest,
+                trimmed == "[dependencies]",
+                True,
+                dev_lines,
+                [line, ..with_dev],
+              )
+            }
+            False ->
+              insert_deps_loop(
+                rest,
+                trimmed == "[dependencies]",
+                inserted,
+                dev_lines,
+                [line, ..rev_acc],
+              )
+          }
+        False ->
+          insert_deps_loop(rest, in_deps, inserted, dev_lines, [line, ..rev_acc])
+      }
+    }
+  }
+}
+
 /// Stage a transformed copy of `project_root` inside `staging_dir`, run
 /// `gleam export package-interface --out interface.json`, and decode the result.
 pub fn extract_project_interface(
@@ -56,9 +231,14 @@ pub fn extract_package_interface_with_deps(
   deps_root: String,
   staging_dir: String,
 ) -> Result(PackageInterface, String) {
+  let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
   use _ <- result.try(prepare_staging_dir(staging_dir))
   use _ <- result.try(stage_toml_and_deps(pkg_root, deps_root, staging_dir))
   use _ <- result.try(stage_sources(pkg_root, staging_dir))
+  use staged_test_mods <- result.try(case is_root_pkg {
+    True -> stage_test_sources(pkg_root, staging_dir)
+    False -> Ok([])
+  })
 
   let res =
     cmd.run(
@@ -77,7 +257,8 @@ pub fn extract_package_interface_with_deps(
           <> simplifile.describe_error(err)
         }),
       )
-      interface.decode_package_interface(json_str)
+      use iface <- result.try(interface.decode_package_interface(json_str))
+      Ok(remap_staged_test_modules(iface, staged_test_mods))
     }
     code ->
       Error(
@@ -166,6 +347,7 @@ fn stage_toml_and_deps(
       let rewritten_toml =
         toml_content
         |> resolve_toml_relative_paths(abs_pkg)
+        |> merge_dev_dependencies_into_dependencies
         |> override_gleam_toml_internal_modules
       use _ <- result.try(
         simplifile.write(to: dest_gleam_toml, contents: rewritten_toml)
@@ -752,6 +934,170 @@ fn stage_sources(
         })
     }
   })
+}
+
+fn stage_test_sources(
+  project_root: String,
+  staging_dir: String,
+) -> Result(List(String), String) {
+  let test_root = filepath.join(project_root, "test")
+  case simplifile.is_directory(test_root) {
+    Ok(True) -> {
+      let dest_root = filepath.join(staging_dir, "src")
+      use rel_files <- result.try(walk_relative_files(test_root, ""))
+      list.try_fold(rel_files, [], fn(mods_acc, rel_path) {
+        let src_path = filepath.join(test_root, rel_path)
+        let dest_path = filepath.join(dest_root, rel_path)
+        case simplifile.is_file(dest_path) {
+          Ok(True) -> Ok(mods_acc)
+          _ -> {
+            use _ <- result.try(
+              simplifile.create_directory_all(filepath.directory_name(dest_path))
+              |> result.map_error(fn(err) {
+                "Failed to create dir for "
+                <> dest_path
+                <> ": "
+                <> simplifile.describe_error(err)
+              }),
+            )
+            case filepath.extension(rel_path) {
+              Ok("gleam") -> {
+                use content <- result.try(
+                  simplifile.read(src_path)
+                  |> result.map_error(fn(err) {
+                    "Failed to read "
+                    <> src_path
+                    <> ": "
+                    <> simplifile.describe_error(err)
+                  }),
+                )
+                let promoted = promote_private_to_pub(content)
+                use _ <- result.try(
+                  simplifile.write(to: dest_path, contents: promoted)
+                  |> result.map_error(fn(err) {
+                    "Failed to write "
+                    <> dest_path
+                    <> ": "
+                    <> simplifile.describe_error(err)
+                  }),
+                )
+                let mod_name =
+                  rel_path
+                  |> string.replace("\\", "/")
+                  |> filepath.strip_extension
+                Ok([mod_name, ..mods_acc])
+              }
+              _ -> {
+                use _ <- result.try(
+                  simplifile.copy_file(at: src_path, to: dest_path)
+                  |> result.map_error(fn(err) {
+                    "Failed to copy "
+                    <> src_path
+                    <> ": "
+                    <> simplifile.describe_error(err)
+                  }),
+                )
+                Ok(mods_acc)
+              }
+            }
+          }
+        }
+      })
+    }
+    _ -> Ok([])
+  }
+}
+
+pub fn remap_staged_test_modules(
+  iface: PackageInterface,
+  test_mod_names: List(String),
+) -> PackageInterface {
+  case test_mod_names {
+    [] -> iface
+    _ -> {
+      let test_set = set.from_list(test_mod_names)
+      let remapped_modules =
+        dict.fold(iface.modules, dict.new(), fn(acc, mod_name, mod_iface) {
+          let rewritten_mod =
+            rewrite_module_interface_types(mod_iface, test_set)
+          let target_name = case set.contains(test_set, mod_name) {
+            True -> "test/" <> mod_name
+            False -> mod_name
+          }
+          dict.insert(acc, target_name, rewritten_mod)
+        })
+      PackageInterface(..iface, modules: remapped_modules)
+    }
+  }
+}
+
+fn rewrite_module_interface_types(
+  mod_iface: ModuleInterface,
+  test_set: Set(String),
+) -> ModuleInterface {
+  let type_aliases =
+    dict.map_values(mod_iface.type_aliases, fn(_, ta) {
+      ResolvedTypeAlias(..ta, alias: rewrite_resolved_type(ta.alias, test_set))
+    })
+  let types =
+    dict.map_values(mod_iface.types, fn(_, td) {
+      let constructors =
+        list.map(td.constructors, fn(v) {
+          let parameters =
+            list.map(v.parameters, fn(p) {
+              ResolvedVariantField(
+                ..p,
+                type_: rewrite_resolved_type(p.type_, test_set),
+              )
+            })
+          ResolvedVariant(..v, parameters:)
+        })
+      ResolvedTypeDef(..td, constructors:)
+    })
+  let constants =
+    dict.map_values(mod_iface.constants, fn(_, c) {
+      ResolvedConstant(..c, type_: rewrite_resolved_type(c.type_, test_set))
+    })
+  let functions =
+    dict.map_values(mod_iface.functions, fn(_, f) {
+      let parameters =
+        list.map(f.parameters, fn(p) {
+          ResolvedParam(..p, type_: rewrite_resolved_type(p.type_, test_set))
+        })
+      let return = rewrite_resolved_type(f.return, test_set)
+      ResolvedFunction(..f, parameters:, return:)
+    })
+  ModuleInterface(type_aliases:, types:, constants:, functions:)
+}
+
+fn rewrite_resolved_type(
+  ty: ResolvedType,
+  test_set: Set(String),
+) -> ResolvedType {
+  case ty {
+    NamedType(name:, package:, module:, parameters:) -> {
+      let new_module = case set.contains(test_set, module) {
+        True -> "test/" <> module
+        False -> module
+      }
+      NamedType(
+        name:,
+        package:,
+        module: new_module,
+        parameters: list.map(parameters, rewrite_resolved_type(_, test_set)),
+      )
+    }
+    TupleType(elements:) ->
+      TupleType(
+        elements: list.map(elements, rewrite_resolved_type(_, test_set)),
+      )
+    FnType(parameters:, return:) ->
+      FnType(
+        parameters: list.map(parameters, rewrite_resolved_type(_, test_set)),
+        return: rewrite_resolved_type(return, test_set),
+      )
+    VariableType(_) -> ty
+  }
 }
 
 fn walk_relative_files(

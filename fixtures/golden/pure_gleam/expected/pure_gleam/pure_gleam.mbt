@@ -26,7 +26,7 @@ pub fn run_pipeline(x : Int64) -> Int64 {
 
 ///|
 pub fn parse_command(input : String) -> Result[String, String] {
-  with_tag("cmd", fn(prefix) {
+  with_tag("cmd", fn(prefix : String) {
   match input {
     __str_pfx_1 if (@gprelude.string_has_prefix(__str_pfx_1, "cmd:") && ({
   let rest = @gprelude.string_drop_prefix(__str_pfx_1, "cmd:")
@@ -46,7 +46,7 @@ pub fn check_user(user : @models.User, p : @models.Point) -> (Int64, String, @mo
   let promoted = @models.promote(user, 10L)
   let shifted = @models.shift_x(p, 5.0)
   let b = @models.Box(value=42L, label="ok")
-  let h = @models.Hook(cb=fn(n) {
+  let h = @models.Hook(cb=fn(n : Int64) {
   (n + b.value())
 })
   guard h is @models.Hook(cb=f) else { @prelude.abort("let pattern match failed") }

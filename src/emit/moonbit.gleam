@@ -737,26 +737,76 @@ fn emit_stmt(
     IrStmtLet(pattern:, annotation:, value:) -> {
       let #(val_str, ctx1) = emit_expr(value, ctx)
       let #(pat_str, ctx2) = emit_pattern(pattern, ctx1)
-      case pattern_is_irrefutable(pattern) {
-        True -> {
-          let #(ann_str, ctx3) = case annotation {
-            Some(ann) -> {
-              let #(t_str, c) = emit_type(ann, ctx2)
-              #(" : " <> t_str, c)
-            }
-            None -> #("", ctx2)
-          }
-          #(indent <> "let " <> pat_str <> ann_str <> " = " <> val_str, ctx3)
+      let #(ann_str, ctx3) = case annotation {
+        Some(ann) -> {
+          let #(t_str, c) = emit_type(ann, ctx2)
+          #(" : " <> t_str, c)
         }
-        False -> #(
-          indent
-            <> "guard "
-            <> val_str
-            <> " is "
-            <> pat_str
-            <> " else { @prelude.abort(\"let pattern match failed\") }",
-          ctx2,
-        )
+        None -> #("", ctx2)
+      }
+      case is_last {
+        False ->
+          case pattern_is_irrefutable(pattern) {
+            True -> #(
+              indent <> "let " <> pat_str <> ann_str <> " = " <> val_str,
+              ctx3,
+            )
+            False -> #(
+              indent
+                <> "guard "
+                <> paren_if_compound(value, val_str)
+                <> " is "
+                <> pat_str
+                <> " else { @prelude.abort(\"let pattern match failed\") }",
+              ctx3,
+            )
+          }
+        True ->
+          case pattern_is_irrefutable(pattern), pattern {
+            True, IrPatVar(v) -> #(
+              indent
+                <> "let "
+                <> v
+                <> ann_str
+                <> " = "
+                <> val_str
+                <> "\n"
+                <> indent
+                <> v,
+              ctx3,
+            )
+            True, IrPatDiscard | True, IrPatUnit -> #(indent <> val_str, ctx3)
+            True, _ -> #(
+              indent
+                <> "let __gekko_let_val"
+                <> ann_str
+                <> " = "
+                <> val_str
+                <> "\n"
+                <> indent
+                <> "let "
+                <> pat_str
+                <> " = __gekko_let_val\n"
+                <> indent
+                <> "__gekko_let_val",
+              ctx3,
+            )
+            False, _ -> #(
+              indent
+                <> "let __gekko_let_val"
+                <> ann_str
+                <> " = "
+                <> val_str
+                <> "\n"
+                <> indent
+                <> "guard __gekko_let_val is "
+                <> pat_str
+                <> " else { @prelude.abort(\"let pattern match failed\") }\n"
+                <> indent
+                <> "__gekko_let_val",
+              ctx3,
+            )
+          }
       }
     }
 
@@ -772,31 +822,48 @@ fn emit_stmt(
         Some(m) -> emit_expr(m, ctx1)
         None -> #("\"let assert failed\"", ctx1)
       }
-      let #(guard_line, ctx3) = case pattern, guard_condition {
-        IrPatVar(v), Some(cond) -> {
+      let #(guard_line, ret_expr_opt, ctx3) = case
+        is_last,
+        pattern,
+        guard_condition
+      {
+        _, IrPatVar(v), Some(cond) -> {
           let #(cond_str, c) = emit_expr_indented(cond, indent, ctx2)
-          #(
+          let line =
             indent
-              <> "let "
-              <> v
-              <> " = "
-              <> val_str
-              <> "\n"
-              <> indent
-              <> "guard "
-              <> paren_if_match(cond, cond_str)
-              <> " else { @prelude.abort("
-              <> msg_str
-              <> ") }",
-            c,
-          )
+            <> "let "
+            <> v
+            <> " = "
+            <> val_str
+            <> "\n"
+            <> indent
+            <> "guard "
+            <> paren_if_match(cond, cond_str)
+            <> " else { @prelude.abort("
+            <> msg_str
+            <> ") }"
+          #(line, Some(v), c)
         }
-        IrPatVar(v), None -> #(indent <> "let " <> v <> " = " <> val_str, ctx2)
-        IrPatDiscard, None -> #(
-          indent <> "@prelude.ignore(" <> val_str <> ")",
+        _, IrPatVar(v), None -> #(
+          indent <> "let " <> v <> " = " <> val_str,
+          Some(v),
           ctx2,
         )
-        _, _ -> {
+        False, IrPatDiscard, None -> #(
+          indent <> "@prelude.ignore(" <> val_str <> ")",
+          None,
+          ctx2,
+        )
+        True, IrPatDiscard, None ->
+          case post_bindings {
+            [] -> #(indent <> val_str, None, ctx2)
+            _ -> #(
+              indent <> "let __gekko_assert_val = " <> val_str,
+              Some("__gekko_assert_val"),
+              ctx2,
+            )
+          }
+        _, _, _ -> {
           let #(pat_str, c1) = emit_pattern(pattern, ctx2)
           let #(cond_suffix, c2) = case guard_condition {
             Some(cond) -> {
@@ -805,18 +872,36 @@ fn emit_stmt(
             }
             None -> #("", c1)
           }
-          #(
-            indent
-              <> "guard "
-              <> val_str
-              <> " is "
-              <> pat_str
-              <> cond_suffix
-              <> " else { @prelude.abort("
-              <> msg_str
-              <> ") }",
-            c2,
-          )
+          case is_last {
+            False -> #(
+              indent
+                <> "guard "
+                <> paren_if_compound(value, val_str)
+                <> " is "
+                <> pat_str
+                <> cond_suffix
+                <> " else { @prelude.abort("
+                <> msg_str
+                <> ") }",
+              None,
+              c2,
+            )
+            True -> #(
+              indent
+                <> "let __gekko_assert_val = "
+                <> val_str
+                <> "\n"
+                <> indent
+                <> "guard __gekko_assert_val is "
+                <> pat_str
+                <> cond_suffix
+                <> " else { @prelude.abort("
+                <> msg_str
+                <> ") }",
+              Some("__gekko_assert_val"),
+              c2,
+            )
+          }
         }
       }
 
@@ -827,7 +912,11 @@ fn emit_stmt(
           #(indent <> "let " <> name <> " = " <> expr_str, c_next)
         })
 
-      let all = [guard_line, ..binding_lines]
+      let with_bindings = [guard_line, ..binding_lines]
+      let all = case is_last, ret_expr_opt {
+        True, Some(ret_name) -> list.append(with_bindings, [indent <> ret_name])
+        _, _ -> with_bindings
+      }
       #(string.join(all, "\n"), ctx4)
     }
 
@@ -895,10 +984,18 @@ fn emit_expr_indented(
     IrConstructor(module_alias:, target_module:, name:) ->
       emit_constructor_value(module_alias, target_module, name, ctx)
 
-    IrTuple(elements) -> {
-      let #(el_strs, ctx1) = map_acc(elements, ctx, emit_expr)
-      #("(" <> string.join(el_strs, ", ") <> ")", ctx1)
-    }
+    IrTuple(elements) ->
+      case elements {
+        [] -> #("@gprelude.Tuple0", add_gprelude_import(ctx))
+        [el] -> {
+          let #(el_str, ctx1) = emit_expr(el, add_gprelude_import(ctx))
+          #("@gprelude.Tuple1(" <> el_str <> ")", ctx1)
+        }
+        _ -> {
+          let #(el_strs, ctx1) = map_acc(elements, ctx, emit_expr)
+          #("(" <> string.join(el_strs, ", ") <> ")", ctx1)
+        }
+      }
 
     IrTupleIndex(tuple:, index:) -> {
       let #(tuple_str, ctx1) = emit_expr(tuple, ctx)
@@ -939,9 +1036,14 @@ fn emit_expr_indented(
       }
 
     IrFn(params:, return_type:, body:) -> {
+      let inferred_param_types = infer_fn_param_types(params, body)
       let #(param_strs, ctx1) =
         map_acc(params, ctx, fn(p, c) {
-          case p.param_type {
+          let effective_ty = case p.param_type {
+            Some(pt) -> Some(pt)
+            None -> dict.get(inferred_param_types, p.name) |> option.from_result
+          }
+          case effective_ty {
             Some(pt) -> {
               let #(t_str, c_next) = emit_type(pt, c)
               #(p.name <> " : " <> t_str, c_next)
@@ -1164,30 +1266,47 @@ fn emit_call_expr(
       }
     }
 
-    IrModuleRef(module_alias:, target_module:, symbol:) -> {
-      let ordered_args = case
-        lookup_fn_param_labels(Some(target_module), symbol, ctx)
-      {
-        Some(param_labels) -> align_call_args(args, param_labels, False)
-        None -> args
+    IrModuleRef(module_alias:, target_module:, symbol:) ->
+      case target_module == "gleam/string" && symbol == "inspect", args {
+        True, [arg] -> {
+          let #(arg_str, ctx1) = emit_inspect_arg(arg.value, ctx)
+          let #(alias, ctx2) =
+            add_module_import(ctx1, target_module, module_alias)
+          #("@" <> alias <> "." <> symbol <> "(" <> arg_str <> ")", ctx2)
+        }
+        _, _ -> {
+          let ordered_args = case
+            lookup_fn_param_labels(Some(target_module), symbol, ctx)
+          {
+            Some(param_labels) -> align_call_args(args, param_labels, False)
+            None -> args
+          }
+          let #(arg_strs, ctx1) =
+            map_acc(ordered_args, ctx, fn(a, c) { emit_expr(a.value, c) })
+          let args_joined = string.join(arg_strs, ", ")
+          let #(alias, ctx2) =
+            add_module_import(ctx1, target_module, module_alias)
+          #("@" <> alias <> "." <> symbol <> "(" <> args_joined <> ")", ctx2)
+        }
       }
-      let #(arg_strs, ctx1) =
-        map_acc(ordered_args, ctx, fn(a, c) { emit_expr(a.value, c) })
-      let args_joined = string.join(arg_strs, ", ")
-      let #(alias, ctx2) = add_module_import(ctx1, target_module, module_alias)
-      #("@" <> alias <> "." <> symbol <> "(" <> args_joined <> ")", ctx2)
-    }
 
-    IrVar(fn_name) -> {
-      let ordered_args = case lookup_fn_param_labels(None, fn_name, ctx) {
-        Some(param_labels) -> align_call_args(args, param_labels, False)
-        None -> args
+    IrVar(fn_name) ->
+      case ctx.current_module == "gleam/string" && fn_name == "inspect", args {
+        True, [arg] -> {
+          let #(arg_str, ctx1) = emit_inspect_arg(arg.value, ctx)
+          #(fn_name <> "(" <> arg_str <> ")", ctx1)
+        }
+        _, _ -> {
+          let ordered_args = case lookup_fn_param_labels(None, fn_name, ctx) {
+            Some(param_labels) -> align_call_args(args, param_labels, False)
+            None -> args
+          }
+          let #(arg_strs, ctx1) =
+            map_acc(ordered_args, ctx, fn(a, c) { emit_expr(a.value, c) })
+          let args_joined = string.join(arg_strs, ", ")
+          #(fn_name <> "(" <> args_joined <> ")", ctx1)
+        }
       }
-      let #(arg_strs, ctx1) =
-        map_acc(ordered_args, ctx, fn(a, c) { emit_expr(a.value, c) })
-      let args_joined = string.join(arg_strs, ", ")
-      #(fn_name <> "(" <> args_joined <> ")", ctx1)
-    }
 
     _ -> {
       let #(arg_strs, ctx1) =
@@ -1196,6 +1315,63 @@ fn emit_call_expr(
       let #(fn_str, ctx2) = emit_expr(function, ctx1)
       #(wrap_if_compound(function, fn_str) <> "(" <> args_joined <> ")", ctx2)
     }
+  }
+}
+
+fn emit_inspect_arg(expr: IrExpr, ctx: EmitCtx) -> #(String, EmitCtx) {
+  case expr {
+    IrFn(params:, ..) -> {
+      let ctx1 = add_gprelude_import(ctx)
+      #(
+        "@gprelude.inspect_fn(" <> int.to_string(list.length(params)) <> ")",
+        ctx1,
+      )
+    }
+    IrConstructor(target_module:, name:, ..) -> {
+      let arity = case lookup_ctor_field_labels(target_module, name, ctx) {
+        Some(labels) -> list.length(labels)
+        None ->
+          case name {
+            "Ok" | "Err" | "Some" -> 1
+            _ -> 0
+          }
+      }
+      case arity > 0 {
+        True -> {
+          let ctx1 = add_gprelude_import(ctx)
+          #("@gprelude.inspect_fn(" <> int.to_string(arity) <> ")", ctx1)
+        }
+        False -> emit_expr(expr, ctx)
+      }
+    }
+    IrTuple(elements) ->
+      case elements {
+        [] -> #("@gprelude.Tuple0", add_gprelude_import(ctx))
+        [el] -> {
+          let #(el_str, ctx1) = emit_inspect_arg(el, add_gprelude_import(ctx))
+          #("@gprelude.Tuple1(" <> el_str <> ")", ctx1)
+        }
+        _ -> {
+          let #(el_strs, ctx1) = map_acc(elements, ctx, emit_inspect_arg)
+          #("(" <> string.join(el_strs, ", ") <> ")", ctx1)
+        }
+      }
+    IrList(elements:, tail:) -> {
+      let ctx1 = add_gprelude_import(ctx)
+      let #(tail_str, ctx2) = case tail {
+        Some(t) -> emit_inspect_arg(t, ctx1)
+        None -> #("@gprelude.Nil", ctx1)
+      }
+      let #(el_strs, ctx3) = map_acc(elements, ctx2, emit_inspect_arg)
+      let expr_str =
+        el_strs
+        |> list.reverse
+        |> list.fold(tail_str, fn(acc, el) {
+          "@gprelude.Cons(" <> el <> ", " <> acc <> ")"
+        })
+      #(expr_str, ctx3)
+    }
+    _ -> emit_expr(expr, ctx)
   }
 }
 
@@ -1720,10 +1896,18 @@ fn emit_pattern(pat: IrPattern, ctx: EmitCtx) -> #(String, EmitCtx) {
     IrPatDiscard -> #("_", ctx)
     IrPatVar(name) -> #(name, ctx)
 
-    IrPatTuple(els) -> {
-      let #(el_strs, ctx1) = map_acc(els, ctx, emit_pattern)
-      #("(" <> string.join(el_strs, ", ") <> ")", ctx1)
-    }
+    IrPatTuple(els) ->
+      case els {
+        [] -> #("@gprelude.Tuple0", add_gprelude_import(ctx))
+        [el] -> {
+          let #(el_str, ctx1) = emit_pattern(el, add_gprelude_import(ctx))
+          #("@gprelude.Tuple1(" <> el_str <> ")", ctx1)
+        }
+        _ -> {
+          let #(el_strs, ctx1) = map_acc(els, ctx, emit_pattern)
+          #("(" <> string.join(el_strs, ", ") <> ")", ctx1)
+        }
+      }
 
     IrPatAs(inner, alias) -> {
       let #(inner_str, ctx1) = emit_pattern(inner, ctx)
@@ -1808,10 +1992,18 @@ fn emit_type(ty: IrType, ctx: EmitCtx) -> #(String, EmitCtx) {
       let #(err_str, ctx2) = emit_type(err_t, ctx1)
       #("Result[" <> ok_str <> ", " <> err_str <> "]", ctx2)
     }
-    IrTypeTuple(els) -> {
-      let #(el_strs, ctx1) = map_acc(els, ctx, emit_type)
-      #("(" <> string.join(el_strs, ", ") <> ")", ctx1)
-    }
+    IrTypeTuple(els) ->
+      case els {
+        [] -> #("@gprelude.Tuple0", add_gprelude_import(ctx))
+        [el] -> {
+          let #(el_str, ctx1) = emit_type(el, add_gprelude_import(ctx))
+          #("@gprelude.Tuple1[" <> el_str <> "]", ctx1)
+        }
+        _ -> {
+          let #(el_strs, ctx1) = map_acc(els, ctx, emit_type)
+          #("(" <> string.join(el_strs, ", ") <> ")", ctx1)
+        }
+      }
     IrTypeFn(params, ret) -> {
       let #(param_strs, ctx1) = map_acc(params, ctx, emit_type)
       let #(ret_str, ctx2) = emit_type(ret, ctx1)
@@ -1957,27 +2149,262 @@ fn format_function_type_params(
 }
 
 fn compute_to_dynamic_vars(f: IrFunction, ctx: EmitCtx) -> Set(String) {
+  let ffi_dyn = case f.ffi, f.return_type {
+    Some(PackageCall(_, _)), IrTypeNamed(module:, name: "Dynamic", ..)
+      if module == "gleam"
+      || module == "gleam/dynamic"
+      || module == "gleam/dynamic/decode"
+    ->
+      list.fold(f.params, set.new(), fn(acc, p) {
+        collect_type_var_names(p.param_type, acc)
+      })
+    _, _ -> set.new()
+  }
   let local = case ctx.current_module == "gleam/dynamic/decode" {
-    False -> set.new()
+    False -> ffi_dyn
     True ->
       case f.unmangled_name, f.params {
-        "cast", [p0, ..] -> collect_type_var_names(p0.param_type, set.new())
+        "cast", [p0, ..] -> collect_type_var_names(p0.param_type, ffi_dyn)
         "bare_index", [_, p1, ..] ->
-          collect_type_var_names(p1.param_type, set.new())
+          collect_type_var_names(p1.param_type, ffi_dyn)
         "push_path", [_, p1, ..] ->
-          collect_type_var_names(p1.param_type, set.new())
+          collect_type_var_names(p1.param_type, ffi_dyn)
         "subfield", [p0, ..]
         | "at", [p0, ..]
         | "index", [p0, ..]
         | "field", [p0, ..]
         | "optional_field", [p0, ..]
         | "optionally_at", [p0, ..]
-        -> collect_type_var_names(p0.param_type, set.new())
-        _, _ -> set.new()
+        -> collect_type_var_names(p0.param_type, ffi_dyn)
+        _, _ -> ffi_dyn
       }
   }
   let base_env = build_initial_env(f, ctx)
   collect_stmts_to_dynamic(f.body, base_env, local)
+}
+
+fn infer_fn_param_types(
+  params: List(IrFnParam),
+  body: List(IrStmt),
+) -> dict.Dict(String, IrType) {
+  let untyped_names =
+    list.fold(params, set.new(), fn(acc, p) {
+      case p.param_type, p.name {
+        None, "_" -> acc
+        None, name -> set.insert(acc, name)
+        Some(_), _ -> acc
+      }
+    })
+  case set.is_empty(untyped_names) {
+    True -> dict.new()
+    False -> infer_stmts_var_types(body, untyped_names, dict.new())
+  }
+}
+
+fn infer_stmts_var_types(
+  stmts: List(IrStmt),
+  tracked: Set(String),
+  acc: dict.Dict(String, IrType),
+) -> dict.Dict(String, IrType) {
+  case stmts {
+    [] -> acc
+    [stmt, ..rest] ->
+      case stmt {
+        IrStmtLet(pattern:, value:, ..) -> {
+          let acc1 = infer_expr_var_types(value, tracked, acc)
+          let next_tracked = set.difference(tracked, ir_pattern_vars(pattern))
+          infer_stmts_var_types(rest, next_tracked, acc1)
+        }
+        IrStmtGuard(
+          value:,
+          pattern:,
+          guard_condition:,
+          abort_message:,
+          post_bindings:,
+        ) -> {
+          let acc1 = infer_expr_var_types(value, tracked, acc)
+          let after_pat = set.difference(tracked, ir_pattern_vars(pattern))
+          let after_post =
+            list.fold(post_bindings, after_pat, fn(t, b) { set.delete(t, b.0) })
+          let acc2 =
+            list.fold(post_bindings, acc1, fn(a, b) {
+              infer_expr_var_types(b.1, after_pat, a)
+            })
+          let acc3 = case guard_condition {
+            Some(g) -> infer_expr_var_types(g, after_post, acc2)
+            None -> acc2
+          }
+          let acc4 = case abort_message {
+            Some(m) -> infer_expr_var_types(m, after_post, acc3)
+            None -> acc3
+          }
+          infer_stmts_var_types(rest, after_post, acc4)
+        }
+        IrStmtAssert(condition:, abort_message:) -> {
+          let acc1 = infer_expr_var_types(condition, tracked, acc)
+          let acc2 = case abort_message {
+            Some(m) -> infer_expr_var_types(m, tracked, acc1)
+            None -> acc1
+          }
+          infer_stmts_var_types(rest, tracked, acc2)
+        }
+        IrStmtExpr(expr) ->
+          infer_stmts_var_types(
+            rest,
+            tracked,
+            infer_expr_var_types(expr, tracked, acc),
+          )
+      }
+  }
+}
+
+fn infer_expr_var_types(
+  expr: IrExpr,
+  tracked: Set(String),
+  acc: dict.Dict(String, IrType),
+) -> dict.Dict(String, IrType) {
+  case expr {
+    IrNegateInt(inner) -> {
+      let acc1 = record_tracked_var(inner, IrTypeInt64, tracked, acc)
+      infer_expr_var_types(inner, tracked, acc1)
+    }
+    IrNegateBool(inner) -> {
+      let acc1 = record_tracked_var(inner, IrTypeBool, tracked, acc)
+      infer_expr_var_types(inner, tracked, acc1)
+    }
+    IrBinOp(op:, left:, right:) -> {
+      let operand_ty = case op {
+        IrAddInt
+        | IrSubInt
+        | IrMultInt
+        | IrDivInt
+        | IrRemInt
+        | IrLtInt
+        | IrLtEqInt
+        | IrGtInt
+        | IrGtEqInt -> Some(IrTypeInt64)
+        IrAddFloat
+        | IrSubFloat
+        | IrMultFloat
+        | IrDivFloat
+        | IrLtFloat
+        | IrLtEqFloat
+        | IrGtFloat
+        | IrGtEqFloat -> Some(IrTypeDouble)
+        IrStringConcat -> Some(IrTypeString)
+        IrAnd | IrOr -> Some(IrTypeBool)
+        IrEq | IrNotEq -> None
+      }
+      let acc1 = case operand_ty {
+        Some(ty) ->
+          record_tracked_var(left, ty, tracked, acc)
+          |> record_tracked_var(right, ty, tracked, _)
+        None -> acc
+      }
+      infer_expr_var_types(left, tracked, acc1)
+      |> infer_expr_var_types(right, tracked, _)
+    }
+    IrCall(function:, args:) -> {
+      let acc1 = infer_expr_var_types(function, tracked, acc)
+      list.fold(args, acc1, fn(a, arg) {
+        infer_expr_var_types(arg.value, tracked, a)
+      })
+    }
+    IrBlock(stmts) -> infer_stmts_var_types(stmts, tracked, acc)
+    IrFn(params:, body:, ..) -> {
+      let shadowed =
+        list.fold(params, set.new(), fn(s, p) { set.insert(s, p.name) })
+      let inner_tracked = set.difference(tracked, shadowed)
+      infer_stmts_var_types(body, inner_tracked, acc)
+    }
+    IrMatch(subjects:, clauses:) -> {
+      let acc1 =
+        list.fold(subjects, acc, fn(a, s) {
+          infer_expr_var_types(s, tracked, a)
+        })
+      list.fold(clauses, acc1, fn(a, c) {
+        let pat_shadowed =
+          list.fold(c.patterns, set.new(), fn(s, alt) {
+            list.fold(alt, s, fn(s2, p) { set.union(s2, ir_pattern_vars(p)) })
+          })
+        let after_pat = set.difference(tracked, pat_shadowed)
+        let after_post =
+          list.fold(c.prefix_bindings, after_pat, fn(t, b) {
+            set.delete(t, b.0)
+          })
+        let a1 =
+          list.fold(c.prefix_bindings, a, fn(x, b) {
+            infer_expr_var_types(b.1, after_pat, x)
+          })
+        let a2 = case c.guard {
+          Some(g) -> infer_expr_var_types(g, after_post, a1)
+          None -> a1
+        }
+        infer_expr_var_types(c.body, after_post, a2)
+      })
+    }
+    IrTuple(els) | IrContinue(els) ->
+      list.fold(els, acc, fn(a, e) { infer_expr_var_types(e, tracked, a) })
+    IrList(elements:, tail:) -> {
+      let acc1 =
+        list.fold(elements, acc, fn(a, e) {
+          infer_expr_var_types(e, tracked, a)
+        })
+      case tail {
+        Some(t) -> infer_expr_var_types(t, tracked, acc1)
+        None -> acc1
+      }
+    }
+    IrGetterCall(receiver: inner, ..)
+    | IrTupleIndex(tuple: inner, ..)
+    | IrBreak(inner) -> infer_expr_var_types(inner, tracked, acc)
+    IrForLoop(bindings:, body:) -> {
+      let acc1 =
+        list.fold(bindings, acc, fn(a, b) {
+          infer_expr_var_types(b.1, tracked, a)
+        })
+      let shadowed =
+        list.fold(bindings, set.new(), fn(s, b) { set.insert(s, b.0) })
+      infer_stmts_var_types(body, set.difference(tracked, shadowed), acc1)
+    }
+    _ -> acc
+  }
+}
+
+fn record_tracked_var(
+  expr: IrExpr,
+  ty: IrType,
+  tracked: Set(String),
+  acc: dict.Dict(String, IrType),
+) -> dict.Dict(String, IrType) {
+  case expr {
+    IrVar(name) ->
+      case set.contains(tracked, name) && !dict.has_key(acc, name) {
+        True -> dict.insert(acc, name, ty)
+        False -> acc
+      }
+    _ -> acc
+  }
+}
+
+fn ir_pattern_vars(pat: IrPattern) -> Set(String) {
+  case pat {
+    IrPatVar(name) -> set.from_list([name])
+    IrPatAs(inner, alias) -> set.insert(ir_pattern_vars(inner), alias)
+    IrPatTuple(els) ->
+      list.fold(els, set.new(), fn(acc, el) {
+        set.union(acc, ir_pattern_vars(el))
+      })
+    IrPatVariant(args:, ..) ->
+      list.fold(args, set.new(), fn(acc, arg) {
+        set.union(acc, ir_pattern_vars(arg.pattern))
+      })
+    IrPatBitString(segments:) ->
+      list.fold(segments, set.new(), fn(acc, seg) {
+        set.union(acc, ir_pattern_vars(seg.0))
+      })
+    _ -> set.new()
+  }
 }
 
 fn collect_stmts_to_dynamic(

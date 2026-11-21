@@ -3919,3 +3919,335 @@ pub fn cmd_require_tools_and_find_executable_test() {
   assert string.contains(msg, "moon, wasm-tools")
   assert !string.contains(msg, "gleam")
 }
+
+pub fn staging_dev_deps_and_test_remapping_test() {
+  let with_deps =
+    "name = \"app\"\n\n[dependencies]\ngleam_stdlib = \">= 1.0.0\"\n\n[dev-dependencies]\ngleam_stdlib = \">= 1.0.0\"\ngleeunit = \">= 1.0.0\"\n"
+  let merged_with_deps =
+    staging.merge_dev_dependencies_into_dependencies(with_deps)
+  assert !string.contains(merged_with_deps, "[dev-dependencies]")
+  assert string.contains(merged_with_deps, "gleeunit = \">= 1.0.0\"")
+  assert list.length(string.split(merged_with_deps, "gleam_stdlib")) == 2
+
+  let without_deps =
+    "name = \"app\"\n\n[dev-dependencies]\ngleeunit = \">= 1.0.0\"\n"
+  let merged_without_deps =
+    staging.merge_dev_dependencies_into_dependencies(without_deps)
+  assert !string.contains(merged_without_deps, "[dev-dependencies]")
+  assert string.contains(
+    merged_without_deps,
+    "[dependencies]\ngleeunit = \">= 1.0.0\"",
+  )
+
+  let local_type =
+    interface.NamedType(
+      name: "Box",
+      package: "app",
+      module: "helper_test",
+      parameters: [],
+    )
+  let mod_iface =
+    interface.ModuleInterface(
+      type_aliases: dict.new(),
+      types: dict.from_list([
+        #(
+          "Box",
+          interface.ResolvedTypeDef(parameters: 0, constructors: [
+            interface.ResolvedVariant(name: "Box", parameters: [
+              interface.ResolvedVariantField(label: None, type_: local_type),
+            ]),
+          ]),
+        ),
+      ]),
+      constants: dict.from_list([
+        #(
+          "c",
+          interface.ResolvedConstant(
+            type_: local_type,
+            implementations: interface.Implementations(True, False, False),
+          ),
+        ),
+      ]),
+      functions: dict.from_list([
+        #(
+          "f",
+          interface.ResolvedFunction(
+            parameters: [
+              interface.ResolvedParam(label: None, type_: local_type),
+            ],
+            return: local_type,
+            implementations: interface.Implementations(True, False, False),
+          ),
+        ),
+      ]),
+    )
+  let iface =
+    interface.PackageInterface(
+      name: "app",
+      version: "0.1.0",
+      modules: dict.from_list([#("helper_test", mod_iface)]),
+    )
+  let remapped = staging.remap_staged_test_modules(iface, ["helper_test"])
+  assert !dict.has_key(remapped.modules, "helper_test")
+  let assert Ok(rm) = dict.get(remapped.modules, "test/helper_test")
+  let assert Ok(rf) = dict.get(rm.functions, "f")
+  assert rf.return
+    == interface.NamedType(
+      name: "Box",
+      package: "app",
+      module: "test/helper_test",
+      parameters: [],
+    )
+}
+
+pub fn emit_guard_tuples_and_inspect_fn_test() {
+  let match_expr =
+    ir.IrMatch(subjects: [ir.IrVar("x")], clauses: [
+      ir.IrClause(
+        patterns: [[ir.IrPatInt("1")]],
+        guard: None,
+        prefix_bindings: [],
+        body: ir.IrBool(True),
+      ),
+      ir.IrClause(
+        patterns: [[ir.IrPatDiscard]],
+        guard: None,
+        prefix_bindings: [],
+        body: ir.IrBool(False),
+      ),
+    ])
+  let inspect_call =
+    ir.IrCall(
+      function: ir.IrModuleRef(
+        module_alias: Some("string"),
+        target_module: "gleam/string",
+        symbol: "inspect",
+      ),
+      args: [
+        ir.IrCallArg(
+          label: None,
+          value: ir.IrTuple([
+            ir.IrFn(
+              params: [ir.IrFnParam("a", None), ir.IrFnParam("b", None)],
+              return_type: None,
+              body: [ir.IrStmtExpr(ir.IrUnit)],
+            ),
+            ir.IrConstructor(
+              module_alias: None,
+              target_module: None,
+              name: "Ok",
+            ),
+          ]),
+        ),
+      ],
+    )
+  let mod =
+    ir.IrModule(
+      module_name: "demo",
+      package_name: "demo",
+      imports: [],
+      types: [],
+      type_aliases: [],
+      getters: [],
+      constants: [],
+      functions: [
+        ir.IrFunction(
+          name: "check_emit",
+          unmangled_name: "check_emit",
+          publicity: glance.Public,
+          type_params: [],
+          params: [
+            ir.IrParam(label: None, name: "x", param_type: ir.IrTypeInt64),
+            ir.IrParam(label: None, name: "t0", param_type: ir.IrTypeTuple([])),
+            ir.IrParam(
+              label: None,
+              name: "t1",
+              param_type: ir.IrTypeTuple([ir.IrTypeInt64]),
+            ),
+          ],
+          return_type: ir.IrTypeBool,
+          ffi: None,
+          body: [
+            ir.IrStmtGuard(
+              value: match_expr,
+              pattern: ir.IrPatBool(True),
+              guard_condition: None,
+              abort_message: None,
+              post_bindings: [],
+            ),
+            ir.IrStmtExpr(inspect_call),
+            ir.IrStmtExpr(ir.IrTuple([])),
+            ir.IrStmtExpr(ir.IrTuple([ir.IrInt("7")])),
+            ir.IrStmtGuard(
+              value: ir.IrBool(True),
+              pattern: ir.IrPatBool(True),
+              guard_condition: None,
+              abort_message: None,
+              post_bindings: [],
+            ),
+          ],
+        ),
+      ],
+    )
+  let #(code, _) = moonbit.emit_module(mod)
+  assert string.contains(code, "guard (match x {")
+  assert string.contains(code, "@gprelude.Tuple0")
+  assert string.contains(code, "@gprelude.Tuple1[Int64]")
+  assert string.contains(code, "@gprelude.Tuple1(7L)")
+  assert string.contains(
+    code,
+    "@string.inspect((@gprelude.inspect_fn(2), @gprelude.inspect_fn(1)))",
+  )
+  assert string.contains(code, "let __gekko_assert_val = true")
+  assert string.contains(code, "guard __gekko_assert_val is true")
+}
+
+pub fn gleam_stdlib_full_parity_wasm_e2e_test() {
+  run_stdlib_full_parity_target("wasm")
+}
+
+pub fn gleam_stdlib_full_parity_wasm_gc_e2e_test() {
+  run_stdlib_full_parity_target("wasm-gc")
+}
+
+pub fn gleam_stdlib_full_parity_js_e2e_test() {
+  run_stdlib_full_parity_target("js")
+}
+
+pub fn gleam_stdlib_full_parity_native_e2e_test() {
+  run_stdlib_full_parity_target("native")
+}
+
+fn run_stdlib_full_parity_target(target: String) {
+  let slug = string.replace(target, "-", "_")
+  let pkg_name = "stdlib_parity_" <> slug
+  let root = "build/test_fixtures/" <> pkg_name
+  let out_dir = "build/test_fixtures/" <> pkg_name <> "_mbt"
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  stage_offline_bit_array_project(root, pkg_name)
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/" <> pkg_name <> ".gleam"),
+      contents: "pub fn main() -> Nil {\n  Nil\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/" <> pkg_name <> "_test.gleam"),
+      contents: "import gleeunit\n\npub fn main() -> Nil {\n  gleeunit.main()\n}\n",
+    )
+    == Ok(Nil)
+
+  let verbatim_modules = [
+    "bit_array_test.gleam",
+    "bool_test.gleam",
+    "bytes_tree_test.gleam",
+    "dict_test.gleam",
+    "dynamic_test.gleam",
+    "float_test.gleam",
+    "function_test.gleam",
+    "list_test.gleam",
+    "option_test.gleam",
+    "order_test.gleam",
+    "pair_test.gleam",
+    "result_test.gleam",
+    "set_test.gleam",
+    "string_tree_test.gleam",
+    "uri_test.gleam",
+  ]
+  list.each(verbatim_modules, fn(file) {
+    let assert Ok(src) =
+      simplifile.read(from: "../gleam_stdlib/test/gleam/" <> file)
+    assert simplifile.write(
+        to: filepath.join(root, "test/" <> file),
+        contents: src,
+      )
+      == Ok(Nil)
+  })
+
+  // int_test.gleam minus the single 2^63 literal test (exceeds signed Int64::MAX)
+  let assert Ok(int_src) =
+    simplifile.read(from: "../gleam_stdlib/test/gleam/int_test.gleam")
+  let int_2_63_block =
+    "pub fn bitwise_shift_edge_cases_test() {\n"
+    <> "  // Test edge cases for shifts\n"
+    <> "  assert int.bitwise_shift_left(1, 63) == 9_223_372_036_854_775_808\n"
+    <> "  assert int.bitwise_shift_right(9_223_372_036_854_775_808, 63) == 1\n"
+    <> "}\n"
+  assert string.contains(int_src, int_2_63_block)
+  assert simplifile.write(
+      to: filepath.join(root, "test/int_test.gleam"),
+      contents: string.replace(int_src, int_2_63_block, ""),
+    )
+    == Ok(Nil)
+
+  // string_test.gleam minus @target(erlang) BEAM PID/ref/atom/improper-list tests
+  let assert Ok(str_src) =
+    simplifile.read(from: "../gleam_stdlib/test/gleam/string_test.gleam")
+  let erl_imports =
+    "@target(erlang)\nimport gleam/int\n@target(erlang)\nimport gleam/list\n@target(erlang)\nimport gleam/result\n"
+  assert string.contains(str_src, erl_imports)
+  let str_no_imp = string.replace(str_src, erl_imports, "")
+  let assert Ok(#(before_erl, after_erl)) =
+    string.split_once(
+      str_no_imp,
+      "@target(erlang)\n@external(erlang, \"erlang\", \"self\")",
+    )
+  let js_marker =
+    "@target(javascript)\n@external(javascript, \"../gleam_stdlib_test_ffi.mjs\", \"circular_reference\")"
+  let assert Ok(#(_, from_js)) = string.split_once(after_erl, js_marker)
+  assert simplifile.write(
+      to: filepath.join(root, "test/string_test.gleam"),
+      contents: before_erl <> js_marker <> from_js,
+    )
+    == Ok(Nil)
+
+  // dynamic/decode_test.gleam verbatim + test FFI for make_object / make_map
+  let assert Ok(decode_src) =
+    simplifile.read(
+      from: "../gleam_stdlib/test/gleam/dynamic/decode_test.gleam",
+    )
+  assert simplifile.write(
+      to: filepath.join(root, "test/decode_test.gleam"),
+      contents: decode_src,
+    )
+    == Ok(Nil)
+  let ffi_dir = filepath.join(root, "moonbit/decode_test_ffi")
+  assert simplifile.create_directory_all(ffi_dir) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(ffi_dir, "moon.pkg"),
+      contents: "import {\n  \"" <> pkg_name <> "/gprelude\" @gprelude,\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(ffi_dir, "decode_test_ffi.mbt"),
+      contents: "///|\npub fn[T : @gprelude.ToDynamic] make_map(\n  items : @gprelude.GList[(String, T)],\n) -> @gprelude.Dynamic {\n  let m : Map[@gprelude.Dynamic, @gprelude.Dynamic] = Default::default()\n  for cur = items {\n    match cur {\n      @gprelude.Nil => break @gprelude.DynMap(m)\n      @gprelude.Cons((k, v), rest) => {\n        m.set(@gprelude.DynString(k), @gprelude.ToDynamic::to_dynamic(v))\n        continue rest\n      }\n    }\n  }\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gekko.toml"),
+      contents: "[overrides.\""
+        <> pkg_name
+        <> ":test/decode_test.make_object\"]\npackage = \"decode_test_ffi\"\nfunction = \"make_map\"\n\n[overrides.\""
+        <> pkg_name
+        <> ":test/decode_test.make_map\"]\npackage = \"decode_test_ffi\"\nfunction = \"make_map\"\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  let chk =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", target],
+      cwd: out_dir,
+    )
+  assert chk.exit_code == 0
+
+  let run =
+    cmd.run(command: "moon", args: ["test", "--target", target], cwd: out_dir)
+  assert run.exit_code == 0
+  assert string.contains(run.output, "passed: 1527, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}

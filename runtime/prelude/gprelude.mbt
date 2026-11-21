@@ -997,8 +997,69 @@ pub fn string_drop_prefix(s : String, prefix : String) -> String {
 }
 
 ///|
+#derive(Eq, Debug, Hash)
+pub(all) enum Tuple0 {
+  Tuple0
+}
+
+///|
+#derive(Eq, Debug, Hash)
+pub(all) struct Tuple1[A](A)
+
+///|
+pub(all) struct InspectFn {
+  arity : Int
+}
+
+///|
+pub fn inspect_fn(arity : Int) -> InspectFn {
+  { arity, }
+}
+
+///|
 pub(open) trait GleamInspect {
   gleam_inspect(Self) -> String
+  gleam_inspect_as_char(Self) -> Int? = _
+}
+
+///|
+impl GleamInspect with gleam_inspect_as_char(_) {
+  None
+}
+
+///|
+pub impl GleamInspect for Tuple0 with gleam_inspect(_) {
+  "#()"
+}
+
+///|
+pub impl[A : GleamInspect] GleamInspect for Tuple1[A] with gleam_inspect(self) {
+  "#(" + GleamInspect::gleam_inspect(self.0) + ")"
+}
+
+///|
+pub impl GleamInspect for InspectFn with gleam_inspect(self) {
+  let buf = StringBuilder()
+  buf.write_string("//fn(")
+  let mut i = 0
+  while i < self.arity {
+    if i > 0 {
+      buf.write_string(", ")
+    }
+    buf.write_char((97 + i).unsafe_to_char())
+    i = i + 1
+  }
+  buf.write_string(") { ... }")
+  buf.to_string()
+}
+
+///|
+fn write_hex4_upper(buf : StringBuilder, code : Int) -> Unit {
+  let hex = "0123456789ABCDEF"
+  buf.write_char(hex[(code >> 12) & 0xF].to_int().unsafe_to_char())
+  buf.write_char(hex[(code >> 8) & 0xF].to_int().unsafe_to_char())
+  buf.write_char(hex[(code >> 4) & 0xF].to_int().unsafe_to_char())
+  buf.write_char(hex[code & 0xF].to_int().unsafe_to_char())
 }
 
 ///|
@@ -1012,7 +1073,17 @@ fn escape_gleam_string(s : String) -> String {
       '\n' => buf.write_string("\\n")
       '\r' => buf.write_string("\\r")
       '\t' => buf.write_string("\\t")
-      _ => buf.write_char(ch)
+      '\u{000C}' => buf.write_string("\\f")
+      _ => {
+        let code = ch.to_int()
+        if code < 0x20 || (code >= 0x7F && code <= 0x9F) {
+          buf.write_string("\\u{")
+          write_hex4_upper(buf, code)
+          buf.write_char('}')
+        } else {
+          buf.write_char(ch)
+        }
+      }
     }
   }
   buf.write_char('"')
@@ -1025,12 +1096,32 @@ pub impl GleamInspect for Int64 with gleam_inspect(self) {
 }
 
 ///|
-pub impl GleamInspect for Double with gleam_inspect(self) {
-  let s = self.to_string()
-  if s.contains(".") || s.contains("e") || s.contains("E") {
-    s
+pub impl GleamInspect for Int64 with gleam_inspect_as_char(self) {
+  if self >= 32L && self <= 126L {
+    Some(self.to_int())
   } else {
-    s + ".0"
+    None
+  }
+}
+
+///|
+pub impl GleamInspect for Double with gleam_inspect(self) {
+  let raw = self.to_string().replace_all(old="+", new="").replace_all(old="E", new="e")
+  if raw.contains(".") {
+    raw
+  } else {
+    match raw.find("e") {
+      Some(idx) =>
+        raw.unsafe_substring(start=0, end=idx) +
+        ".0" +
+        raw.unsafe_substring(start=idx, end=raw.length())
+      None =>
+        if raw != "NaN" && raw != "Infinity" && raw != "-Infinity" {
+          raw + ".0"
+        } else {
+          raw
+        }
+    }
   }
 }
 
@@ -1080,22 +1171,39 @@ pub impl GleamInspect for BitArray with gleam_inspect(self) {
 
 ///|
 pub impl[T : GleamInspect] GleamInspect for GList[T] with gleam_inspect(self) {
-  let buf = StringBuilder()
-  buf.write_char('[')
-  for cur = self, first = true {
-    match cur {
-      Nil => break
-      Cons(head, tail) => {
-        if !first {
-          buf.write_string(", ")
+  match self {
+    Nil => "[]"
+    _ => {
+      let list_buf = StringBuilder()
+      list_buf.write_char('[')
+      let char_buf = StringBuilder()
+      let mut all_char = true
+      for cur = self, first = true {
+        match cur {
+          Nil => break
+          Cons(head, tail) => {
+            if !first {
+              list_buf.write_string(", ")
+            }
+            list_buf.write_string(GleamInspect::gleam_inspect(head))
+            if all_char {
+              match GleamInspect::gleam_inspect_as_char(head) {
+                Some(c) => char_buf.write_char(c.unsafe_to_char())
+                None => all_char = false
+              }
+            }
+            continue tail, false
+          }
         }
-        buf.write_string(GleamInspect::gleam_inspect(head))
-        continue tail, false
+      }
+      list_buf.write_char(']')
+      if all_char {
+        "charlist.from_string(\"" + char_buf.to_string() + "\")"
+      } else {
+        list_buf.to_string()
       }
     }
   }
-  buf.write_char(']')
-  buf.to_string()
 }
 
 ///|

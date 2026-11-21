@@ -41,7 +41,7 @@ pub fn dict_upsert_and_fold_test() -> Unit {
   if !((@dict.get(counts, "missing") == Err(()))) {
     @prelude.abort("assertion failed")
   }
-  let sum = @dict.fold(counts, 0L, fn(acc, _, v) {
+  let sum = @dict.fold(counts, 0L, fn(acc : Int64, _, v : Int64) {
   (acc + v)
 })
   if !((sum == 5L)) {
