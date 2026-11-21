@@ -242,10 +242,11 @@ function = "read_to_string"
 Standalone example projects are hosted in [`gekko_examples`](https://github.com/spiral-nights/gekko_examples):
 
 - **Gleam Tour** — Pure Gleam language tour (basics, TCO loops, records, `echo`, stdlib)
-- **Weather App** — `gleam/json` & `gleam/dynamic/decode` with custom records and pipelines
-- **WIT Greeter** — Wasm Component (`wit/world.wit`, `gekko wit gen`, `wit check`, `wit build`)
-- **MoonBit FFI** — Local `moonbit/` packages, `moonbitlang/core/math`, and `@external_type`
+- **Weather App** — `gleam/json` & `gleam/dynamic/decode` with custom forecast records
+- **WIT Greeter** — Minimal Wasm Component (`wit/world.wit`, `gekko wit gen`, `wit check`, `wit build`)
+- **MoonBit FFI** — Local `moonbit/` package and `moonbitlang/core/math` via `@external`
 - **File I/O** — Reading/writing files via `moonbit/moon.mod` (`moonbitlang/x/fs`) + `gekko moonbit bind`
+- **Fibonacci CLI** — Reading CLI arguments via `moonbitlang/core/env` + native `gekko build --target native`
 
 ---
 
