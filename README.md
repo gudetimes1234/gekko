@@ -11,7 +11,7 @@
 - **Keep standard Gleam tooling:** Target projects stay 100% valid Gleam. `gleam check`, `gleam test`, and `gleam format` continue to work without modification.
 - **Target WebAssembly & native via MoonBit:** Leverage MoonBit's compact, fast codegen across `wasm-gc`, linear `wasm`, JavaScript, and native binaries without maintaining a custom code generator or GC runtime.
 - **Zero-boilerplate Wasm Component Model:** Generate WIT bindings via `wit-bindgen moonbit` and bundle WASI Preview 2 components with `wasm-tools`.
-- **Standard library & JSON support:** Transpile MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gleam_json) forks (`/// @external(moonbit, ...)` + `moonbit/` FFI packages backed by `Map`, `@json.Json`, `Bytes`) while preserving exact Gleam semantics.
+- **Standard library & JSON support:** Transpile MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gleam_json) forks (`/// @external(moonbit, ...)` + `moonbit/` FFI packages backed by `Map`, `@json.Json`, `Bytes`) with faithful Gleam semantics (see [`docs/SEMANTICS.md`](./docs/SEMANTICS.md) for documented differences).
 
 ---
 
@@ -181,11 +181,13 @@ Standalone example projects are hosted in [`gekko_examples`](https://github.com/
 ## Project Documentation
 
 - **[`docs/SPEC.md`](./docs/SPEC.md)** — Full architectural specification, lowering rules, runtime design, and WIT bridge details.
+- **[`docs/SEMANTICS.md`](./docs/SEMANTICS.md)** — Runtime semantics, target behavior, and documented differences from Erlang/JS Gleam.
 - **[`docs/ROADMAP.md`](./docs/ROADMAP.md)** — Phased implementation plan, deliverables, and verification gates.
 - **[`docs/GLEAM_SYNTAX_MAP.md`](./docs/GLEAM_SYNTAX_MAP.md)** — Complete mapping from `glance` AST nodes to MoonBit lowering rules.
 - **[`LICENSE`](./LICENSE)** — MIT License.
 
 ## Known Limitations
 
+- **Fixed-width 64-bit `Int`s and runtime differences:** Gleam `Int` maps to signed 64-bit `Int64` with wrapping overflow rather than Erlang arbitrary-precision integers (or JS 53-bit safe integers). See [`docs/SEMANTICS.md`](./docs/SEMANTICS.md) for the full list of documented differences.
 - **Testing MoonBit FFI code:** `gleam test` runs on Erlang/JS and cannot execute `@external(moonbit, ...)` functions unless they also provide an Erlang/JS external or pure-Gleam fallback. Use `gekko test` to transpile and run tests on MoonBit targets.
 - **Mutual tail recursion:** Self-recursive tail calls are lowered to MoonBit `for` loops, while mutually recursive functions are not yet tail-call optimized.
