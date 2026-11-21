@@ -39,6 +39,22 @@ flowchart TD
 
 ---
 
+## Installation
+
+Prerequisites: [Gleam](https://gleam.run) (1.19.x) and Erlang/OTP on your `PATH`, plus [MoonBit](https://www.moonbitlang.com/) (`moon`) to build the generated output. `wasm-tools` and `wit-bindgen` are needed only for WebAssembly Component commands.
+
+```bash
+git clone https://github.com/spiral-nights/gekko && cd gekko
+scripts/install.sh            # installs to ~/.local/bin/gekko
+scripts/install.sh /some/bin  # or choose another directory (must be on PATH)
+```
+
+The script runs `gleam export erlang-shipment` and writes a small `gekko` launcher into the bin directory. The launcher runs the shipment in this repository's `build/erlang-shipment/`, so you can call `gekko` from any directory, and `--root`/`--out` resolve relative to your current directory. Re-run `scripts/install.sh` after pulling or changing gekko's source. Don't delete or move the repository, since the launcher points into it.
+
+Without installing, you can still run `gleam run -- <command>` from the repository.
+
+---
+
 ## CLI Usage
 
 ```bash
