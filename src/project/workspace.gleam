@@ -1,6 +1,7 @@
 import emit/moonbit
 import emit/pkg_config
 import emit/prelude_runtime
+import emit/trait_bounds
 import filepath
 import glance
 import gleam/dict
@@ -13,6 +14,7 @@ import index/symbol_table
 import lower/desugar
 import lower/tco
 import lower/validate
+import moonbit/ffi_meta
 import project/ffi_config
 import project/interface.{type PackageInterface, PackageInterface}
 import project/loader.{type LoadedDependency}
@@ -99,12 +101,19 @@ pub fn transpile_project(
     })
   let all_modules = list.append(dep_tagged, root_tagged)
 
+  let ffi_roots =
+    list.append(list.map(loaded_deps, fn(dep) { dep.package_root }), [
+      project_root,
+    ])
+  let ffi_metadata = ffi_meta.scan_package_roots(ffi_roots)
+
   let table =
-    symbol_table.index_project_with_packages(
+    symbol_table.index_project_with_ffi_meta(
       project_name,
       all_modules,
       Some(merged_iface),
       ffi_overrides,
+      ffi_metadata,
     )
 
   use _ <- result.try(validate_all_int_literals(all_modules, table))
@@ -134,13 +143,26 @@ pub fn transpile_project(
     prelude_runtime.gprelude_mbt(),
   ))
 
-  use rev_emitted <- result.try(
-    list.try_fold(all_modules, [], fn(names_acc, entry) {
+  let ir_modules =
+    list.map(all_modules, fn(entry) {
       let #(_, mod_name, ast_mod, _) = entry
-      let ir_mod =
-        desugar.desugar_module(ast_mod, table, mod_name)
-        |> tco.optimize_module
-      let #(mbt_src, imports) = moonbit.emit_module_with_table(ir_mod, table)
+      desugar.desugar_module(ast_mod, table, mod_name)
+      |> tco.optimize_module
+    })
+
+  let project_bounds =
+    trait_bounds.analyze_project(ir_modules, Some(table), ffi_metadata)
+
+  use rev_emitted <- result.try(
+    list.try_fold(ir_modules, [], fn(names_acc, ir_mod) {
+      let mod_name = ir_mod.module_name
+      let #(mbt_src, imports) =
+        moonbit.emit_module_with_context(
+          ir_mod,
+          Some(table),
+          ffi_metadata,
+          project_bounds,
+        )
       let is_main = moonbit.module_has_main(ir_mod)
       let pkg_dir = pkg_config.module_to_pkg_dir(mod_name)
       let target_dir = filepath.join(out_dir, pkg_dir)

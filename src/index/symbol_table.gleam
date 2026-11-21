@@ -4,6 +4,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 import gleam/string
+import moonbit/ffi_meta.{type FfiMetadata}
 import project/interface.{
   type PackageInterface, type ResolvedFunction, type ResolvedType,
   type ResolvedTypeDef, FnType, NamedType, TupleType, VariableType,
@@ -146,6 +147,23 @@ pub fn index_project_with_packages(
   pkg_interface: Option(PackageInterface),
   ffi_overrides: Dict(String, FfiKind),
 ) -> SymbolTable {
+  index_project_with_ffi_meta(
+    root_package_name,
+    package_modules,
+    pkg_interface,
+    ffi_overrides,
+    ffi_meta.base_metadata(),
+  )
+}
+
+/// Build a project-wide `SymbolTable` with explicit MoonBit FFI trait metadata.
+pub fn index_project_with_ffi_meta(
+  root_package_name: String,
+  package_modules: List(#(String, String, glance.Module, PrepassResult)),
+  pkg_interface: Option(PackageInterface),
+  ffi_overrides: Dict(String, FfiKind),
+  ffi_metadata: FfiMetadata,
+) -> SymbolTable {
   let raw_modules =
     list.fold(package_modules, dict.new(), fn(acc, entry) {
       let #(pkg_name, mod_name, ast_mod, prepass_res) = entry
@@ -162,7 +180,8 @@ pub fn index_project_with_packages(
       dict.insert(acc, mod_name, indexed)
     })
 
-  let computed_modules = compute_transitive_type_flags(raw_modules)
+  let computed_modules =
+    compute_transitive_type_flags(raw_modules, ffi_metadata)
   SymbolTable(package_name: root_package_name, modules: computed_modules)
 }
 
@@ -987,6 +1006,7 @@ fn result_unwrap(res: Result(a, b), default: a) -> a {
 
 fn compute_transitive_type_flags(
   modules: Dict(String, ModuleSymbols),
+  ffi_metadata: FfiMetadata,
 ) -> Dict(String, ModuleSymbols) {
   let all_types =
     dict.fold(modules, dict.new(), fn(acc, mod_name, mod_syms) {
@@ -1005,6 +1025,7 @@ fn compute_transitive_type_flags(
           type_key_has_function_field(
             #(mod_name, type_name),
             all_types,
+            ffi_metadata,
             set.new(),
           )
         TypeInfo(..type_info, has_function_field: has_fn)
@@ -1013,26 +1034,10 @@ fn compute_transitive_type_flags(
   })
 }
 
-/// Return True for built-in standard/JSON external types whose MoonBit runtime
-/// representations implement `Eq`, `Debug`, `Hash`, and `@gprelude.GleamInspect`.
-pub fn is_builtin_inspectable_external(module: String, name: String) -> Bool {
-  case module, name {
-    "gleam/dict", "Dict"
-    | "gleam/dynamic", "Dynamic"
-    | "gleam/dynamic/decode", "Dynamic"
-    | "gleam/string_tree", "StringTree"
-    | "gleam/json", "Json"
-    | "gleam/option", "Option"
-    | "gleam", "Dynamic"
-    | "gleam", "UtfCodepoint"
-    -> True
-    _, _ -> False
-  }
-}
-
 fn type_key_has_function_field(
   key: #(String, String),
   all_types: Dict(#(String, String), #(Option(ExternalType), List(VariantInfo))),
+  ffi_metadata: FfiMetadata,
   visited: Set(#(String, String)),
 ) -> Bool {
   case set.contains(visited, key) {
@@ -1040,14 +1045,20 @@ fn type_key_has_function_field(
     False ->
       case dict.get(all_types, key) {
         Error(_) -> False
-        Ok(#(Some(_), _)) -> !is_builtin_inspectable_external(key.0, key.1)
+        Ok(#(Some(ext), _)) ->
+          !ffi_meta.is_derivable(ffi_metadata, ext.package, ext.type_name)
         Ok(#(None, variants)) -> {
           let next_visited = set.insert(visited, key)
           list.any(variants, fn(variant) {
             list.any(variant.fields, fn(field) {
               case field.resolved_type {
                 Some(ty) ->
-                  resolved_type_has_function(ty, all_types, next_visited)
+                  resolved_type_has_function(
+                    ty,
+                    all_types,
+                    ffi_metadata,
+                    next_visited,
+                  )
                 None -> False
               }
             })
@@ -1060,6 +1071,7 @@ fn type_key_has_function_field(
 fn resolved_type_has_function(
   ty: ResolvedType,
   all_types: Dict(#(String, String), #(Option(ExternalType), List(VariantInfo))),
+  ffi_metadata: FfiMetadata,
   visited: Set(#(String, String)),
 ) -> Bool {
   case ty {
@@ -1067,17 +1079,18 @@ fn resolved_type_has_function(
     VariableType(_) -> False
     TupleType(elements:) ->
       list.any(elements, fn(el) {
-        resolved_type_has_function(el, all_types, visited)
+        resolved_type_has_function(el, all_types, ffi_metadata, visited)
       })
     NamedType(name:, module:, parameters:, ..) ->
-      case module, name {
-        "gleam/dynamic/decode", "Decoder" -> True
-        _, _ ->
-          list.any(parameters, fn(p) {
-            resolved_type_has_function(p, all_types, visited)
-          })
-          || type_key_has_function_field(#(module, name), all_types, visited)
-      }
+      list.any(parameters, fn(p) {
+        resolved_type_has_function(p, all_types, ffi_metadata, visited)
+      })
+      || type_key_has_function_field(
+        #(module, name),
+        all_types,
+        ffi_metadata,
+        visited,
+      )
   }
 }
 

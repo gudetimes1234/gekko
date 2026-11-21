@@ -1,6 +1,7 @@
 import emit/moonbit
 import emit/pkg_config
 import emit/prelude_runtime
+import emit/trait_bounds
 import emit/wit_bridge
 import filepath
 import gekko
@@ -19,6 +20,7 @@ import lower/pattern
 import lower/tco
 import lower/validate
 import moonbit/bindgen
+import moonbit/ffi_meta
 import moonbit/mbti
 import project/cmd
 import project/ffi_config
@@ -4017,12 +4019,12 @@ pub fn emit_guard_tuples_and_inspect_fn_test() {
         body: ir.IrBool(False),
       ),
     ])
-  let inspect_call =
+  let show_call =
     ir.IrCall(
       function: ir.IrModuleRef(
-        module_alias: Some("string"),
-        target_module: "gleam/string",
-        symbol: "inspect",
+        module_alias: Some("fmt"),
+        target_module: "fmt",
+        symbol: "show",
       ),
       args: [
         ir.IrCallArg(
@@ -4039,6 +4041,30 @@ pub fn emit_guard_tuples_and_inspect_fn_test() {
               name: "Ok",
             ),
           ]),
+        ),
+      ],
+    )
+  let fmt_mod =
+    ir.IrModule(
+      module_name: "fmt",
+      package_name: "demo",
+      imports: [],
+      types: [],
+      type_aliases: [],
+      getters: [],
+      constants: [],
+      functions: [
+        ir.IrFunction(
+          name: "show",
+          unmangled_name: "show",
+          publicity: glance.Public,
+          type_params: ["T0"],
+          params: [
+            ir.IrParam(label: None, name: "x", param_type: ir.IrTypeVar("T0")),
+          ],
+          return_type: ir.IrTypeString,
+          ffi: Some(prepass.PackageCall("custom_fmt", "show_any")),
+          body: [],
         ),
       ],
     )
@@ -4076,7 +4102,7 @@ pub fn emit_guard_tuples_and_inspect_fn_test() {
               abort_message: None,
               post_bindings: [],
             ),
-            ir.IrStmtExpr(inspect_call),
+            ir.IrStmtExpr(show_call),
             ir.IrStmtExpr(ir.IrTuple([])),
             ir.IrStmtExpr(ir.IrTuple([ir.IrInt("7")])),
             ir.IrStmtGuard(
@@ -4090,17 +4116,335 @@ pub fn emit_guard_tuples_and_inspect_fn_test() {
         ),
       ],
     )
-  let #(code, _) = moonbit.emit_module(mod)
+  let meta =
+    ffi_meta.scan_mbt_source(
+      ffi_meta.base_metadata(),
+      "custom_fmt",
+      "///|\npub fn[T : @gprelude.GleamInspect] show_any(x : T) -> String {\n  @gprelude.GleamInspect::gleam_inspect(x)\n}\n",
+    )
+  let bounds = trait_bounds.analyze_project([fmt_mod, mod], None, meta)
+  let #(code, _) = moonbit.emit_module_with_context(mod, None, meta, bounds)
   assert string.contains(code, "guard (match x {")
   assert string.contains(code, "@gprelude.Tuple0")
   assert string.contains(code, "@gprelude.Tuple1[Int64]")
   assert string.contains(code, "@gprelude.Tuple1(7L)")
   assert string.contains(
     code,
-    "@string.inspect((@gprelude.inspect_fn(2), @gprelude.inspect_fn(1)))",
+    "@fmt.show((@gprelude.inspect_fn(2), @gprelude.inspect_fn(1)))",
   )
   assert string.contains(code, "let __gekko_assert_val = true")
   assert string.contains(code, "guard __gekko_assert_val is true")
+}
+
+pub fn ffi_meta_scanner_unit_test() {
+  let base = ffi_meta.base_metadata()
+  assert ffi_meta.is_derivable(base, "builtin", "Option")
+  assert ffi_meta.is_inspectable(base, "builtin", "Option")
+  assert ffi_meta.is_derivable(base, "gprelude", "Dynamic")
+  assert ffi_meta.is_inspectable(base, "gprelude", "Dynamic")
+  let assert Some(echo_meta) =
+    ffi_meta.lookup_function(base, "gprelude", "echo_val")
+  assert echo_meta.type_params == [#("T", set.from_list(["GleamInspect"]))]
+
+  let mbt_src =
+    "///|\n"
+    <> "#derive(Debug)\n"
+    <> "pub(all) struct CustomMap[K, V] {\n"
+    <> "  inner : Map[K, V]\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub impl[K : Eq + Hash, V : Eq] Eq for CustomMap[K, V] with equal(self, other) {\n"
+    <> "  self.inner == other.inner\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub impl[K : Hash, V : Hash] Hash for CustomMap[K, V] with hash_combine(self, hasher) {\n"
+    <> "  ignore((self, hasher))\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub impl[\n"
+    <> "  K : @gprelude.GleamInspect,\n"
+    <> "  V : @gprelude.GleamInspect,\n"
+    <> "] @gprelude.GleamInspect for CustomMap[\n"
+    <> "  K,\n"
+    <> "  V,\n"
+    <> "] with gleam_inspect(self) {\n"
+    <> "  \"{}\"\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[K : Eq + Hash, V] map_insert(\n"
+    <> "  m : CustomMap[K, V],\n"
+    <> "  key : K,\n"
+    <> "  val : V,\n"
+    <> ") -> CustomMap[K, V] {\n"
+    <> "  m\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.ToDynamic] box_dyn(x : T) -> @gprelude.Dynamic {\n"
+    <> "  @gprelude.ToDynamic::to_dynamic(x)\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.GleamInspect] show_any(x : T) -> String {\n"
+    <> "  @gprelude.GleamInspect::gleam_inspect(x)\n"
+    <> "}\n"
+
+  let scanned = ffi_meta.scan_mbt_source(base, "custom_ffi", mbt_src)
+  assert ffi_meta.is_derivable(scanned, "custom_ffi", "CustomMap")
+  assert ffi_meta.is_inspectable(scanned, "custom_ffi", "CustomMap")
+  assert ffi_meta.eq_requires_hash_params(scanned, "custom_ffi", "CustomMap")
+    == set.from_list([0])
+
+  let assert Some(ins_meta) =
+    ffi_meta.lookup_function(scanned, "custom_ffi", "map_insert")
+  assert ins_meta.type_params
+    == [#("K", set.from_list(["Eq", "Hash"])), #("V", set.new())]
+
+  let assert Some(box_meta) =
+    ffi_meta.lookup_function(scanned, "custom_ffi", "box_dyn")
+  assert box_meta.type_params == [#("T", set.from_list(["ToDynamic"]))]
+
+  let assert Some(show_meta) =
+    ffi_meta.lookup_function(scanned, "custom_ffi", "show_any")
+  assert show_meta.type_params == [#("T", set.from_list(["GleamInspect"]))]
+}
+
+pub fn generic_ffi_traits_and_cross_module_bounds_e2e_test() {
+  let root = "build/test_fixtures/generic_traits"
+  let out_dir = "build/test_fixtures/generic_traits_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(
+      root,
+      "src/generic_traits",
+    ))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      root,
+      "moonbit/custom_ffi",
+    ))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"generic_traits\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let ffi_mbt =
+    "///|\n"
+    <> "#derive(Debug)\n"
+    <> "pub(all) struct CustomMap[K, V] {\n"
+    <> "  inner : Map[K, V]\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub impl[K : Eq + Hash, V : Eq] Eq for CustomMap[K, V] with equal(self, other) {\n"
+    <> "  self.inner == other.inner\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub impl[K : Hash, V : Hash] Hash for CustomMap[K, V] with hash_combine(self, hasher) {\n"
+    <> "  hasher.combine_int(self.inner.length())\n"
+    <> "  self.inner.each(fn(k, v) {\n"
+    <> "    hasher.combine(k)\n"
+    <> "    hasher.combine(v)\n"
+    <> "  })\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub impl[K : @gprelude.GleamInspect, V : @gprelude.GleamInspect] @gprelude.GleamInspect for CustomMap[\n"
+    <> "  K,\n"
+    <> "  V,\n"
+    <> "] with gleam_inspect(self) {\n"
+    <> "  let mut s = \"{\"\n"
+    <> "  let mut first = true\n"
+    <> "  self.inner.each(fn(k, v) {\n"
+    <> "    if !first { s = s + \", \" }\n"
+    <> "    first = false\n"
+    <> "    s = s + @gprelude.GleamInspect::gleam_inspect(k) + \": \" + @gprelude.GleamInspect::gleam_inspect(v)\n"
+    <> "  })\n"
+    <> "  s + \"}\"\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[K, V] map_new() -> CustomMap[K, V] {\n"
+    <> "  { inner: Default::default() }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[K : Eq + Hash, V] map_insert(\n"
+    <> "  m : CustomMap[K, V],\n"
+    <> "  key : K,\n"
+    <> "  val : V,\n"
+    <> ") -> CustomMap[K, V] {\n"
+    <> "  let copy = m.inner.copy()\n"
+    <> "  copy.set(key, val)\n"
+    <> "  { inner: copy }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[K : Eq + Hash, V] map_get(\n"
+    <> "  m : CustomMap[K, V],\n"
+    <> "  key : K,\n"
+    <> ") -> Result[V, Unit] {\n"
+    <> "  match m.inner.get(key) {\n"
+    <> "    Some(v) => Ok(v)\n"
+    <> "    None => Err(())\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.ToDynamic] box_dyn(x : T) -> @gprelude.Dynamic {\n"
+    <> "  @gprelude.ToDynamic::to_dynamic(x)\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn is_dyn_int(d : @gprelude.Dynamic, expected : Int64) -> Bool {\n"
+    <> "  d == @gprelude.DynInt(expected)\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.GleamInspect] show_any(x : T) -> String {\n"
+    <> "  @gprelude.GleamInspect::gleam_inspect(x)\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/custom_ffi/custom_ffi.mbt"),
+      contents: ffi_mbt,
+    )
+    == Ok(Nil)
+
+  let lib_gleam =
+    "/// @external_type(moonbit, \"builtin\", \"Option\")\n"
+    <> "pub type Maybe(a) {\n"
+    <> "  Some(a)\n"
+    <> "  None\n"
+    <> "}\n\n"
+    <> "/// @external_type(moonbit, \"custom_ffi\", \"CustomMap\")\n"
+    <> "pub type CustomMap(k, v)\n\n"
+    <> "/// @external_type(moonbit, \"gprelude\", \"Dynamic\")\n"
+    <> "pub type Dyn\n\n"
+    <> "pub type Bag(a) {\n"
+    <> "  Bag(items: CustomMap(a, Int))\n"
+    <> "}\n\n"
+    <> "@external(moonbit, \"custom_ffi\", \"map_new\")\n"
+    <> "pub fn map_new() -> CustomMap(k, v)\n\n"
+    <> "@external(moonbit, \"custom_ffi\", \"map_insert\")\n"
+    <> "pub fn map_insert(m: CustomMap(k, v), k: k, v: v) -> CustomMap(k, v)\n\n"
+    <> "@external(moonbit, \"custom_ffi\", \"map_get\")\n"
+    <> "pub fn map_get(m: CustomMap(k, v), k: k) -> Result(v, Nil)\n\n"
+    <> "@external(moonbit, \"custom_ffi\", \"box_dyn\")\n"
+    <> "pub fn box_dyn(x: a) -> Dyn\n\n"
+    <> "@external(moonbit, \"custom_ffi\", \"is_dyn_int\")\n"
+    <> "pub fn is_dyn_int(d: Dyn, expected: Int) -> Bool\n\n"
+    <> "@external(moonbit, \"custom_ffi\", \"show_any\")\n"
+    <> "pub fn show_any(x: a) -> String\n\n"
+    <> "pub fn contains(xs: List(a), target: a) -> Bool {\n"
+    <> "  case xs {\n"
+    <> "    [] -> False\n"
+    <> "    [first, ..rest] if first == target -> True\n"
+    <> "    [_, ..rest] -> contains(rest, target)\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn put_and_has(m: CustomMap(k, v), key: k, val: v) -> Result(v, Nil) {\n"
+    <> "  let updated = map_insert(m, key, val)\n"
+    <> "  map_get(updated, key)\n"
+    <> "}\n\n"
+    <> "pub fn wrap_box(x: a) -> Dyn {\n"
+    <> "  box_dyn(x)\n"
+    <> "}\n\n"
+    <> "pub fn wrap_show(x: a) -> String {\n"
+    <> "  show_any(x)\n"
+    <> "}\n\n"
+    <> "pub fn is_missing(m: Maybe(a)) -> Bool {\n"
+    <> "  m == None\n"
+    <> "}\n"
+
+  let main_gleam =
+    "import generic_traits/lib.{type Bag, Bag, None, Some}\n\n"
+    <> "pub fn list_contains_via_cross_mod(xs: List(a), target: a) -> Bool {\n"
+    <> "  lib.contains(xs, target)\n"
+    <> "}\n\n"
+    <> "pub fn bag_insert(b: Bag(k), k: k, v: Int) -> Bag(k) {\n"
+    <> "  Bag(items: lib.map_insert(b.items, k, v))\n"
+    <> "}\n\n"
+    <> "pub fn bag_eq(a: Bag(k), b: Bag(k)) -> Bool {\n"
+    <> "  a == b\n"
+    <> "}\n\n"
+    <> "pub fn check_all() -> Bool {\n"
+    <> "  let b1 = bag_insert(Bag(items: lib.map_new()), \"k\", 42)\n"
+    <> "  let b2 = bag_insert(Bag(items: lib.map_new()), \"k\", 42)\n"
+    <> "  let dyn_ok = lib.is_dyn_int(lib.wrap_box(99), 99)\n"
+    <> "  let fn_opt_ok = !lib.is_missing(Some(fn() { 1 })) && lib.is_missing(None)\n"
+    <> "  let show_fn = lib.wrap_show(fn(a, b) { a + b })\n"
+    <> "  list_contains_via_cross_mod([10, 20, 30], 20)\n"
+    <> "  && lib.put_and_has(lib.map_new(), \"x\", 7) == Ok(7)\n"
+    <> "  && bag_eq(b1, b2)\n"
+    <> "  && dyn_ok\n"
+    <> "  && fn_opt_ok\n"
+    <> "  && show_fn == \"//fn(a, b) { ... }\"\n"
+    <> "  && lib.wrap_show(b1) == \"Bag({\\\"k\\\": 42})\"\n"
+    <> "}\n"
+
+  let test_gleam =
+    "import generic_traits\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn generic_traits_e2e_test() {\n"
+    <> "  assert generic_traits.check_all()\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/generic_traits/lib.gleam"),
+      contents: lib_gleam,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/generic_traits.gleam"),
+      contents: main_gleam,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/generic_traits_test.gleam"),
+      contents: test_gleam,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  let assert Ok(main_mbt) =
+    simplifile.read(from: filepath.join(
+      out_dir,
+      "generic_traits/generic_traits.mbt",
+    ))
+  assert string.contains(
+    main_mbt,
+    "pub fn[T0 : Eq + Hash] list_contains_via_cross_mod(",
+  )
+  assert string.contains(main_mbt, "@lib.wrap_show(@gprelude.inspect_fn(2))")
+
+  let assert Ok(lib_mbt) =
+    simplifile.read(from: filepath.join(
+      out_dir,
+      "generic_traits_lib/generic_traits_lib.mbt",
+    ))
+  assert string.contains(lib_mbt, "pub impl[A : Eq + Hash] Eq for Bag[A]")
+  assert string.contains(
+    lib_mbt,
+    "pub fn[T0 : @gprelude.GleamInspect] wrap_show(",
+  )
+  assert string.contains(lib_mbt, "pub fn[T0 : @gprelude.ToDynamic] wrap_box(")
+  assert string.contains(lib_mbt, "(m) is None")
+
+  list.each(["wasm", "wasm-gc"], fn(target) {
+    let chk =
+      cmd.run(
+        command: "moon",
+        args: ["check", "--deny-warn", "--target", target],
+        cwd: out_dir,
+      )
+    assert chk.exit_code == 0
+
+    let run =
+      cmd.run(command: "moon", args: ["test", "--target", target], cwd: out_dir)
+    assert run.exit_code == 0
+    assert string.contains(run.output, "passed: 1, failed: 0")
+  })
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
 }
 
 pub fn gleam_stdlib_full_parity_wasm_e2e_test() {

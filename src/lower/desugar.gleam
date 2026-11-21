@@ -32,6 +32,7 @@ import lower/pattern
 import project/interface.{
   type ResolvedType, FnType, NamedType, TupleType, VariableType,
 }
+import project/prepass.{ExternalType}
 
 type LowerCtx {
   LowerCtx(
@@ -99,7 +100,7 @@ pub fn desugar_module(
     list.filter_map(custom_types, fn(def) {
       let ct = def.definition
       case dict.get(mod_syms.types, ct.name) {
-        Ok(type_info) -> Ok(lower_type_def(type_info, mod_syms))
+        Ok(type_info) -> Ok(lower_type_def(type_info, mod_syms, table))
         Error(_) -> Error(Nil)
       }
     })
@@ -112,7 +113,12 @@ pub fn desugar_module(
         name: mangle.mangle_type_name(ta.name),
         publicity: ta.publicity,
         type_params:,
-        aliased: lower_ast_type(ta.aliased, mod_syms, table.package_name),
+        aliased: lower_ast_type_with_table(
+          ta.aliased,
+          mod_syms,
+          table.package_name,
+          Some(table),
+        ),
       )
     })
 
@@ -120,7 +126,7 @@ pub fn desugar_module(
     list.flat_map(custom_types, fn(def) {
       let ct = def.definition
       case dict.get(mod_syms.types, ct.name) {
-        Ok(type_info) -> synthesize_getters(type_info, mod_syms)
+        Ok(type_info) -> synthesize_getters(type_info, mod_syms, table)
         Error(_) -> []
       }
     })
@@ -152,7 +158,11 @@ pub fn desugar_module(
   )
 }
 
-fn lower_type_def(type_info: TypeInfo, mod_syms: ModuleSymbols) -> IrTypeDef {
+fn lower_type_def(
+  type_info: TypeInfo,
+  mod_syms: ModuleSymbols,
+  table: SymbolTable,
+) -> IrTypeDef {
   let type_params = list.map(type_info.parameters, mangle.mangle_type_param)
   let variants =
     list.map(type_info.variants, fn(variant) {
@@ -160,8 +170,19 @@ fn lower_type_def(type_info: TypeInfo, mod_syms: ModuleSymbols) -> IrTypeDef {
         list.map(variant.fields, fn(field) {
           let field_type = case field.resolved_type {
             Some(rt) ->
-              resolved_type_to_ir(rt, Some(type_info.parameters), mod_syms)
-            None -> lower_ast_type(field.ast_type, mod_syms, "")
+              resolved_type_to_ir_with_table(
+                rt,
+                Some(type_info.parameters),
+                mod_syms,
+                Some(table),
+              )
+            None ->
+              lower_ast_type_with_table(
+                field.ast_type,
+                mod_syms,
+                "",
+                Some(table),
+              )
           }
           IrVariantField(
             label: option.map(field.label, mangle.mangle_ident),
@@ -172,8 +193,15 @@ fn lower_type_def(type_info: TypeInfo, mod_syms: ModuleSymbols) -> IrTypeDef {
       IrVariant(name: variant.name, fields:)
     })
 
+  let ir_name = case type_info.external_type {
+    Some(ExternalType(package:, type_name: target))
+      if { package == "" || package == "builtin" } && target == type_info.name
+    -> type_info.name
+    _ -> mangle.mangle_type_name(type_info.name)
+  }
+
   IrTypeDef(
-    name: mangle.mangle_type_name(type_info.name),
+    name: ir_name,
     unmangled_name: type_info.name,
     publicity: type_info.publicity,
     opaque_: type_info.opaque_,
@@ -187,6 +215,7 @@ fn lower_type_def(type_info: TypeInfo, mod_syms: ModuleSymbols) -> IrTypeDef {
 fn synthesize_getters(
   type_info: TypeInfo,
   mod_syms: ModuleSymbols,
+  table: SymbolTable,
 ) -> List(IrGetter) {
   let type_params = list.map(type_info.parameters, mangle.mangle_type_param)
   let variants =
@@ -204,10 +233,11 @@ fn synthesize_getters(
       type_params:,
       publicity: type_info.publicity,
       field_name: mangle.mangle_ident(field_name),
-      return_type: resolved_type_to_ir(
+      return_type: resolved_type_to_ir_with_table(
         resolved_ty,
         Some(type_info.parameters),
         mod_syms,
+        Some(table),
       ),
       variants:,
     )
@@ -225,14 +255,21 @@ fn lower_constants(
       let value_type = case dict.get(cur_ctx.mod_syms.constants, c.name) {
         Ok(ci) ->
           case ci.resolved_type {
-            Some(rt) -> resolved_type_to_ir(rt, None, cur_ctx.mod_syms)
+            Some(rt) ->
+              resolved_type_to_ir_with_table(
+                rt,
+                None,
+                cur_ctx.mod_syms,
+                Some(cur_ctx.table),
+              )
             None ->
               case c.annotation {
                 Some(ann) ->
-                  lower_ast_type(
+                  lower_ast_type_with_table(
                     ann,
                     cur_ctx.mod_syms,
                     cur_ctx.table.package_name,
+                    Some(cur_ctx.table),
                   )
                 None -> IrTypeVar("T0")
               }
@@ -240,7 +277,12 @@ fn lower_constants(
         Error(_) ->
           case c.annotation {
             Some(ann) ->
-              lower_ast_type(ann, cur_ctx.mod_syms, cur_ctx.table.package_name)
+              lower_ast_type_with_table(
+                ann,
+                cur_ctx.mod_syms,
+                cur_ctx.table.package_name,
+                Some(cur_ctx.table),
+              )
             None -> IrTypeVar("T0")
           }
       }
@@ -288,7 +330,13 @@ fn lower_function(
           case list_at(fn_info.parameters, idx) {
             Some(pi) ->
               case pi.resolved_type {
-                Some(rt) -> Some(resolved_type_to_ir(rt, None, ctx.mod_syms))
+                Some(rt) ->
+                  Some(resolved_type_to_ir_with_table(
+                    rt,
+                    None,
+                    ctx.mod_syms,
+                    Some(ctx.table),
+                  ))
                 None -> None
               }
             None -> None
@@ -300,7 +348,12 @@ fn lower_function(
         None ->
           case param.type_ {
             Some(ast_t) ->
-              lower_ast_type(ast_t, ctx.mod_syms, ctx.table.package_name)
+              lower_ast_type_with_table(
+                ast_t,
+                ctx.mod_syms,
+                ctx.table.package_name,
+                Some(ctx.table),
+              )
             None -> IrTypeVar(mangle.type_var_id_to_name(idx))
           }
       }
@@ -314,18 +367,34 @@ fn lower_function(
   let return_type = case maybe_fn_info {
     Ok(fn_info) ->
       case fn_info.return_type {
-        Some(rt) -> resolved_type_to_ir(rt, None, ctx.mod_syms)
+        Some(rt) ->
+          resolved_type_to_ir_with_table(
+            rt,
+            None,
+            ctx.mod_syms,
+            Some(ctx.table),
+          )
         None ->
           case func.return {
             Some(ast_t) ->
-              lower_ast_type(ast_t, ctx.mod_syms, ctx.table.package_name)
+              lower_ast_type_with_table(
+                ast_t,
+                ctx.mod_syms,
+                ctx.table.package_name,
+                Some(ctx.table),
+              )
             None -> IrTypeUnit
           }
       }
     Error(_) ->
       case func.return {
         Some(ast_t) ->
-          lower_ast_type(ast_t, ctx.mod_syms, ctx.table.package_name)
+          lower_ast_type_with_table(
+            ast_t,
+            ctx.mod_syms,
+            ctx.table.package_name,
+            Some(ctx.table),
+          )
         None -> IrTypeUnit
       }
   }
@@ -357,6 +426,7 @@ fn lower_function(
       return_type,
       ctx.mod_syms,
       ctx.table.package_name,
+      Some(ctx.table),
     )
   let body_ctx = LowerCtx(..ctx, local_vars: param_local_vars, ast_type_vars:)
   let #(body, after_body_ctx) = lower_statements(func.body, body_ctx)
@@ -428,6 +498,7 @@ fn lower_statements(
                 ctx2.mod_syms,
                 ctx2.table.package_name,
                 ctx2.ast_type_vars,
+                Some(ctx2.table),
               )
             })
 
@@ -523,6 +594,7 @@ fn lower_use_patterns(
             next_ctx.mod_syms,
             next_ctx.table.package_name,
             next_ctx.ast_type_vars,
+            Some(next_ctx.table),
           )
         })
       let updated_vars =
@@ -635,6 +707,7 @@ fn lower_expr(expr: glance.Expression, ctx: LowerCtx) -> #(IrExpr, LowerCtx) {
                 ctx.mod_syms,
                 ctx.table.package_name,
                 ctx.ast_type_vars,
+                Some(ctx.table),
               )
             })
           #([IrFnParam(p_name, p_type), ..ps], next_vars)
@@ -646,6 +719,7 @@ fn lower_expr(expr: glance.Expression, ctx: LowerCtx) -> #(IrExpr, LowerCtx) {
             ctx.mod_syms,
             ctx.table.package_name,
             ctx.ast_type_vars,
+            Some(ctx.table),
           )
         })
       let #(lowered_body, ctx1) =
@@ -1726,11 +1800,25 @@ pub fn resolved_type_to_ir(
   named_type_params: Option(List(String)),
   mod_syms: ModuleSymbols,
 ) -> IrType {
+  resolved_type_to_ir_with_table(ty, named_type_params, mod_syms, None)
+}
+
+fn resolved_type_to_ir_with_table(
+  ty: ResolvedType,
+  named_type_params: Option(List(String)),
+  mod_syms: ModuleSymbols,
+  table_opt: Option(SymbolTable),
+) -> IrType {
   case ty {
     NamedType(name:, package:, module:, parameters:) -> {
       let lowered_args =
         list.map(parameters, fn(p) {
-          resolved_type_to_ir(p, named_type_params, mod_syms)
+          resolved_type_to_ir_with_table(
+            p,
+            named_type_params,
+            mod_syms,
+            table_opt,
+          )
         })
       case module, name, lowered_args {
         "gleam", "Int", [] -> IrTypeInt64
@@ -1750,7 +1838,7 @@ pub fn resolved_type_to_ir(
             module_alias: alias,
             package:,
             module:,
-            name: mangle_referenced_type_name(module, name),
+            name: mangle_referenced_type_name(table_opt, module, name),
             args: lowered_args,
           )
         }
@@ -1760,16 +1848,31 @@ pub fn resolved_type_to_ir(
     TupleType(elements:) ->
       IrTypeTuple(
         list.map(elements, fn(el) {
-          resolved_type_to_ir(el, named_type_params, mod_syms)
+          resolved_type_to_ir_with_table(
+            el,
+            named_type_params,
+            mod_syms,
+            table_opt,
+          )
         }),
       )
 
     FnType(parameters:, return:) ->
       IrTypeFn(
         params: list.map(parameters, fn(p) {
-          resolved_type_to_ir(p, named_type_params, mod_syms)
+          resolved_type_to_ir_with_table(
+            p,
+            named_type_params,
+            mod_syms,
+            table_opt,
+          )
         }),
-        return: resolved_type_to_ir(return, named_type_params, mod_syms),
+        return: resolved_type_to_ir_with_table(
+          return,
+          named_type_params,
+          mod_syms,
+          table_opt,
+        ),
       )
 
     VariableType(id:) -> {
@@ -1792,7 +1895,16 @@ pub fn lower_ast_type(
   mod_syms: ModuleSymbols,
   package_name: String,
 ) -> IrType {
-  lower_ast_type_with_vars(ty, mod_syms, package_name, dict.new())
+  lower_ast_type_with_table(ty, mod_syms, package_name, None)
+}
+
+fn lower_ast_type_with_table(
+  ty: glance.Type,
+  mod_syms: ModuleSymbols,
+  package_name: String,
+  table_opt: Option(SymbolTable),
+) -> IrType {
+  lower_ast_type_with_vars(ty, mod_syms, package_name, dict.new(), table_opt)
 }
 
 fn lower_ast_type_with_vars(
@@ -1800,12 +1912,19 @@ fn lower_ast_type_with_vars(
   mod_syms: ModuleSymbols,
   package_name: String,
   ast_type_vars: dict.Dict(String, String),
+  table_opt: Option(SymbolTable),
 ) -> IrType {
   case ty {
     glance.NamedType(name:, module: mod_opt, parameters:, ..) -> {
       let args =
         list.map(parameters, fn(p) {
-          lower_ast_type_with_vars(p, mod_syms, package_name, ast_type_vars)
+          lower_ast_type_with_vars(
+            p,
+            mod_syms,
+            package_name,
+            ast_type_vars,
+            table_opt,
+          )
         })
       case mod_opt, name, args {
         None, "Int", [] -> IrTypeInt64
@@ -1833,7 +1952,7 @@ fn lower_ast_type_with_vars(
             module_alias: Some(alias),
             package: package_name,
             module: target_mod,
-            name: mangle_referenced_type_name(target_mod, name),
+            name: mangle_referenced_type_name(table_opt, target_mod, name),
             args:,
           )
         }
@@ -1844,7 +1963,11 @@ fn lower_ast_type_with_vars(
                 module_alias: Some(find_import_alias(mod_syms, target_mod)),
                 package: package_name,
                 module: target_mod,
-                name: mangle_referenced_type_name(target_mod, orig_name),
+                name: mangle_referenced_type_name(
+                  table_opt,
+                  target_mod,
+                  orig_name,
+                ),
                 args:,
               )
             Error(_) ->
@@ -1852,7 +1975,11 @@ fn lower_ast_type_with_vars(
                 module_alias: None,
                 package: package_name,
                 module: mod_syms.name,
-                name: mangle_referenced_type_name(mod_syms.name, name),
+                name: mangle_referenced_type_name(
+                  table_opt,
+                  mod_syms.name,
+                  name,
+                ),
                 args:,
               )
           }
@@ -1862,20 +1989,33 @@ fn lower_ast_type_with_vars(
     glance.TupleType(elements:, ..) ->
       IrTypeTuple(
         list.map(elements, fn(el) {
-          lower_ast_type_with_vars(el, mod_syms, package_name, ast_type_vars)
+          lower_ast_type_with_vars(
+            el,
+            mod_syms,
+            package_name,
+            ast_type_vars,
+            table_opt,
+          )
         }),
       )
 
     glance.FunctionType(parameters:, return:, ..) ->
       IrTypeFn(
         params: list.map(parameters, fn(p) {
-          lower_ast_type_with_vars(p, mod_syms, package_name, ast_type_vars)
+          lower_ast_type_with_vars(
+            p,
+            mod_syms,
+            package_name,
+            ast_type_vars,
+            table_opt,
+          )
         }),
         return: lower_ast_type_with_vars(
           return,
           mod_syms,
           package_name,
           ast_type_vars,
+          table_opt,
         ),
       )
 
@@ -1896,6 +2036,7 @@ fn build_ast_type_var_map(
   ir_return: IrType,
   mod_syms: ModuleSymbols,
   package_name: String,
+  table_opt: Option(SymbolTable),
 ) -> dict.Dict(String, String) {
   let acc0 =
     list.fold(list.zip(ast_params, ir_params), dict.new(), fn(acc, pair) {
@@ -1903,7 +2044,7 @@ fn build_ast_type_var_map(
       case ap.type_ {
         Some(ast_t) ->
           collect_ast_type_var_map(
-            lower_ast_type(ast_t, mod_syms, package_name),
+            lower_ast_type_with_table(ast_t, mod_syms, package_name, table_opt),
             ip.param_type,
             acc,
           )
@@ -1913,7 +2054,7 @@ fn build_ast_type_var_map(
   case ast_return {
     Some(ast_r) ->
       collect_ast_type_var_map(
-        lower_ast_type(ast_r, mod_syms, package_name),
+        lower_ast_type_with_table(ast_r, mod_syms, package_name, table_opt),
         ir_return,
         acc0,
       )
@@ -1950,11 +2091,38 @@ fn collect_ast_type_var_map(
   }
 }
 
-fn mangle_referenced_type_name(module: String, name: String) -> String {
-  case module, name {
-    "gleam/option", "Option" -> name
-    "gleam", _ -> name
-    _, _ -> mangle.mangle_type_name(name)
+fn is_builtin_external_type(
+  table_opt: Option(SymbolTable),
+  module: String,
+  name: String,
+) -> Bool {
+  case table_opt {
+    None -> False
+    Some(tbl) ->
+      case dict.get(tbl.modules, module) {
+        Error(_) -> False
+        Ok(ms) ->
+          case dict.get(ms.types, name) {
+            Ok(ti) ->
+              case ti.external_type {
+                Some(ExternalType(package: pkg, type_name:)) ->
+                  { pkg == "" || pkg == "builtin" } && type_name == name
+                _ -> False
+              }
+            Error(_) -> False
+          }
+      }
+  }
+}
+
+fn mangle_referenced_type_name(
+  table_opt: Option(SymbolTable),
+  module: String,
+  name: String,
+) -> String {
+  case module == "gleam" || is_builtin_external_type(table_opt, module, name) {
+    True -> name
+    False -> mangle.mangle_type_name(name)
   }
 }
 
