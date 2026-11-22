@@ -42,7 +42,10 @@ flowchart TD
 
 ## Installation
 
-Prerequisites: [Gleam](https://gleam.run) (1.19.x) and Erlang/OTP on your `PATH`, plus [MoonBit](https://www.moonbitlang.com/) (`moon`) to build the generated output. `wasm-tools` and `wit-bindgen` are needed only for WebAssembly Component commands.
+**Prerequisites:**
+- **[Gleam](https://gleam.run)** `1.19.x` (verified with `1.19.2`) and Erlang/OTP (27/28) on your `PATH`
+- **[MoonBit](https://www.moonbitlang.com/)** (`moon >= 0.1.20261104` / `moonc >= 0.10.20`, verified with `moon 0.1.20261119` / `moonc v0.10.22`; required for the `moon.mod` / `moon.pkg` manifest format that `gekko` emits)
+- **`wasm-tools` and `wit-bindgen`** (`wit-bindgen-cli`) — needed only for WebAssembly Component (`gekko wit`) commands
 
 ```bash
 git clone https://github.com/spiral-nights/gekko && cd gekko
