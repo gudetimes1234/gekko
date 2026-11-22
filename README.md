@@ -251,7 +251,7 @@ Standalone example projects are hosted in [`gekko_examples`](https://github.com/
 - **MoonBit FFI** — Local `moonbit/` package and `moonbitlang/core/math` via `@external`
 - **File I/O** — Reading/writing files via `moonbit/moon.mod` (`moonbitlang/x/fs`) + `gekko moonbit bind`
 - **Fibonacci CLI** — Reading CLI arguments via `moonbitlang/core/env` + native `gekko build --target native`
-- **Expression Calculator** — Multi-statement expression & function evaluator using the pure-Gleam `party` parser combinator package from Hex
+- **Calculator** — Multi-statement expression & function evaluator using the pure-Gleam `party` parser combinator package from Hex
 
 ---
 
