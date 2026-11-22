@@ -4,6 +4,9 @@
 
 `gekko` (from Japanese *月光*, meaning *moonbeam*) compiles standard Gleam projects—including local modules and resolved Hex dependencies—into multi-package [MoonBit](https://www.moonbitlang.com/) workspaces. From there, MoonBit compiles your Gleam code to **`wasm-gc`**, **`wasm`** (linear memory), **`js`**, **`native`**, and **WebAssembly Components (WIT / WASI Preview 2)**.
 
+> [!WARNING]
+> **Experimental Software — Not Production Ready:** `gekko` is an early-stage, experimental transpiler and is **not yet suitable for production use**. CLI flags, FFI conventions, generated MoonBit code, runtime semantics, and compatibility with upstream Gleam and MoonBit releases may change without notice, and bugs or unsupported edge cases should be expected.
+
 ---
 
 ## Why `gekko`?
