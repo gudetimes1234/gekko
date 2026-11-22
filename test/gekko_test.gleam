@@ -614,6 +614,7 @@ pub fn mangle_keywords_and_type_params_test() {
   assert mangle.mangle_ident("extern") == "extern_"
   assert mangle.mangle_ident("declare") == "declare_"
   assert mangle.mangle_ident("dyn") == "dyn_"
+  assert mangle.mangle_ident("lazy") == "lazy_"
   assert mangle.mangle_ident("ignore") == "ignore_"
   assert mangle.mangle_ident("println") == "println_"
   assert mangle.mangle_ident("normal_var") == "normal_var"
