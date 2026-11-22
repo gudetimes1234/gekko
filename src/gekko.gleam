@@ -24,7 +24,7 @@ pub type BuildOutput {
 
 pub type CliAction {
   CheckAction(root: String, out: Option(String), target: Option(String))
-  BuildAction(root: String, out: Option(String), target: String)
+  BuildAction(root: String, out: Option(String), target: String, release: Bool)
   TestAction(root: String, out: Option(String), target: Option(String))
   RunAction(root: String, out: Option(String), target: Option(String))
   WitGenAction(root: String, wit_dir: Option(String), world: Option(String))
@@ -84,9 +84,9 @@ pub fn main() -> Nil {
       require_tools_or_halt(["gleam", "moon"])
       run_moon_workflow(root, out, "check", None, target, True)
     }
-    Ok(BuildAction(root:, out:, target:)) -> {
+    Ok(BuildAction(root:, out:, target:, release:)) -> {
       require_tools_or_halt(["gleam", "moon"])
-      run_build(root, out, target)
+      run_build(root, out, target, release)
     }
     Ok(TestAction(root:, out:, target:)) -> {
       require_tools_or_halt(["gleam", "moon"])
@@ -166,8 +166,13 @@ fn run_moon_workflow(
   }
 }
 
-fn run_build(root: String, out: Option(String), target: String) -> Nil {
-  case build_project(root, out, target) {
+fn run_build(
+  root: String,
+  out: Option(String),
+  target: String,
+  release: Bool,
+) -> Nil {
+  case build_project_with_profile(root, out, target, ".", release) {
     Error(err) -> {
       io.println_error("gekko error: " <> err)
       halt(1)
@@ -213,6 +218,17 @@ pub fn build_project_in_dir(
   target: String,
   output_base_dir: String,
 ) -> Result(BuildOutput, String) {
+  build_project_with_profile(root, out, target, output_base_dir, False)
+}
+
+/// Like `build_project_in_dir`, optionally building with `moon build --release`.
+pub fn build_project_with_profile(
+  root: String,
+  out: Option(String),
+  target: String,
+  output_base_dir: String,
+  release: Bool,
+) -> Result(BuildOutput, String) {
   let work_dir = filepath.join(root, "build/moonbit")
   use summary <- result.try(workspace.transpile_project_with_tests(
     root,
@@ -223,7 +239,10 @@ pub fn build_project_in_dir(
   let res =
     cmd.run(
       command: "moon",
-      args: ["build", "--target", target],
+      args: case release {
+        True -> ["build", "--release", "--target", target]
+        False -> ["build", "--target", target]
+      },
       cwd: summary.out_dir,
     )
   use _ <- result.try(case res.exit_code {
@@ -243,6 +262,7 @@ pub fn build_project_in_dir(
       expected_pkg,
       target,
       parsed_artifacts,
+      release,
     )
 
   let apply_base = fn(rel_or_abs) {
@@ -289,6 +309,7 @@ fn find_built_artifact(
   expected_pkg: String,
   target: String,
   parsed_artifacts: List(#(String, String, String)),
+  release: Bool,
 ) -> Option(String) {
   let resolve_in_work = fn(p) {
     case filepath.is_absolute(p) {
@@ -317,7 +338,10 @@ fn find_built_artifact(
         work_dir
         |> filepath.join("_build")
         |> filepath.join(target)
-        |> filepath.join("debug")
+        |> filepath.join(case release {
+          True -> "release"
+          False -> "debug"
+        })
         |> filepath.join("build")
         |> filepath.join(root_pkg_dir)
       let from_fallback =
@@ -720,13 +744,20 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
           Ok(CheckAction(root:, out:, target:))
         }
         ["build", ..rest] -> {
+          let release = list.contains(rest, "--release")
+          let rest = list.filter(rest, fn(a) { a != "--release" })
           use #(root, out, target) <- result.try(parse_build_flags(
             rest,
             ".",
             None,
             None,
           ))
-          Ok(BuildAction(root:, out:, target: option.unwrap(target, "wasm-gc")))
+          Ok(BuildAction(
+            root:,
+            out:,
+            target: option.unwrap(target, "wasm-gc"),
+            release:,
+          ))
         }
         ["test", ..rest] -> {
           use #(root, out, target) <- result.try(parse_flags(
@@ -912,7 +943,7 @@ fn print_usage() -> Nil {
     "",
     "Usage:",
     "  gekko check     [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
-    "  gekko build     [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <file> | -o <file>]",
+    "  gekko build     [--release] [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <file> | -o <file>]",
     "  gekko test      [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
     "  gekko run       [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]",
     "  gekko wit gen      [--root <dir>] [--wit <dir>] [--world <name>]",

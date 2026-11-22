@@ -3784,17 +3784,40 @@ pub fn cli_parse_args_help_and_version_test() {
   assert gekko.parse_args(["version"]) == Ok(gekko.VersionAction)
 
   assert gekko.parse_args(["build", "--root", "app", "--target", "native"])
-    == Ok(gekko.BuildAction(root: "app", out: None, target: "native"))
+    == Ok(gekko.BuildAction(
+      root: "app",
+      out: None,
+      target: "native",
+      release: False,
+    ))
+  assert gekko.parse_args(["build", "--release"])
+    == Ok(gekko.BuildAction(
+      root: ".",
+      out: None,
+      target: "wasm-gc",
+      release: True,
+    ))
   assert gekko.parse_args(["build"])
-    == Ok(gekko.BuildAction(root: ".", out: None, target: "wasm-gc"))
+    == Ok(gekko.BuildAction(
+      root: ".",
+      out: None,
+      target: "wasm-gc",
+      release: False,
+    ))
   assert gekko.parse_args(["build", "--out", "myfile.exe", "--target", "native"])
     == Ok(gekko.BuildAction(
       root: ".",
       out: Some("myfile.exe"),
       target: "native",
+      release: False,
     ))
   assert gekko.parse_args(["build", "-o", "out.wasm"])
-    == Ok(gekko.BuildAction(root: ".", out: Some("out.wasm"), target: "wasm-gc"))
+    == Ok(gekko.BuildAction(
+      root: ".",
+      out: Some("out.wasm"),
+      target: "wasm-gc",
+      release: False,
+    ))
   assert gekko.parse_args([
       "build",
       "--root=app",
@@ -3805,6 +3828,7 @@ pub fn cli_parse_args_help_and_version_test() {
       root: "app",
       out: Some("myfile.exe"),
       target: "native",
+      release: False,
     ))
 
   // All subcommands default --root to "."
