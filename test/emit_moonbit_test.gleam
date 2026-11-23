@@ -750,3 +750,99 @@ pub fn gprelude_dynmap_hash_and_charlist_inspect_test() {
     "\"charlist.from_string(\" + escape_gleam_string(char_buf.to_string()) + \")\"",
   )
 }
+
+pub fn local_closure_shadowing_inspect_sink_test() {
+  let src =
+    "pub fn wrap_show(x: a) -> String {\n"
+    <> "  echo x\n"
+    <> "  \"ok\"\n"
+    <> "}\n\n"
+    <> "pub fn caller() -> Int {\n"
+    <> "  let wrap_show = fn(f: fn(Int) -> Int) -> Int { f(1) }\n"
+    <> "  wrap_show(fn(x) { x + 1 })\n"
+    <> "}\n"
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("app", src)
+  let table =
+    symbol_table.index_project(
+      "app",
+      [#("app", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "app")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+  assert !string.contains(mbt, "wrap_show(@gprelude.inspect_fn")
+  assert string.contains(mbt, "wrap_show(fn(x : Int64) {")
+}
+
+pub fn polymorphic_constants_e2e_test() {
+  let root = "build/test_fixtures/poly_consts"
+  let out_dir = "build/test_fixtures/poly_consts_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"poly_consts\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let defs_src = "pub const empty = []\n" <> "pub const ok_zero = Ok(0)\n"
+
+  let main_src =
+    "import defs\n\n"
+    <> "pub const local_empty = []\n\n"
+    <> "pub fn check_all() -> Bool {\n"
+    <> "  let xs: List(Int) = defs.empty\n"
+    <> "  let ys: List(String) = local_empty\n"
+    <> "  let r1: Result(Int, String) = defs.ok_zero\n"
+    <> "  let r2: Result(Int, Bool) = defs.ok_zero\n"
+    <> "  xs == [] && ys == [] && r1 == Ok(0) && r2 == Ok(0)\n"
+    <> "}\n"
+
+  let test_src =
+    "import poly_consts\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn poly_consts_e2e_test() {\n"
+    <> "  assert poly_consts.check_all()\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/defs.gleam"),
+      contents: defs_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/poly_consts.gleam"),
+      contents: main_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/poly_consts_check.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  list.each(["wasm", "wasm-gc"], fn(target) {
+    let chk =
+      cmd.run(
+        command: "moon",
+        args: ["check", "--deny-warn", "--target", target],
+        cwd: out_dir,
+      )
+    assert chk.exit_code == 0
+
+    let run =
+      cmd.run(command: "moon", args: ["test", "--target", target], cwd: out_dir)
+    assert run.exit_code == 0
+    assert string.contains(run.output, "passed: 1, failed: 0")
+  })
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}

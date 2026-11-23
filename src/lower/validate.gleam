@@ -121,19 +121,7 @@ pub fn validate_module_int_literals_in_package(
 }
 
 fn empty_module_symbols(module_name: String) -> ModuleSymbols {
-  symbol_table.ModuleSymbols(
-    name: module_name,
-    source: "",
-    imports: [],
-    alias_to_module: dict.new(),
-    unqualified_values: dict.new(),
-    unqualified_types: dict.new(),
-    types: dict.new(),
-    type_aliases: dict.new(),
-    constructors: dict.new(),
-    functions: dict.new(),
-    constants: dict.new(),
-  )
+  symbol_table.empty_module_symbols(module_name)
 }
 
 fn validate_stmts(

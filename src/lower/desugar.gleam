@@ -12,14 +12,13 @@ import index/symbol_table.{
 import lower/ir.{
   type IrBinOp, type IrCallArg, type IrClause, type IrConstant, type IrExpr,
   type IrFnParam, type IrFunction, type IrGetter, type IrModule, type IrParam,
-  type IrPattern, type IrStmt, type IrType, type IrTypeDef, IrAbort, IrAddFloat,
-  IrAddInt, IrAnd, IrBinOp, IrBitString, IrBlock, IrBool, IrBreak, IrCall,
-  IrCallArg, IrClause, IrConstant, IrConstructor, IrContinue, IrDivFloat,
-  IrDivInt, IrEcho, IrEq, IrFloat, IrFn, IrFnParam, IrForLoop, IrFunction,
-  IrGetter, IrGetterCall, IrGtEqFloat, IrGtEqInt, IrGtFloat, IrGtInt, IrImport,
-  IrInt, IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch, IrModule,
-  IrModuleRef, IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt, IrNotEq, IrOr,
-  IrParam, IrPatArg, IrPatAs, IrPatBitString, IrPatDiscard, IrPatTuple, IrPatVar,
+  type IrStmt, type IrType, type IrTypeDef, IrAbort, IrAddFloat, IrAddInt, IrAnd,
+  IrBinOp, IrBitString, IrBlock, IrBool, IrCall, IrCallArg, IrClause, IrConstant,
+  IrConstructor, IrDivFloat, IrDivInt, IrEcho, IrEq, IrFloat, IrFn, IrFnParam,
+  IrFunction, IrGetter, IrGetterCall, IrGtEqFloat, IrGtEqInt, IrGtFloat, IrGtInt,
+  IrImport, IrInt, IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch,
+  IrModule, IrModuleRef, IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt,
+  IrNotEq, IrOr, IrParam, IrPatArg, IrPatDiscard, IrPatTuple, IrPatVar,
   IrPatVariant, IrRemInt, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet,
   IrString, IrStringConcat, IrSubFloat, IrSubInt, IrTuple, IrTupleIndex,
   IrTypeAlias, IrTypeBitArray, IrTypeBool, IrTypeDef, IrTypeDouble, IrTypeFn,
@@ -27,6 +26,7 @@ import lower/ir.{
   IrTypeUnit, IrTypeVar, IrUnit, IrVar, IrVariant, IrVariantField, PanicAbort,
   TodoAbort,
 }
+import lower/ir_util
 import lower/mangle
 import lower/pattern
 import project/interface.{
@@ -40,6 +40,7 @@ type LowerCtx {
     current_module: String,
     mod_syms: ModuleSymbols,
     local_vars: Set(String),
+    local_var_types: dict.Dict(String, IrType),
     ast_type_vars: dict.Dict(String, String),
     next_id: Int,
   )
@@ -53,20 +54,7 @@ pub fn desugar_module(
 ) -> IrModule {
   let mod_syms = case dict.get(table.modules, module_name) {
     Ok(ms) -> ms
-    Error(_) ->
-      symbol_table.ModuleSymbols(
-        name: module_name,
-        source: "",
-        imports: [],
-        alias_to_module: dict.new(),
-        unqualified_values: dict.new(),
-        unqualified_types: dict.new(),
-        types: dict.new(),
-        type_aliases: dict.new(),
-        constructors: dict.new(),
-        functions: dict.new(),
-        constants: dict.new(),
-      )
+    Error(_) -> symbol_table.empty_module_symbols(module_name)
   }
 
   let imports =
@@ -139,6 +127,7 @@ pub fn desugar_module(
         current_module: module_name,
         mod_syms:,
         local_vars: set.new(),
+        local_var_types: dict.new(),
         ast_type_vars: dict.new(),
         next_id: 0,
       ),
@@ -252,41 +241,33 @@ fn lower_constants(
     list.fold(const_defs, #([], ctx), fn(acc, def) {
       let #(consts, cur_ctx) = acc
       let c = def.definition
-      let value_type = case dict.get(cur_ctx.mod_syms.constants, c.name) {
+      let #(value, next_ctx) = lower_expr(c.value, cur_ctx)
+      let fallback_type = fn() {
+        case c.annotation {
+          Some(ann) ->
+            lower_ast_type_with_table(
+              ann,
+              next_ctx.mod_syms,
+              next_ctx.table.package_name,
+              Some(next_ctx.table),
+            )
+          None -> infer_const_expr_type(value)
+        }
+      }
+      let value_type = case dict.get(next_ctx.mod_syms.constants, c.name) {
         Ok(ci) ->
           case ci.resolved_type {
             Some(rt) ->
               resolved_type_to_ir_with_table(
                 rt,
                 None,
-                cur_ctx.mod_syms,
-                Some(cur_ctx.table),
+                next_ctx.mod_syms,
+                Some(next_ctx.table),
               )
-            None ->
-              case c.annotation {
-                Some(ann) ->
-                  lower_ast_type_with_table(
-                    ann,
-                    cur_ctx.mod_syms,
-                    cur_ctx.table.package_name,
-                    Some(cur_ctx.table),
-                  )
-                None -> IrTypeVar("T0")
-              }
+            None -> fallback_type()
           }
-        Error(_) ->
-          case c.annotation {
-            Some(ann) ->
-              lower_ast_type_with_table(
-                ann,
-                cur_ctx.mod_syms,
-                cur_ctx.table.package_name,
-                Some(cur_ctx.table),
-              )
-            None -> IrTypeVar("T0")
-          }
+        Error(_) -> fallback_type()
       }
-      let #(value, next_ctx) = lower_expr(c.value, cur_ctx)
       let lowered =
         IrConstant(
           name: mangle.mangle_ident(c.name),
@@ -298,6 +279,27 @@ fn lower_constants(
       #([lowered, ..consts], next_ctx)
     })
   #(list.reverse(rev_consts), final_ctx)
+}
+
+fn infer_const_expr_type(expr: IrExpr) -> IrType {
+  case expr {
+    IrInt(_) | IrNegateInt(_) -> IrTypeInt64
+    IrFloat(_) -> IrTypeDouble
+    IrString(_) -> IrTypeString
+    IrBool(_) | IrNegateBool(_) -> IrTypeBool
+    IrUnit -> IrTypeUnit
+    IrBitString(_) -> IrTypeBitArray
+    IrTuple(els) -> IrTypeTuple(list.map(els, infer_const_expr_type))
+    IrList(elements: [first, ..], ..) ->
+      IrTypeList(infer_const_expr_type(first))
+    IrList(elements: [], tail: Some(t)) -> infer_const_expr_type(t)
+    IrList(elements: [], tail: None) -> IrTypeList(IrTypeVar("T0"))
+    IrCall(IrConstructor(_, _, "Ok"), [arg]) ->
+      IrTypeResult(infer_const_expr_type(arg.value), IrTypeVar("T0"))
+    IrCall(IrConstructor(_, _, "Err"), [arg]) ->
+      IrTypeResult(IrTypeVar("T0"), infer_const_expr_type(arg.value))
+    _ -> IrTypeVar("T0")
+  }
 }
 
 fn lower_functions(
@@ -405,18 +407,27 @@ fn lower_function(
   }
 
   let type_params =
-    collect_type_vars_in_sig(
+    ir_util.collect_type_vars_in_sig(
       list.map(params, fn(p) { p.param_type }),
       return_type,
     )
 
-  let param_local_vars =
-    list.fold(func.parameters, ctx.local_vars, fn(vars, p) {
-      case p.name {
-        glance.Named(n) -> set.insert(vars, n)
-        glance.Discarded(_) -> vars
-      }
-    })
+  let #(param_local_vars, param_local_types) =
+    list.fold(
+      list.zip(func.parameters, params),
+      #(ctx.local_vars, ctx.local_var_types),
+      fn(acc, pair) {
+        let #(vars, types) = acc
+        let #(ast_p, ir_p) = pair
+        case ast_p.name {
+          glance.Named(n) -> #(
+            set.insert(vars, n),
+            dict.insert(types, n, ir_p.param_type),
+          )
+          glance.Discarded(_) -> acc
+        }
+      },
+    )
 
   let ast_type_vars =
     build_ast_type_var_map(
@@ -428,7 +439,13 @@ fn lower_function(
       ctx.table.package_name,
       Some(ctx.table),
     )
-  let body_ctx = LowerCtx(..ctx, local_vars: param_local_vars, ast_type_vars:)
+  let body_ctx =
+    LowerCtx(
+      ..ctx,
+      local_vars: param_local_vars,
+      local_var_types: param_local_types,
+      ast_type_vars:,
+    )
   let #(body, after_body_ctx) = lower_statements(func.body, body_ctx)
 
   let lowered =
@@ -455,10 +472,20 @@ fn lower_statements(
       case stmt {
         glance.Use(patterns:, function:, ..) -> {
           let #(lowered_call_target, ctx1) = lower_expr(function, ctx)
-          let #(fn_params, preamble_stmts, body_local_vars, ctx2) =
-            lower_use_patterns(patterns, ctx1)
+          let #(
+            fn_params,
+            preamble_stmts,
+            body_local_vars,
+            body_local_types,
+            ctx2,
+          ) = lower_use_patterns(patterns, ctx1)
 
-          let body_ctx = LowerCtx(..ctx2, local_vars: body_local_vars)
+          let body_ctx =
+            LowerCtx(
+              ..ctx2,
+              local_vars: body_local_vars,
+              local_var_types: body_local_types,
+            )
           let #(rest_stmts, ctx3) = lower_statements(rest, body_ctx)
           let pruned_preambles = prune_use_preambles(preamble_stmts, rest_stmts)
 
@@ -514,10 +541,37 @@ fn lower_statements(
             list.fold(lp.bound_names, ctx_msg.local_vars, fn(vars, name) {
               set.insert(vars, name)
             })
+          let cleared_types =
+            list.fold(lp.bound_names, ctx_msg.local_var_types, fn(ts, name) {
+              dict.delete(ts, name)
+            })
+          let next_types = case pat {
+            glance.PatternVariable(name: var_name, ..) ->
+              case lowered_ann {
+                Some(ann_ty) -> dict.insert(cleared_types, var_name, ann_ty)
+                None ->
+                  case infer_local_expr_type(value, ctx_msg) {
+                    Some(inferred_ty) ->
+                      dict.insert(cleared_types, var_name, inferred_ty)
+                    None -> cleared_types
+                  }
+              }
+            _ -> cleared_types
+          }
           let #(rest_stmts, final_ctx) =
-            lower_statements(rest, LowerCtx(..ctx_msg, local_vars: next_vars))
+            lower_statements(
+              rest,
+              LowerCtx(
+                ..ctx_msg,
+                local_vars: next_vars,
+                local_var_types: next_types,
+              ),
+            )
           let post_bindings =
-            prune_bindings(lp.prefix_bindings, free_vars_stmts(rest_stmts))
+            ir_util.prune_bindings(
+              lp.prefix_bindings,
+              ir_util.free_vars_stmts(rest_stmts),
+            )
 
           let stmt_ir = case kind {
             glance.Let ->
@@ -575,77 +629,104 @@ fn lower_statements(
 fn lower_use_patterns(
   patterns: List(glance.UsePattern),
   ctx: LowerCtx,
-) -> #(List(IrFnParam), List(IrStmt), Set(String), LowerCtx) {
-  let #(rev_params, rev_preambles, next_vars, final_ctx) =
-    list.fold(patterns, #([], [], ctx.local_vars, ctx), fn(acc, up) {
-      let #(params_acc, pre_acc, vars_acc, cur_ctx) = acc
-      let lp =
-        pattern.lower_pattern(
-          up.pattern,
-          cur_ctx.table,
-          cur_ctx.current_module,
-          cur_ctx.next_id,
-        )
-      let next_ctx = LowerCtx(..cur_ctx, next_id: lp.next_id)
-      let lowered_ann =
-        option.map(up.annotation, fn(t) {
-          lower_ast_type_with_vars(
-            t,
-            next_ctx.mod_syms,
-            next_ctx.table.package_name,
-            next_ctx.ast_type_vars,
-            Some(next_ctx.table),
+) -> #(
+  List(IrFnParam),
+  List(IrStmt),
+  Set(String),
+  dict.Dict(String, IrType),
+  LowerCtx,
+) {
+  let #(rev_params, rev_preambles, next_vars, next_types, final_ctx) =
+    list.fold(
+      patterns,
+      #([], [], ctx.local_vars, ctx.local_var_types, ctx),
+      fn(acc, up) {
+        let #(params_acc, pre_acc, vars_acc, types_acc, cur_ctx) = acc
+        let lp =
+          pattern.lower_pattern(
+            up.pattern,
+            cur_ctx.table,
+            cur_ctx.current_module,
+            cur_ctx.next_id,
           )
-        })
-      let updated_vars =
-        list.fold(lp.bound_names, vars_acc, fn(v, n) { set.insert(v, n) })
-
-      case lp.pattern, lp.guards, lp.prefix_bindings {
-        IrPatVar(name), [], [] -> #(
-          [IrFnParam(name, lowered_ann), ..params_acc],
-          pre_acc,
-          updated_vars,
-          next_ctx,
-        )
-        IrPatDiscard, [], [] -> #(
-          [IrFnParam("_", lowered_ann), ..params_acc],
-          pre_acc,
-          updated_vars,
-          next_ctx,
-        )
-        IrPatTuple(_), [], [] -> {
-          let synth = "__use_arg_" <> int.to_string(next_ctx.next_id)
-          let ctx_after = LowerCtx(..next_ctx, next_id: next_ctx.next_id + 1)
-          let stmt = IrStmtLet(lp.pattern, None, IrVar(synth))
-          #(
-            [IrFnParam(synth, lowered_ann), ..params_acc],
-            [stmt, ..pre_acc],
-            updated_vars,
-            ctx_after,
-          )
-        }
-        _, _, _ -> {
-          let synth = "__use_arg_" <> int.to_string(next_ctx.next_id)
-          let ctx_after = LowerCtx(..next_ctx, next_id: next_ctx.next_id + 1)
-          let stmt =
-            IrStmtGuard(
-              value: IrVar(synth),
-              pattern: lp.pattern,
-              guard_condition: combine_guards(lp.guards),
-              abort_message: None,
-              post_bindings: lp.prefix_bindings,
+        let next_ctx = LowerCtx(..cur_ctx, next_id: lp.next_id)
+        let lowered_ann =
+          option.map(up.annotation, fn(t) {
+            lower_ast_type_with_vars(
+              t,
+              next_ctx.mod_syms,
+              next_ctx.table.package_name,
+              next_ctx.ast_type_vars,
+              Some(next_ctx.table),
             )
-          #(
-            [IrFnParam(synth, lowered_ann), ..params_acc],
-            [stmt, ..pre_acc],
-            updated_vars,
-            ctx_after,
-          )
+          })
+        let updated_vars =
+          list.fold(lp.bound_names, vars_acc, fn(v, n) { set.insert(v, n) })
+        let cleared_types =
+          list.fold(lp.bound_names, types_acc, fn(ts, n) { dict.delete(ts, n) })
+        let updated_types = case up.pattern, lowered_ann {
+          glance.PatternVariable(name: var_name, ..), Some(ann_ty) ->
+            dict.insert(cleared_types, var_name, ann_ty)
+          _, _ -> cleared_types
         }
-      }
-    })
 
-  #(list.reverse(rev_params), list.reverse(rev_preambles), next_vars, final_ctx)
+        case lp.pattern, lp.guards, lp.prefix_bindings {
+          IrPatVar(name), [], [] -> #(
+            [IrFnParam(name, lowered_ann), ..params_acc],
+            pre_acc,
+            updated_vars,
+            updated_types,
+            next_ctx,
+          )
+          IrPatDiscard, [], [] -> #(
+            [IrFnParam("_", lowered_ann), ..params_acc],
+            pre_acc,
+            updated_vars,
+            updated_types,
+            next_ctx,
+          )
+          IrPatTuple(_), [], [] -> {
+            let synth = "__use_arg_" <> int.to_string(next_ctx.next_id)
+            let ctx_after = LowerCtx(..next_ctx, next_id: next_ctx.next_id + 1)
+            let stmt = IrStmtLet(lp.pattern, None, IrVar(synth))
+            #(
+              [IrFnParam(synth, lowered_ann), ..params_acc],
+              [stmt, ..pre_acc],
+              updated_vars,
+              updated_types,
+              ctx_after,
+            )
+          }
+          _, _, _ -> {
+            let synth = "__use_arg_" <> int.to_string(next_ctx.next_id)
+            let ctx_after = LowerCtx(..next_ctx, next_id: next_ctx.next_id + 1)
+            let stmt =
+              IrStmtGuard(
+                value: IrVar(synth),
+                pattern: lp.pattern,
+                guard_condition: combine_guards(lp.guards),
+                abort_message: None,
+                post_bindings: lp.prefix_bindings,
+              )
+            #(
+              [IrFnParam(synth, lowered_ann), ..params_acc],
+              [stmt, ..pre_acc],
+              updated_vars,
+              updated_types,
+              ctx_after,
+            )
+          }
+        }
+      },
+    )
+
+  #(
+    list.reverse(rev_params),
+    list.reverse(rev_preambles),
+    next_vars,
+    next_types,
+    final_ctx,
+  )
 }
 
 fn lower_expr(expr: glance.Expression, ctx: LowerCtx) -> #(IrExpr, LowerCtx) {
@@ -693,25 +774,36 @@ fn lower_expr(expr: glance.Expression, ctx: LowerCtx) -> #(IrExpr, LowerCtx) {
     }
 
     glance.Fn(arguments:, return_annotation:, body:, ..) -> {
-      let #(fn_params, body_vars) =
-        list.fold(arguments, #([], ctx.local_vars), fn(acc, param) {
-          let #(ps, vars) = acc
-          let #(p_name, next_vars) = case param.name {
-            glance.Named(n) -> #(mangle.mangle_ident(n), set.insert(vars, n))
-            glance.Discarded(_) -> #("_", vars)
-          }
-          let p_type =
-            option.map(param.type_, fn(t) {
-              lower_ast_type_with_vars(
-                t,
-                ctx.mod_syms,
-                ctx.table.package_name,
-                ctx.ast_type_vars,
-                Some(ctx.table),
+      let #(fn_params, body_vars, body_types) =
+        list.fold(
+          arguments,
+          #([], ctx.local_vars, ctx.local_var_types),
+          fn(acc, param) {
+            let #(ps, vars, types) = acc
+            let p_type =
+              option.map(param.type_, fn(t) {
+                lower_ast_type_with_vars(
+                  t,
+                  ctx.mod_syms,
+                  ctx.table.package_name,
+                  ctx.ast_type_vars,
+                  Some(ctx.table),
+                )
+              })
+            let #(p_name, next_vars, next_types) = case param.name {
+              glance.Named(n) -> #(
+                mangle.mangle_ident(n),
+                set.insert(vars, n),
+                case p_type {
+                  Some(pt) -> dict.insert(types, n, pt)
+                  None -> dict.delete(types, n)
+                },
               )
-            })
-          #([IrFnParam(p_name, p_type), ..ps], next_vars)
-        })
+              glance.Discarded(_) -> #("_", vars, types)
+            }
+            #([IrFnParam(p_name, p_type), ..ps], next_vars, next_types)
+          },
+        )
       let ret_type =
         option.map(return_annotation, fn(t) {
           lower_ast_type_with_vars(
@@ -723,7 +815,10 @@ fn lower_expr(expr: glance.Expression, ctx: LowerCtx) -> #(IrExpr, LowerCtx) {
           )
         })
       let #(lowered_body, ctx1) =
-        lower_statements(body, LowerCtx(..ctx, local_vars: body_vars))
+        lower_statements(
+          body,
+          LowerCtx(..ctx, local_vars: body_vars, local_var_types: body_types),
+        )
       #(
         IrFn(list.reverse(fn_params), ret_type, lowered_body),
         LowerCtx(..ctx, next_id: ctx1.next_id),
@@ -910,7 +1005,15 @@ fn resolve_callee_arity(
   case callee {
     glance.Variable(name:, ..) ->
       case set.contains(ctx.local_vars, name) {
-        True -> None
+        True ->
+          case dict.get(ctx.local_var_types, name) {
+            Ok(IrTypeFn(params:, ..)) ->
+              Some(#(
+                list.length(params),
+                list.repeat(None, list.length(params)),
+              ))
+            _ -> None
+          }
         False ->
           case dict.get(ctx.mod_syms.functions, name) {
             Ok(fn_info) -> Some(fn_info_arity_labels(fn_info))
@@ -937,8 +1040,141 @@ fn resolve_callee_arity(
         None -> None
       }
 
+    _ ->
+      case infer_local_expr_type(callee, ctx) {
+        Some(IrTypeFn(params:, ..)) ->
+          Some(#(list.length(params), list.repeat(None, list.length(params))))
+        _ -> None
+      }
+  }
+}
+
+fn infer_local_expr_type(
+  expr: glance.Expression,
+  ctx: LowerCtx,
+) -> Option(IrType) {
+  case expr {
+    glance.Int(..) -> Some(IrTypeInt64)
+    glance.Float(..) -> Some(IrTypeDouble)
+    glance.String(..) -> Some(IrTypeString)
+    glance.Variable(name:, ..) ->
+      case set.contains(ctx.local_vars, name) {
+        True -> dict.get(ctx.local_var_types, name) |> option.from_result
+        False ->
+          case dict.get(ctx.mod_syms.functions, name) {
+            Ok(fi) -> Some(fn_info_to_ir_type(fi, ctx))
+            Error(_) ->
+              case dict.get(ctx.mod_syms.unqualified_values, name) {
+                Ok(#(tm, orig)) ->
+                  lookup_remote_fn_ir_type(ctx.table, tm, orig, ctx)
+                Error(_) -> None
+              }
+          }
+      }
+    glance.FieldAccess(container: glance.Variable(name: alias, ..), label:, ..) ->
+      case resolve_module_alias_for_access(alias, label, ctx) {
+        Some(tm) -> lookup_remote_fn_ir_type(ctx.table, tm, label, ctx)
+        None -> None
+      }
+    glance.Fn(arguments:, return_annotation:, body:, ..) -> {
+      let #(rev_p_tys, body_vars, body_types) =
+        list.fold(
+          arguments,
+          #([], ctx.local_vars, ctx.local_var_types),
+          fn(acc, param) {
+            let #(pts, vars, types) = acc
+            let pt = case param.type_ {
+              Some(t) ->
+                lower_ast_type_with_vars(
+                  t,
+                  ctx.mod_syms,
+                  ctx.table.package_name,
+                  ctx.ast_type_vars,
+                  Some(ctx.table),
+                )
+              None -> IrTypeVar("T0")
+            }
+            let #(next_vars, next_types) = case param.name {
+              glance.Named(n) -> #(
+                set.insert(vars, n),
+                dict.insert(types, n, pt),
+              )
+              glance.Discarded(_) -> #(vars, types)
+            }
+            #([pt, ..pts], next_vars, next_types)
+          },
+        )
+      let ret_ty = case return_annotation {
+        Some(t) ->
+          lower_ast_type_with_vars(
+            t,
+            ctx.mod_syms,
+            ctx.table.package_name,
+            ctx.ast_type_vars,
+            Some(ctx.table),
+          )
+        None ->
+          case body {
+            [glance.Expression(inner)] ->
+              infer_local_expr_type(
+                inner,
+                LowerCtx(
+                  ..ctx,
+                  local_vars: body_vars,
+                  local_var_types: body_types,
+                ),
+              )
+              |> option.unwrap(IrTypeVar("T0"))
+            _ -> IrTypeVar("T0")
+          }
+      }
+      Some(IrTypeFn(list.reverse(rev_p_tys), ret_ty))
+    }
+    glance.Call(function:, ..) ->
+      case infer_local_expr_type(function, ctx) {
+        Some(IrTypeFn(_, ret)) -> Some(ret)
+        _ -> None
+      }
     _ -> None
   }
+}
+
+fn lookup_remote_fn_ir_type(
+  table: SymbolTable,
+  target_mod: String,
+  symbol: String,
+  ctx: LowerCtx,
+) -> Option(IrType) {
+  case dict.get(table.modules, target_mod) {
+    Ok(ms) ->
+      case dict.get(ms.functions, symbol) {
+        Ok(fi) -> Some(fn_info_to_ir_type(fi, ctx))
+        Error(_) -> None
+      }
+    Error(_) -> None
+  }
+}
+
+fn fn_info_to_ir_type(fi: FunctionInfo, ctx: LowerCtx) -> IrType {
+  let param_tys =
+    list.map(fi.parameters, fn(p) {
+      case p.resolved_type {
+        Some(rt) ->
+          resolved_type_to_ir_with_table(
+            rt,
+            None,
+            ctx.mod_syms,
+            Some(ctx.table),
+          )
+        None -> IrTypeVar("T0")
+      }
+    })
+  let ret_ty = case fi.return_type {
+    Some(rt) ->
+      resolved_type_to_ir_with_table(rt, None, ctx.mod_syms, Some(ctx.table))
+    None -> IrTypeUnit
+  }
+  IrTypeFn(param_tys, ret_ty)
 }
 
 fn lookup_remote_arity(
@@ -1325,7 +1561,12 @@ fn lower_clause(
         list.fold(alts, ctx1.local_vars, fn(vars, a) {
           list.fold(a.3, vars, fn(v, n) { set.insert(v, n) })
         })
-      let arm_ctx = LowerCtx(..ctx1, local_vars: bound_vars)
+      let bound_types =
+        list.fold(alts, ctx1.local_var_types, fn(ts, a) {
+          list.fold(a.3, ts, fn(t, n) { dict.delete(t, n) })
+        })
+      let arm_ctx =
+        LowerCtx(..ctx1, local_vars: bound_vars, local_var_types: bound_types)
       let #(guard_ir, ctx2) = lower_opt_expr(clause.guard, arm_ctx)
       let #(body_ir, ctx3) = lower_expr(clause.body, ctx2)
       #(
@@ -1350,13 +1591,25 @@ fn lower_clause(
             list.fold(bound_names, cur_ctx.local_vars, fn(v, n) {
               set.insert(v, n)
             })
-          let arm_ctx = LowerCtx(..cur_ctx, local_vars: bound_vars)
+          let bound_types =
+            list.fold(bound_names, cur_ctx.local_var_types, fn(ts, n) {
+              dict.delete(ts, n)
+            })
+          let arm_ctx =
+            LowerCtx(
+              ..cur_ctx,
+              local_vars: bound_vars,
+              local_var_types: bound_types,
+            )
           let #(user_guard, ctx_g) = lower_opt_expr(clause.guard, arm_ctx)
           let combined_guard =
             build_clause_guard(synth_guards, prefix_bindings, user_guard)
           let #(body_ir, ctx_b) = lower_expr(clause.body, ctx_g)
           let pruned_prefix_bindings =
-            prune_bindings(prefix_bindings, free_vars_expr(body_ir))
+            ir_util.prune_bindings(
+              prefix_bindings,
+              ir_util.free_vars_expr(body_ir),
+            )
           let ir_clause =
             IrClause(
               patterns: [pats],
@@ -1380,7 +1633,7 @@ fn build_clause_guard(
   let user_opt = case user_guard {
     None -> None
     Some(ug) ->
-      case prune_bindings(prefix_bindings, free_vars_expr(ug)) {
+      case ir_util.prune_bindings(prefix_bindings, ir_util.free_vars_expr(ug)) {
         [] -> Some(ug)
         kept -> {
           let lets =
@@ -1415,7 +1668,8 @@ fn prune_use_preambles(
     [] -> []
     [first, ..more] -> {
       let pruned_more = prune_use_preambles(more, rest_stmts)
-      let tail_fv = free_vars_stmts(list.append(pruned_more, rest_stmts))
+      let tail_fv =
+        ir_util.free_vars_stmts(list.append(pruned_more, rest_stmts))
       let updated_first = case first {
         IrStmtGuard(
           value:,
@@ -1429,186 +1683,12 @@ fn prune_use_preambles(
             pattern:,
             guard_condition:,
             abort_message:,
-            post_bindings: prune_bindings(post_bindings, tail_fv),
+            post_bindings: ir_util.prune_bindings(post_bindings, tail_fv),
           )
         other -> other
       }
       [updated_first, ..pruned_more]
     }
-  }
-}
-
-fn prune_bindings(
-  bindings: List(#(String, IrExpr)),
-  needed: Set(String),
-) -> List(#(String, IrExpr)) {
-  let #(kept, _) =
-    list.fold_right(bindings, #([], needed), fn(acc, b) {
-      let #(kept_acc, need_set) = acc
-      let #(name, expr) = b
-      case set.contains(need_set, name) {
-        True -> {
-          let next_need =
-            set.union(set.delete(need_set, name), free_vars_expr(expr))
-          #([b, ..kept_acc], next_need)
-        }
-        False -> #(kept_acc, need_set)
-      }
-    })
-  kept
-}
-
-fn free_after_bindings(
-  bindings: List(#(String, IrExpr)),
-  tail_fv: Set(String),
-) -> Set(String) {
-  list.fold_right(bindings, tail_fv, fn(acc, b) {
-    let #(name, expr) = b
-    set.union(set.delete(acc, name), free_vars_expr(expr))
-  })
-}
-
-fn pattern_bound_mangled_vars(pat: IrPattern) -> Set(String) {
-  case pat {
-    IrPatVar(name) -> set.from_list([name])
-    IrPatAs(inner, alias) ->
-      set.insert(pattern_bound_mangled_vars(inner), alias)
-    IrPatTuple(els) ->
-      list.fold(els, set.new(), fn(acc, el) {
-        set.union(acc, pattern_bound_mangled_vars(el))
-      })
-    IrPatVariant(args:, ..) ->
-      list.fold(args, set.new(), fn(acc, arg) {
-        set.union(acc, pattern_bound_mangled_vars(arg.pattern))
-      })
-    IrPatBitString(segments:) ->
-      list.fold(segments, set.new(), fn(acc, seg) {
-        set.union(acc, pattern_bound_mangled_vars(seg.0))
-      })
-    _ -> set.new()
-  }
-}
-
-fn free_vars_opt_expr(opt: Option(IrExpr)) -> Set(String) {
-  case opt {
-    Some(e) -> free_vars_expr(e)
-    None -> set.new()
-  }
-}
-
-fn free_vars_stmts(stmts: List(IrStmt)) -> Set(String) {
-  list.fold_right(stmts, set.new(), fn(rest_fv, stmt) {
-    case stmt {
-      IrStmtLet(pattern:, value:, ..) ->
-        set.union(
-          free_vars_expr(value),
-          set.difference(rest_fv, pattern_bound_mangled_vars(pattern)),
-        )
-      IrStmtGuard(
-        value:,
-        pattern:,
-        guard_condition:,
-        abort_message:,
-        post_bindings:,
-      ) -> {
-        let pat_vars = pattern_bound_mangled_vars(pattern)
-        let after_posts = free_after_bindings(post_bindings, rest_fv)
-        let cond_fv = free_vars_opt_expr(guard_condition)
-        let msg_fv = free_vars_opt_expr(abort_message)
-        set.union(
-          free_vars_expr(value),
-          set.union(
-            msg_fv,
-            set.difference(set.union(cond_fv, after_posts), pat_vars),
-          ),
-        )
-      }
-      IrStmtAssert(condition:, abort_message:) ->
-        set.union(
-          rest_fv,
-          set.union(
-            free_vars_expr(condition),
-            free_vars_opt_expr(abort_message),
-          ),
-        )
-      IrStmtExpr(e) -> set.union(rest_fv, free_vars_expr(e))
-    }
-  })
-}
-
-fn free_vars_expr(expr: IrExpr) -> Set(String) {
-  case expr {
-    IrVar(name) -> set.from_list([name])
-    IrNegateInt(inner)
-    | IrNegateBool(inner)
-    | IrBreak(inner)
-    | IrGetterCall(receiver: inner, ..)
-    | IrTupleIndex(tuple: inner, ..) -> free_vars_expr(inner)
-    IrBinOp(left:, right:, ..) ->
-      set.union(free_vars_expr(left), free_vars_expr(right))
-    IrTuple(els) | IrContinue(els) ->
-      list.fold(els, set.new(), fn(acc, e) { set.union(acc, free_vars_expr(e)) })
-    IrList(elements:, tail:) -> {
-      let els_fv =
-        list.fold(elements, set.new(), fn(acc, e) {
-          set.union(acc, free_vars_expr(e))
-        })
-      set.union(els_fv, free_vars_opt_expr(tail))
-    }
-    IrBitString(segments:) ->
-      list.fold(segments, set.new(), fn(acc, seg) {
-        let seg_fv = set.union(acc, free_vars_expr(seg.0))
-        list.fold(seg.1, seg_fv, fn(inner_acc, opt) {
-          case opt {
-            glance.SizeValueOption(size_expr) ->
-              set.union(inner_acc, free_vars_expr(size_expr))
-            _ -> inner_acc
-          }
-        })
-      })
-    IrCall(function:, args:) -> {
-      let fn_fv = free_vars_expr(function)
-      list.fold(args, fn_fv, fn(acc, arg) {
-        set.union(acc, free_vars_expr(arg.value))
-      })
-    }
-    IrBlock(stmts) -> free_vars_stmts(stmts)
-    IrFn(params:, body:, ..) -> {
-      let bound = set.from_list(list.map(params, fn(p) { p.name }))
-      set.difference(free_vars_stmts(body), bound)
-    }
-    IrForLoop(bindings:, body:) -> {
-      let bind_vals =
-        list.fold(bindings, set.new(), fn(acc, b) {
-          set.union(acc, free_vars_expr(b.1))
-        })
-      let bound = set.from_list(list.map(bindings, fn(b) { b.0 }))
-      set.union(bind_vals, set.difference(free_vars_stmts(body), bound))
-    }
-    IrMatch(subjects:, clauses:) -> {
-      let subj_fv =
-        list.fold(subjects, set.new(), fn(acc, s) {
-          set.union(acc, free_vars_expr(s))
-        })
-      list.fold(clauses, subj_fv, fn(acc, c) {
-        let pat_vars = case c.patterns {
-          [first_alt, ..] ->
-            list.fold(first_alt, set.new(), fn(ps, p) {
-              set.union(ps, pattern_bound_mangled_vars(p))
-            })
-          [] -> set.new()
-        }
-        let body_tail =
-          free_after_bindings(c.prefix_bindings, free_vars_expr(c.body))
-        let g_fv = free_vars_opt_expr(c.guard)
-        let clause_fv = set.difference(set.union(g_fv, body_tail), pat_vars)
-        set.union(acc, clause_fv)
-      })
-    }
-    IrEcho(expr: inner, message:, ..) ->
-      set.union(free_vars_expr(inner), free_vars_opt_expr(message))
-    IrAbort(message:, ..) -> free_vars_opt_expr(message)
-    _ -> set.new()
   }
 }
 
@@ -2047,6 +2127,10 @@ fn build_ast_type_var_map(
           collect_ast_type_var_map(
             lower_ast_type_with_table(ast_t, mod_syms, package_name, table_opt),
             ip.param_type,
+            mod_syms,
+            package_name,
+            table_opt,
+            set.new(),
             acc,
           )
         None -> acc
@@ -2057,6 +2141,10 @@ fn build_ast_type_var_map(
       collect_ast_type_var_map(
         lower_ast_type_with_table(ast_r, mod_syms, package_name, table_opt),
         ir_return,
+        mod_syms,
+        package_name,
+        table_opt,
+        set.new(),
         acc0,
       )
     None -> acc0
@@ -2066,29 +2154,203 @@ fn build_ast_type_var_map(
 fn collect_ast_type_var_map(
   ast_ir: IrType,
   resolved_ir: IrType,
+  mod_syms: ModuleSymbols,
+  package_name: String,
+  table_opt: Option(SymbolTable),
+  visited: Set(#(String, String)),
   acc: dict.Dict(String, String),
 ) -> dict.Dict(String, String) {
   case ast_ir, resolved_ir {
     IrTypeVar(a), IrTypeVar(b) -> dict.insert(acc, a, b)
-    IrTypeList(a), IrTypeList(b) -> collect_ast_type_var_map(a, b, acc)
+    IrTypeList(a), IrTypeList(b) ->
+      collect_ast_type_var_map(
+        a,
+        b,
+        mod_syms,
+        package_name,
+        table_opt,
+        visited,
+        acc,
+      )
     IrTypeResult(ao, ae), IrTypeResult(bo, be) ->
-      collect_ast_type_var_map(ae, be, collect_ast_type_var_map(ao, bo, acc))
+      collect_ast_type_var_map(
+        ae,
+        be,
+        mod_syms,
+        package_name,
+        table_opt,
+        visited,
+        collect_ast_type_var_map(
+          ao,
+          bo,
+          mod_syms,
+          package_name,
+          table_opt,
+          visited,
+          acc,
+        ),
+      )
     IrTypeTuple(as_), IrTypeTuple(bs) ->
       list.fold(list.zip(as_, bs), acc, fn(s, pair) {
-        collect_ast_type_var_map(pair.0, pair.1, s)
+        collect_ast_type_var_map(
+          pair.0,
+          pair.1,
+          mod_syms,
+          package_name,
+          table_opt,
+          visited,
+          s,
+        )
       })
     IrTypeFn(ap, ar), IrTypeFn(bp, br) -> {
       let s1 =
         list.fold(list.zip(ap, bp), acc, fn(s, pair) {
-          collect_ast_type_var_map(pair.0, pair.1, s)
+          collect_ast_type_var_map(
+            pair.0,
+            pair.1,
+            mod_syms,
+            package_name,
+            table_opt,
+            visited,
+            s,
+          )
         })
-      collect_ast_type_var_map(ar, br, s1)
+      collect_ast_type_var_map(
+        ar,
+        br,
+        mod_syms,
+        package_name,
+        table_opt,
+        visited,
+        s1,
+      )
     }
-    IrTypeNamed(args: a_args, ..), IrTypeNamed(args: b_args, ..) ->
+    IrTypeNamed(module: am, name: an, args: a_args, ..),
+      IrTypeNamed(module: rm, name: rn, args: b_args, ..)
+      if am == rm && an == rn
+    ->
       list.fold(list.zip(a_args, b_args), acc, fn(s, pair) {
-        collect_ast_type_var_map(pair.0, pair.1, s)
+        collect_ast_type_var_map(
+          pair.0,
+          pair.1,
+          mod_syms,
+          package_name,
+          table_opt,
+          visited,
+          s,
+        )
       })
+    IrTypeNamed(module:, name:, args:, ..), _ ->
+      case
+        expand_ast_type_alias(
+          module,
+          name,
+          args,
+          mod_syms,
+          package_name,
+          table_opt,
+          visited,
+        )
+      {
+        Some(#(expanded, next_mod_syms)) ->
+          collect_ast_type_var_map(
+            expanded,
+            resolved_ir,
+            next_mod_syms,
+            package_name,
+            table_opt,
+            set.insert(visited, #(module, name)),
+            acc,
+          )
+        None -> acc
+      }
     _, _ -> acc
+  }
+}
+
+fn expand_ast_type_alias(
+  module: String,
+  name: String,
+  args: List(IrType),
+  mod_syms: ModuleSymbols,
+  package_name: String,
+  table_opt: Option(SymbolTable),
+  visited: Set(#(String, String)),
+) -> Option(#(IrType, ModuleSymbols)) {
+  case set.contains(visited, #(module, name)) {
+    True -> None
+    False -> {
+      let target_syms = case module == mod_syms.name || module == "" {
+        True -> Some(mod_syms)
+        False ->
+          case table_opt {
+            Some(tbl) -> dict.get(tbl.modules, module) |> option.from_result
+            None -> None
+          }
+      }
+      case target_syms {
+        None -> None
+        Some(ts) -> {
+          let found =
+            dict.values(ts.type_aliases)
+            |> list.find(fn(ta) {
+              ta.name == name || mangle.mangle_type_name(ta.name) == name
+            })
+          case found {
+            Ok(ta) ->
+              case list.length(ta.parameters) == list.length(args) {
+                False -> None
+                True -> {
+                  let lowered_body =
+                    lower_ast_type_with_table(
+                      ta.aliased,
+                      ts,
+                      package_name,
+                      table_opt,
+                    )
+                  let subst =
+                    list.zip(
+                      list.map(ta.parameters, mangle.mangle_type_param),
+                      args,
+                    )
+                    |> dict.from_list
+                  Some(#(substitute_ir_type_vars(lowered_body, subst), ts))
+                }
+              }
+            Error(_) -> None
+          }
+        }
+      }
+    }
+  }
+}
+
+fn substitute_ir_type_vars(
+  ty: IrType,
+  subst: dict.Dict(String, IrType),
+) -> IrType {
+  case ty {
+    IrTypeVar(v) ->
+      case dict.get(subst, v) {
+        Ok(replacement) -> replacement
+        Error(_) -> ty
+      }
+    IrTypeList(inner) -> IrTypeList(substitute_ir_type_vars(inner, subst))
+    IrTypeResult(ok_t, err_t) ->
+      IrTypeResult(
+        substitute_ir_type_vars(ok_t, subst),
+        substitute_ir_type_vars(err_t, subst),
+      )
+    IrTypeTuple(els) ->
+      IrTypeTuple(list.map(els, substitute_ir_type_vars(_, subst)))
+    IrTypeFn(ps, r) ->
+      IrTypeFn(
+        list.map(ps, substitute_ir_type_vars(_, subst)),
+        substitute_ir_type_vars(r, subst),
+      )
+    IrTypeNamed(args:, ..) ->
+      IrTypeNamed(..ty, args: list.map(args, substitute_ir_type_vars(_, subst)))
+    _ -> ty
   }
 }
 
@@ -2124,58 +2386,6 @@ fn mangle_referenced_type_name(
   case module == "gleam" || is_builtin_external_type(table_opt, module, name) {
     True -> name
     False -> mangle.mangle_type_name(name)
-  }
-}
-
-fn collect_type_vars_in_sig(
-  param_types: List(IrType),
-  return_type: IrType,
-) -> List(String) {
-  let all_types = list.append(param_types, [return_type])
-  let #(rev_vars, _) =
-    list.fold(all_types, #([], set.new()), fn(acc, t) {
-      collect_type_vars(t, acc.0, acc.1)
-    })
-  list.reverse(rev_vars)
-}
-
-fn collect_type_vars(
-  ty: IrType,
-  rev_acc: List(String),
-  seen: Set(String),
-) -> #(List(String), Set(String)) {
-  case ty {
-    IrTypeVar(name) ->
-      case set.contains(seen, name) {
-        True -> #(rev_acc, seen)
-        False -> #([name, ..rev_acc], set.insert(seen, name))
-      }
-    IrTypeInt64
-    | IrTypeDouble
-    | IrTypeString
-    | IrTypeBool
-    | IrTypeUnit
-    | IrTypeBitArray -> #(rev_acc, seen)
-    IrTypeList(inner) -> collect_type_vars(inner, rev_acc, seen)
-    IrTypeResult(ok_t, err_t) -> {
-      let #(acc1, seen1) = collect_type_vars(ok_t, rev_acc, seen)
-      collect_type_vars(err_t, acc1, seen1)
-    }
-    IrTypeTuple(els) ->
-      list.fold(els, #(rev_acc, seen), fn(acc, el) {
-        collect_type_vars(el, acc.0, acc.1)
-      })
-    IrTypeFn(params, ret) -> {
-      let #(acc1, seen1) =
-        list.fold(params, #(rev_acc, seen), fn(acc, p) {
-          collect_type_vars(p, acc.0, acc.1)
-        })
-      collect_type_vars(ret, acc1, seen1)
-    }
-    IrTypeNamed(args:, ..) ->
-      list.fold(args, #(rev_acc, seen), fn(acc, a) {
-        collect_type_vars(a, acc.0, acc.1)
-      })
   }
 }
 

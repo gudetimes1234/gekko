@@ -8,13 +8,14 @@ import gleam/set.{type Set}
 import gleam/string
 import index/symbol_table.{type SymbolTable}
 import lower/ir.{
-  type IrExpr, type IrPattern, type IrStmt, IrAddInt, IrAnd, IrBinOp,
-  IrBitString, IrBlock, IrBool, IrCall, IrCallArg, IrClause, IrDivInt, IrEq,
-  IrFloat, IrInt, IrMatch, IrModuleRef, IrMultInt, IrPatArg, IrPatAs,
-  IrPatBitString, IrPatBool, IrPatDiscard, IrPatFloat, IrPatInt, IrPatString,
-  IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrRemInt, IrStmtAssert,
-  IrStmtExpr, IrStmtGuard, IrStmtLet, IrString, IrSubInt, IrTupleIndex, IrVar,
+  type IrExpr, type IrPattern, IrAddInt, IrAnd, IrBinOp, IrBlock, IrBool, IrCall,
+  IrCallArg, IrClause, IrDivInt, IrEq, IrFloat, IrInt, IrMatch, IrModuleRef,
+  IrMultInt, IrPatArg, IrPatAs, IrPatBitString, IrPatBool, IrPatDiscard,
+  IrPatFloat, IrPatInt, IrPatString, IrPatTuple, IrPatUnit, IrPatVar,
+  IrPatVariant, IrRemInt, IrStmtExpr, IrStmtLet, IrString, IrSubInt,
+  IrTupleIndex, IrVar,
 }
+import lower/ir_util
 import lower/mangle
 
 /// Result of lowering a Gleam `glance.Pattern` along with any synthetic
@@ -811,16 +812,13 @@ fn compute_later_size_refs(segs: List(ParsedBitSeg)) -> List(Set(String)) {
 fn seg_referenced_vars(seg: ParsedBitSeg) -> Set(String) {
   let kind_vars = case seg.kind {
     SegSizedBits(b) | SegFloat(b, _) | SegInt(b, _, _) ->
-      collect_ir_expr_vars(b, set.new())
+      ir_util.free_vars_expr(b)
     SegUtfString(_, _, _) | SegUtfCodepoint(_, _) | SegRest(_) -> set.new()
   }
-  let ng_vars = case seg.nested_guard {
-    Some(g) -> collect_ir_expr_vars(g, set.new())
-    None -> set.new()
-  }
+  let ng_vars = ir_util.free_vars_opt_expr(seg.nested_guard)
   let nb_vars =
     list.fold(seg.nested_bindings, set.new(), fn(acc, b) {
-      collect_ir_expr_vars(b.1, acc)
+      set.union(acc, ir_util.free_vars_expr(b.1))
     })
   let inner_all = set.union(ng_vars, nb_vars)
   let own_nested = case seg.nested_sub_var {
@@ -871,7 +869,7 @@ fn build_bit_guard(
                 Some(ng) -> ng
                 None -> IrBool(True)
               }
-              let sub_pat = case ir_expr_uses_var(arm_body, sub_var) {
+              let sub_pat = case ir_util.expr_uses_var(arm_body, sub_var) {
                 True -> IrPatVar(sub_var)
                 False -> IrPatDiscard
               }
@@ -930,7 +928,7 @@ fn build_bit_guard(
                   )
                 None -> with_binds
               }
-              let val_pat = case ir_expr_uses_var(arm_body, val_var) {
+              let val_pat = case ir_util.expr_uses_var(arm_body, val_var) {
                 True -> IrPatVar(val_var)
                 False -> IrPatDiscard
               }
@@ -966,7 +964,7 @@ fn build_bit_guard(
               and_bool(IrBinOp(IrEq, IrVar(val_var), IrFloat(lit)), rest_guard)
             None -> rest_guard
           }
-          let val_pat = case ir_expr_uses_var(arm_body, val_var) {
+          let val_pat = case ir_util.expr_uses_var(arm_body, val_var) {
             True -> IrPatVar(val_var)
             False -> IrPatDiscard
           }
@@ -1013,10 +1011,9 @@ fn build_bit_guard(
               let after_nested_ok = case nested_guard_vars {
                 [] -> rest_guard
                 _ -> {
-                  let needed_in_rest =
-                    collect_ir_expr_vars(rest_guard, set.new())
+                  let needed_in_rest = ir_util.free_vars_expr(rest_guard)
                   let kept_nb =
-                    prune_bit_bindings(seg.nested_bindings, needed_in_rest)
+                    ir_util.prune_bindings(seg.nested_bindings, needed_in_rest)
                   wrap_lets_block(kept_nb, rest_guard)
                 }
               }
@@ -1025,7 +1022,7 @@ fn build_bit_guard(
                 None -> after_nested_ok
               }
               let arm_body = case
-                use_pos_var && ir_expr_uses_var(checked, pos_var)
+                use_pos_var && ir_util.expr_uses_var(checked, pos_var)
               {
                 True ->
                   IrBlock([
@@ -1038,7 +1035,7 @@ fn build_bit_guard(
                   ])
                 False -> checked
               }
-              let sub_pat = case ir_expr_uses_var(arm_body, sub_var) {
+              let sub_pat = case ir_util.expr_uses_var(arm_body, sub_var) {
                 True -> IrPatVar(sub_var)
                 False -> IrPatDiscard
               }
@@ -1062,7 +1059,7 @@ fn build_bit_guard(
           let pos_var = "__gpos_" <> int.to_string(next_id)
           let #(rest_guard, id1) =
             build_bit_guard(rest, subject_var, IrVar(pos_var), next_id + 1)
-          let pos_pat = case ir_expr_uses_var(rest_guard, pos_var) {
+          let pos_pat = case ir_util.expr_uses_var(rest_guard, pos_var) {
             True -> IrPatVar(pos_var)
             False -> IrPatDiscard
           }
@@ -1102,7 +1099,7 @@ fn build_bit_guard(
                 IrBool(big_endian),
               ])
           }
-          let pos_pat = case ir_expr_uses_var(rest_guard, pos_var) {
+          let pos_pat = case ir_util.expr_uses_var(rest_guard, pos_var) {
             True -> IrPatVar(pos_var)
             False -> IrPatDiscard
           }
@@ -1470,12 +1467,14 @@ fn wrap_guard_lets(
 ) -> IrExpr {
   let var_lets =
     list.filter_map(vars, fn(v) {
-      case ir_expr_uses_var(rest_guard, v) {
+      case ir_util.expr_uses_var(rest_guard, v) {
         True -> Ok(IrStmtLet(IrPatVar(v), None, val_expr))
         False -> Error(Nil)
       }
     })
-  let pos_lets = case include_pos && ir_expr_uses_var(rest_guard, pos_var) {
+  let pos_lets = case
+    include_pos && ir_util.expr_uses_var(rest_guard, pos_var)
+  {
     True -> [
       IrStmtLet(IrPatVar(pos_var), None, add_pos_expr(pos_expr, bits_expr)),
     ]
@@ -1499,28 +1498,6 @@ fn wrap_lets_block(bindings: List(#(String, IrExpr)), body: IrExpr) -> IrExpr {
   }
 }
 
-fn prune_bit_bindings(
-  bindings: List(#(String, IrExpr)),
-  needed: Set(String),
-) -> List(#(String, IrExpr)) {
-  let #(kept, _) =
-    list.fold_right(bindings, #([], needed), fn(acc, b) {
-      let #(kept_acc, need_set) = acc
-      case set.contains(need_set, b.0) {
-        True -> {
-          let next_need =
-            set.union(
-              set.delete(need_set, b.0),
-              collect_ir_expr_vars(b.1, set.new()),
-            )
-          #([b, ..kept_acc], next_need)
-        }
-        False -> #(kept_acc, need_set)
-      }
-    })
-  kept
-}
-
 fn dedup_preserve_order(items: List(String)) -> List(String) {
   let #(rev, _) =
     list.fold(items, #([], set.new()), fn(acc, item) {
@@ -1531,157 +1508,4 @@ fn dedup_preserve_order(items: List(String)) -> List(String) {
       }
     })
   list.reverse(rev)
-}
-
-fn ir_expr_uses_var(expr: IrExpr, name: String) -> Bool {
-  set.contains(collect_ir_expr_vars(expr, set.new()), name)
-}
-
-fn collect_ir_expr_vars(expr: IrExpr, acc: Set(String)) -> Set(String) {
-  case expr {
-    IrVar(name) -> set.insert(acc, name)
-    ir.IrNegateInt(inner)
-    | ir.IrNegateBool(inner)
-    | ir.IrBreak(inner)
-    | ir.IrGetterCall(receiver: inner, ..)
-    | IrTupleIndex(tuple: inner, ..) -> collect_ir_expr_vars(inner, acc)
-    IrBinOp(left:, right:, ..) ->
-      collect_ir_expr_vars(right, collect_ir_expr_vars(left, acc))
-    ir.IrTuple(els) | ir.IrContinue(els) ->
-      list.fold(els, acc, fn(a, e) { collect_ir_expr_vars(e, a) })
-    ir.IrList(elements:, tail:) -> {
-      let a1 = list.fold(elements, acc, fn(a, e) { collect_ir_expr_vars(e, a) })
-      case tail {
-        Some(t) -> collect_ir_expr_vars(t, a1)
-        None -> a1
-      }
-    }
-    IrBitString(segments:) ->
-      list.fold(segments, acc, fn(a, seg) {
-        let a1 = collect_ir_expr_vars(seg.0, a)
-        list.fold(seg.1, a1, fn(inner_a, opt) {
-          case opt {
-            glance.SizeValueOption(se) -> collect_ir_expr_vars(se, inner_a)
-            _ -> inner_a
-          }
-        })
-      })
-    IrCall(function:, args:) -> {
-      let a1 = collect_ir_expr_vars(function, acc)
-      list.fold(args, a1, fn(a, arg) { collect_ir_expr_vars(arg.value, a) })
-    }
-    IrBlock(stmts) -> set.union(acc, collect_ir_stmts_vars(stmts))
-    ir.IrFn(params:, body:, ..) -> {
-      let bound = set.from_list(list.map(params, fn(p) { p.name }))
-      set.union(acc, set.difference(collect_ir_stmts_vars(body), bound))
-    }
-    ir.IrForLoop(bindings:, body:) -> {
-      let b_vals =
-        list.fold(bindings, acc, fn(a, b) { collect_ir_expr_vars(b.1, a) })
-      let bound = set.from_list(list.map(bindings, fn(b) { b.0 }))
-      set.union(b_vals, set.difference(collect_ir_stmts_vars(body), bound))
-    }
-    IrMatch(subjects:, clauses:) -> {
-      let a1 = list.fold(subjects, acc, fn(a, s) { collect_ir_expr_vars(s, a) })
-      list.fold(clauses, a1, fn(a, c) {
-        let pat_vars = case c.patterns {
-          [first_alt, ..] ->
-            list.fold(first_alt, set.new(), fn(ps, p) {
-              set.union(ps, ir_pat_bound_vars(p))
-            })
-          [] -> set.new()
-        }
-        let body_fv = collect_ir_expr_vars(c.body, set.new())
-        let after_pb =
-          list.fold_right(c.prefix_bindings, body_fv, fn(fv, pb) {
-            set.union(
-              set.delete(fv, pb.0),
-              collect_ir_expr_vars(pb.1, set.new()),
-            )
-          })
-        let g_fv = case c.guard {
-          Some(g) -> collect_ir_expr_vars(g, after_pb)
-          None -> after_pb
-        }
-        set.union(a, set.difference(g_fv, pat_vars))
-      })
-    }
-    ir.IrEcho(expr: inner, message:, ..) -> {
-      let a1 = collect_ir_expr_vars(inner, acc)
-      case message {
-        Some(m) -> collect_ir_expr_vars(m, a1)
-        None -> a1
-      }
-    }
-    ir.IrAbort(message: Some(m), ..) -> collect_ir_expr_vars(m, acc)
-    _ -> acc
-  }
-}
-
-fn collect_ir_stmts_vars(stmts: List(IrStmt)) -> Set(String) {
-  list.fold_right(stmts, set.new(), fn(rest_fv, stmt) {
-    case stmt {
-      IrStmtLet(pattern:, value:, ..) ->
-        set.union(
-          collect_ir_expr_vars(value, set.new()),
-          set.difference(rest_fv, ir_pat_bound_vars(pattern)),
-        )
-      IrStmtGuard(
-        value:,
-        pattern:,
-        guard_condition:,
-        abort_message:,
-        post_bindings:,
-      ) -> {
-        let pat_vars = ir_pat_bound_vars(pattern)
-        let after_pb =
-          list.fold_right(post_bindings, rest_fv, fn(fv, pb) {
-            set.union(
-              set.delete(fv, pb.0),
-              collect_ir_expr_vars(pb.1, set.new()),
-            )
-          })
-        let cond_fv = case guard_condition {
-          Some(g) -> collect_ir_expr_vars(g, after_pb)
-          None -> after_pb
-        }
-        let msg_fv = case abort_message {
-          Some(m) -> collect_ir_expr_vars(m, set.new())
-          None -> set.new()
-        }
-        set.union(
-          collect_ir_expr_vars(value, set.new()),
-          set.union(msg_fv, set.difference(cond_fv, pat_vars)),
-        )
-      }
-      IrStmtAssert(condition:, abort_message:) -> {
-        let a1 = collect_ir_expr_vars(condition, rest_fv)
-        case abort_message {
-          Some(m) -> collect_ir_expr_vars(m, a1)
-          None -> a1
-        }
-      }
-      IrStmtExpr(e) -> set.union(rest_fv, collect_ir_expr_vars(e, set.new()))
-    }
-  })
-}
-
-fn ir_pat_bound_vars(pat: IrPattern) -> Set(String) {
-  case pat {
-    IrPatVar(name) -> set.from_list([name])
-    IrPatAs(inner, alias) -> set.insert(ir_pat_bound_vars(inner), alias)
-    IrPatTuple(els) ->
-      list.fold(els, set.new(), fn(acc, el) {
-        set.union(acc, ir_pat_bound_vars(el))
-      })
-    IrPatVariant(args:, ..) ->
-      list.fold(args, set.new(), fn(acc, arg) {
-        set.union(acc, ir_pat_bound_vars(arg.pattern))
-      })
-    IrPatBitString(segments:) ->
-      list.fold(segments, set.new(), fn(acc, seg) {
-        set.union(acc, ir_pat_bound_vars(seg.0))
-      })
-    _ -> set.new()
-  }
 }

@@ -2,14 +2,14 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/set.{type Set}
+import gleam/set
 import lower/ir.{
   type IrCallArg, type IrClause, type IrExpr, type IrFunction, type IrModule,
-  type IrParam, type IrPatArg, type IrPattern, type IrStmt, IrAbort, IrBlock,
-  IrBreak, IrCall, IrClause, IrContinue, IrForLoop, IrFunction, IrMatch,
-  IrModule, IrParam, IrPatAs, IrPatBitString, IrPatDiscard, IrPatTuple, IrPatVar,
-  IrPatVariant, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet, IrVar,
+  type IrParam, type IrStmt, IrAbort, IrBlock, IrBreak, IrCall, IrClause,
+  IrContinue, IrForLoop, IrFunction, IrMatch, IrModule, IrParam, IrPatDiscard,
+  IrPatVar, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet, IrVar,
 }
+import lower/ir_util
 
 /// Apply self-tail-call optimization across all functions in `module`.
 pub fn optimize_module(module: IrModule) -> IrModule {
@@ -229,9 +229,10 @@ fn fill_params(
 
 fn stmt_shadows_name(stmt: IrStmt, name: String) -> Bool {
   case stmt {
-    IrStmtLet(pattern:, ..) -> set.contains(pattern_bound_vars(pattern), name)
+    IrStmtLet(pattern:, ..) ->
+      set.contains(ir_util.pattern_bound_vars(pattern), name)
     IrStmtGuard(pattern:, post_bindings:, ..) ->
-      set.contains(pattern_bound_vars(pattern), name)
+      set.contains(ir_util.pattern_bound_vars(pattern), name)
       || list.any(post_bindings, fn(b) { b.0 == name })
     IrStmtAssert(_, _) | IrStmtExpr(_) -> False
   }
@@ -240,33 +241,8 @@ fn stmt_shadows_name(stmt: IrStmt, name: String) -> Bool {
 fn clause_shadows_name(clause: IrClause, name: String) -> Bool {
   let pat_shadows =
     list.any(clause.patterns, fn(alt) {
-      list.any(alt, fn(p) { set.contains(pattern_bound_vars(p), name) })
+      list.any(alt, fn(p) { set.contains(ir_util.pattern_bound_vars(p), name) })
     })
   let binding_shadows = list.any(clause.prefix_bindings, fn(b) { b.0 == name })
   pat_shadows || binding_shadows
-}
-
-fn pattern_bound_vars(pat: IrPattern) -> Set(String) {
-  case pat {
-    ir.IrPatInt(_)
-    | ir.IrPatFloat(_)
-    | ir.IrPatString(_)
-    | ir.IrPatBool(_)
-    | ir.IrPatUnit
-    | IrPatDiscard -> set.new()
-    IrPatVar(name) -> set.from_list([name])
-    IrPatTuple(els) ->
-      list.fold(els, set.new(), fn(acc, el) {
-        set.union(acc, pattern_bound_vars(el))
-      })
-    IrPatVariant(args:, ..) ->
-      list.fold(args, set.new(), fn(acc, arg: IrPatArg) {
-        set.union(acc, pattern_bound_vars(arg.pattern))
-      })
-    IrPatAs(inner, alias) -> set.insert(pattern_bound_vars(inner), alias)
-    IrPatBitString(segments:) ->
-      list.fold(segments, set.new(), fn(acc, seg) {
-        set.union(acc, pattern_bound_vars(seg.0))
-      })
-  }
 }

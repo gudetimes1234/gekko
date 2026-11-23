@@ -4,6 +4,7 @@ import glance
 import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/set
 import gleam/string
 import index/symbol_table
 import lower/desugar
@@ -1014,4 +1015,73 @@ pub fn tco_non_tail_let_and_synthetic_pattern_root_test() {
   assert lp.is_synthetic_root == False
   assert lp.prefix_bindings == []
   assert lp.pattern == ir.IrPatAs(ir.IrPatVar("__user_var"), "user_alias")
+}
+
+pub fn shadowed_private_external_fn_not_reachable_test() {
+  let src =
+    "@external(erlang, \"m\", \"dead\")\n"
+    <> "fn dead() -> Int\n\n"
+    <> "pub fn main_fn() -> Int {\n"
+    <> "  let dead = 42\n"
+    <> "  dead + 1\n"
+    <> "}\n"
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("app", src)
+  let table =
+    symbol_table.index_project(
+      "app",
+      [#("app", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let assert Ok(ms) = dict.get(table.modules, "app")
+  let reachable =
+    symbol_table.reachable_private_functions(ast_mod, ms.functions)
+  assert !set.contains(reachable, "dead")
+  assert set.contains(reachable, "main_fn")
+  assert validate.validate_module_int_literals(ast_mod, table, "app") == Ok(Nil)
+}
+
+pub fn type_alias_function_field_disables_derive_test() {
+  let src =
+    "pub type Handler = fn(Int) -> Int\n"
+    <> "pub type Box {\n"
+    <> "  Box(cb: Handler)\n"
+    <> "}\n"
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("app", src)
+  let table =
+    symbol_table.index_project(
+      "app",
+      [#("app", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let assert Ok(ms) = dict.get(table.modules, "app")
+  let assert Ok(box_info) = dict.get(ms.types, "Box")
+  assert box_info.has_function_field == True
+  let ir_mod = desugar.desugar_module(ast_mod, table, "app")
+  let assert [td] = ir_mod.types
+  assert td.derive_eq_debug_hash == False
+}
+
+pub fn pipe_into_local_closure_and_curried_closure_test() {
+  let src =
+    "pub fn test_pipes() -> Int {\n"
+    <> "  let add = fn(a: Int, b: Int) -> Int { a + b }\n"
+    <> "  let curried = fn(a: Int) { fn(b: Int) { a + b } }\n"
+    <> "  let r1 = 10 |> add(5)\n"
+    <> "  let r2 = 10 |> curried(5)\n"
+    <> "  r1 + r2\n"
+    <> "}\n"
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("app", src)
+  let table =
+    symbol_table.index_project(
+      "app",
+      [#("app", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "app")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+  assert string.contains(mbt, "add(10L, 5L)")
+  assert string.contains(mbt, "curried(5L)(10L)")
 }

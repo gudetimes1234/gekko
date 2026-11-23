@@ -26,8 +26,12 @@ import lower/ir.{
   IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString, IrTypeTuple, IrTypeUnit,
   IrTypeVar, IrUnit, IrVar, LetAssertAbort, PanicAbort, TodoAbort,
 }
+import lower/ir_util
 import lower/mangle
 import moonbit/ffi_meta.{type FfiMetadata}
+import project/interface.{
+  type ResolvedType, FnType, NamedType, TupleType, VariableType,
+}
 import project/prepass.{type ExternalType, ExternalType, PackageCall, WasmImport}
 
 type EmitCtx {
@@ -35,6 +39,7 @@ type EmitCtx {
     current_module: String,
     local_ctors: Dict(String, #(Int, List(Option(String)))),
     local_external_types: Dict(String, ExternalType),
+    local_vars: Set(String),
     table: Option(SymbolTable),
     ffi_metadata: FfiMetadata,
     project_bounds: ProjectTraitBounds,
@@ -112,6 +117,7 @@ fn emit_module_inner(
       current_module: module.module_name,
       local_ctors:,
       local_external_types:,
+      local_vars: set.new(),
       table:,
       ffi_metadata:,
       project_bounds:,
@@ -615,34 +621,88 @@ fn emit_constant(c: IrConstant, ctx: EmitCtx) -> #(String, EmitCtx) {
     glance.Public -> "pub "
     glance.Private -> ""
   }
-  let concrete_ty = instantiate_type_vars_to_unit(c.value_type)
-  let #(ty_str, ctx1) = emit_type(concrete_ty, ctx)
-  let #(val_str, ctx2) = emit_expr(c.value, ctx1)
-  #(
-    "///|\n" <> vis <> "let " <> c.name <> " : " <> ty_str <> " = " <> val_str,
-    ctx2,
-  )
+  let type_params = ir_util.collect_type_vars_in_type(c.value_type)
+  case type_params {
+    [] -> {
+      let #(ty_str, ctx1) = emit_type(c.value_type, ctx)
+      let #(val_str, ctx2) = emit_expr(c.value, ctx1)
+      #(
+        "///|\n"
+          <> vis
+          <> "let "
+          <> c.name
+          <> " : "
+          <> ty_str
+          <> " = "
+          <> val_str,
+        ctx2,
+      )
+    }
+    _ -> {
+      let #(ty_str, ctx1) = emit_type(c.value_type, ctx)
+      let #(val_str, ctx2) = emit_expr(c.value, ctx1)
+      #(
+        "///|\n"
+          <> vis
+          <> "fn"
+          <> format_type_params(type_params)
+          <> " "
+          <> c.name
+          <> "() -> "
+          <> ty_str
+          <> " {\n  "
+          <> val_str
+          <> "\n}",
+        ctx2,
+      )
+    }
+  }
 }
 
-fn instantiate_type_vars_to_unit(ty: IrType) -> IrType {
-  case ty {
-    IrTypeVar(_) -> IrTypeUnit
-    IrTypeList(inner) -> IrTypeList(instantiate_type_vars_to_unit(inner))
-    IrTypeResult(ok_t, err_t) ->
-      IrTypeResult(
-        instantiate_type_vars_to_unit(ok_t),
-        instantiate_type_vars_to_unit(err_t),
-      )
-    IrTypeTuple(els) ->
-      IrTypeTuple(list.map(els, instantiate_type_vars_to_unit))
-    IrTypeFn(ps, r) ->
-      IrTypeFn(
-        list.map(ps, instantiate_type_vars_to_unit),
-        instantiate_type_vars_to_unit(r),
-      )
-    IrTypeNamed(args:, ..) ->
-      IrTypeNamed(..ty, args: list.map(args, instantiate_type_vars_to_unit))
-    _ -> ty
+fn is_polymorphic_constant(
+  target_module: String,
+  mangled_name: String,
+  ctx: EmitCtx,
+) -> Bool {
+  case dict.get(ctx.project_bounds.all_consts, #(target_module, mangled_name)) {
+    Ok(ty) -> ir_util.collect_type_vars_in_type(ty) != []
+    Error(_) ->
+      case ctx.table {
+        None -> False
+        Some(tbl) ->
+          case dict.get(tbl.modules, target_module) {
+            Error(_) -> False
+            Ok(ms) -> {
+              let found = case dict.get(ms.constants, mangled_name) {
+                Ok(ci) -> Ok(ci)
+                Error(_) ->
+                  dict.values(ms.constants)
+                  |> list.find(fn(ci) {
+                    mangle.mangle_ident(ci.name) == mangled_name
+                  })
+              }
+              case found {
+                Ok(ci) ->
+                  case ci.resolved_type {
+                    Some(rt) -> resolved_type_has_var(rt)
+                    None -> False
+                  }
+                Error(_) -> False
+              }
+            }
+          }
+      }
+  }
+}
+
+fn resolved_type_has_var(rt: ResolvedType) -> Bool {
+  case rt {
+    VariableType(_) -> True
+    NamedType(parameters:, ..) -> list.any(parameters, resolved_type_has_var)
+    TupleType(elements:) -> list.any(elements, resolved_type_has_var)
+    FnType(parameters:, return:) ->
+      list.any(parameters, resolved_type_has_var)
+      || resolved_type_has_var(return)
   }
 }
 
@@ -727,12 +787,24 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
     }
 
     None -> {
-      let #(body_lines, ctx_body) = emit_stmts(f.body, "  ", ctx2)
+      let saved_locals = ctx2.local_vars
+      let fn_locals =
+        list.fold(f.params, saved_locals, fn(acc, p) {
+          case p.name {
+            "_" -> acc
+            name -> set.insert(acc, name)
+          }
+        })
+      let #(body_lines, ctx_body) =
+        emit_stmts(f.body, "  ", EmitCtx(..ctx2, local_vars: fn_locals))
       let body_str = case body_lines {
         [] -> "  ()"
         lines -> string.join(lines, "\n")
       }
-      #("///|\n" <> header <> " {\n" <> body_str <> "\n}", ctx_body)
+      #(
+        "///|\n" <> header <> " {\n" <> body_str <> "\n}",
+        EmitCtx(..ctx_body, local_vars: saved_locals),
+      )
     }
   }
 
@@ -800,12 +872,15 @@ fn emit_stmt(
         }
         None -> #("", ctx2)
       }
+      let next_locals =
+        set.union(ctx3.local_vars, ir_util.pattern_bound_vars(pattern))
+      let ctx_after = EmitCtx(..ctx3, local_vars: next_locals)
       case is_last {
         False ->
           case pattern_is_irrefutable(pattern) {
             True -> #(
               indent <> "let " <> pat_str <> ann_str <> " = " <> val_str,
-              ctx3,
+              ctx_after,
             )
             False -> #(
               indent
@@ -814,7 +889,7 @@ fn emit_stmt(
                 <> " is "
                 <> pat_str
                 <> " else { @prelude.abort(\"let pattern match failed\") }",
-              ctx3,
+              ctx_after,
             )
           }
         True ->
@@ -829,9 +904,12 @@ fn emit_stmt(
                 <> "\n"
                 <> indent
                 <> v,
-              ctx3,
+              ctx_after,
             )
-            True, IrPatDiscard | True, IrPatUnit -> #(indent <> val_str, ctx3)
+            True, IrPatDiscard | True, IrPatUnit -> #(
+              indent <> val_str,
+              ctx_after,
+            )
             True, _ -> #(
               indent
                 <> "let __gekko_let_val"
@@ -845,7 +923,7 @@ fn emit_stmt(
                 <> " = __gekko_let_val\n"
                 <> indent
                 <> "__gekko_let_val",
-              ctx3,
+              ctx_after,
             )
             False, _ -> #(
               indent
@@ -860,7 +938,7 @@ fn emit_stmt(
                 <> " else { @prelude.abort(\"let pattern match failed\") }\n"
                 <> indent
                 <> "__gekko_let_val",
-              ctx3,
+              ctx_after,
             )
           }
       }
@@ -878,13 +956,21 @@ fn emit_stmt(
         Some(m) -> emit_expr(m, ctx1)
         None -> #("\"let assert failed\"", ctx1)
       }
+      let ctx_pat =
+        EmitCtx(
+          ..ctx2,
+          local_vars: set.union(
+            ctx2.local_vars,
+            ir_util.pattern_bound_vars(pattern),
+          ),
+        )
       let #(guard_line, ret_expr_opt, ctx3) = case
         is_last,
         pattern,
         guard_condition
       {
         _, IrPatVar(v), Some(cond) -> {
-          let #(cond_str, c) = emit_expr_indented(cond, indent, ctx2)
+          let #(cond_str, c) = emit_expr_indented(cond, indent, ctx_pat)
           let line =
             indent
             <> "let "
@@ -903,24 +989,24 @@ fn emit_stmt(
         _, IrPatVar(v), None -> #(
           indent <> "let " <> v <> " = " <> val_str,
           Some(v),
-          ctx2,
+          ctx_pat,
         )
         False, IrPatDiscard, None -> #(
           indent <> "@prelude.ignore(" <> val_str <> ")",
           None,
-          ctx2,
+          ctx_pat,
         )
         True, IrPatDiscard, None ->
           case post_bindings {
-            [] -> #(indent <> val_str, None, ctx2)
+            [] -> #(indent <> val_str, None, ctx_pat)
             _ -> #(
               indent <> "let __gekko_assert_val = " <> val_str,
               Some("__gekko_assert_val"),
-              ctx2,
+              ctx_pat,
             )
           }
         _, _, _ -> {
-          let #(pat_str, c1) = emit_pattern(pattern, ctx2)
+          let #(pat_str, c1) = emit_pattern(pattern, ctx_pat)
           let #(cond_suffix, c2) = case guard_condition {
             Some(cond) -> {
               let #(cond_str, c) = emit_expr_indented(cond, indent, c1)
@@ -965,7 +1051,9 @@ fn emit_stmt(
         map_acc(post_bindings, ctx3, fn(binding, c) {
           let #(name, expr) = binding
           let #(expr_str, c_next) = emit_expr(expr, c)
-          #(indent <> "let " <> name <> " = " <> expr_str, c_next)
+          let c_with_var =
+            EmitCtx(..c_next, local_vars: set.insert(c_next.local_vars, name))
+          #(indent <> "let " <> name <> " = " <> expr_str, c_with_var)
         })
 
       let with_bindings = [guard_line, ..binding_lines]
@@ -1030,11 +1118,21 @@ fn emit_expr_indented(
     IrBool(True) -> #("true", ctx)
     IrBool(False) -> #("false", ctx)
     IrUnit -> #("()", ctx)
-    IrVar(name) -> #(name, ctx)
+    IrVar(name) ->
+      case
+        !set.contains(ctx.local_vars, name)
+        && is_polymorphic_constant(ctx.current_module, name, ctx)
+      {
+        True -> #(name <> "()", ctx)
+        False -> #(name, ctx)
+      }
 
     IrModuleRef(module_alias:, target_module:, symbol:) -> {
       let #(alias, ctx1) = add_module_import(ctx, target_module, module_alias)
-      #("@" <> alias <> "." <> symbol, ctx1)
+      case is_polymorphic_constant(target_module, symbol, ctx1) {
+        True -> #("@" <> alias <> "." <> symbol <> "()", ctx1)
+        False -> #("@" <> alias <> "." <> symbol, ctx1)
+      }
     }
 
     IrConstructor(module_alias:, target_module:, name:) ->
@@ -1085,13 +1183,18 @@ fn emit_expr_indented(
       case stmts {
         [] -> #("()", ctx)
         _ -> {
+          let saved_locals = ctx.local_vars
           let inner_indent = indent <> "  "
           let #(lines, ctx1) = emit_stmts(stmts, inner_indent, ctx)
-          #("{\n" <> string.join(lines, "\n") <> "\n" <> indent <> "}", ctx1)
+          #(
+            "{\n" <> string.join(lines, "\n") <> "\n" <> indent <> "}",
+            EmitCtx(..ctx1, local_vars: saved_locals),
+          )
         }
       }
 
     IrFn(params:, return_type:, body:) -> {
+      let saved_locals = ctx.local_vars
       let inferred_param_types = infer_fn_param_types(params, body)
       let #(param_strs, ctx1) =
         map_acc(params, ctx, fn(p, c) {
@@ -1114,8 +1217,16 @@ fn emit_expr_indented(
         }
         None -> #("", ctx1)
       }
+      let fn_locals =
+        list.fold(params, saved_locals, fn(acc, p) {
+          case p.name {
+            "_" -> acc
+            name -> set.insert(acc, name)
+          }
+        })
       let inner_indent = indent <> "  "
-      let #(body_lines, ctx3) = emit_stmts(body, inner_indent, ctx2)
+      let #(body_lines, ctx3) =
+        emit_stmts(body, inner_indent, EmitCtx(..ctx2, local_vars: fn_locals))
       let body_str = case body_lines {
         [] -> inner_indent <> "()"
         lines -> string.join(lines, "\n")
@@ -1130,7 +1241,7 @@ fn emit_expr_indented(
           <> "\n"
           <> indent
           <> "}",
-        ctx3,
+        EmitCtx(..ctx3, local_vars: saved_locals),
       )
     }
 
@@ -1138,6 +1249,7 @@ fn emit_expr_indented(
       emit_match_expr(subjects, clauses, indent, ctx)
 
     IrForLoop(bindings:, body:) -> {
+      let saved_locals = ctx.local_vars
       let #(binding_strs, ctx1) =
         map_acc(bindings, ctx, fn(b, c) {
           let #(name, init_expr) = b
@@ -1148,11 +1260,14 @@ fn emit_expr_indented(
         [] -> "for ;; {"
         bs -> "for " <> string.join(bs, ", ") <> " {"
       }
+      let loop_locals =
+        list.fold(bindings, saved_locals, fn(acc, b) { set.insert(acc, b.0) })
       let inner_indent = indent <> "  "
-      let #(body_lines, ctx2) = emit_stmts(body, inner_indent, ctx1)
+      let #(body_lines, ctx2) =
+        emit_stmts(body, inner_indent, EmitCtx(..ctx1, local_vars: loop_locals))
       #(
         header <> "\n" <> string.join(body_lines, "\n") <> "\n" <> indent <> "}",
-        ctx2,
+        EmitCtx(..ctx2, local_vars: saved_locals),
       )
     }
 
@@ -1396,23 +1511,43 @@ fn emit_call_expr(
         })
       let args_joined = string.join(arg_strs, ", ")
       let #(alias, ctx2) = add_module_import(ctx1, target_module, module_alias)
-      #("@" <> alias <> "." <> symbol <> "(" <> args_joined <> ")", ctx2)
+      let callee_call = case
+        is_polymorphic_constant(target_module, symbol, ctx2)
+      {
+        True -> "@" <> alias <> "." <> symbol <> "()"
+        False -> "@" <> alias <> "." <> symbol
+      }
+      #(callee_call <> "(" <> args_joined <> ")", ctx2)
     }
 
-    IrVar(fn_name) -> {
-      let callee_info =
-        lookup_callee_with_bounds(ctx.current_module, fn_name, ctx)
-      let ordered_args = case lookup_fn_param_labels(None, fn_name, ctx) {
-        Some(param_labels) -> align_call_args(args, param_labels, False)
-        None -> args
+    IrVar(fn_name) ->
+      case set.contains(ctx.local_vars, fn_name) {
+        True -> {
+          let #(arg_strs, ctx1) =
+            map_acc(args, ctx, fn(a, c) { emit_expr(a.value, c) })
+          #(fn_name <> "(" <> string.join(arg_strs, ", ") <> ")", ctx1)
+        }
+        False -> {
+          let callee_info =
+            lookup_callee_with_bounds(ctx.current_module, fn_name, ctx)
+          let ordered_args = case lookup_fn_param_labels(None, fn_name, ctx) {
+            Some(param_labels) -> align_call_args(args, param_labels, False)
+            None -> args
+          }
+          let #(arg_strs, ctx1) =
+            map_index_acc(ordered_args, ctx, fn(a, idx, c) {
+              emit_call_arg_with_inspect_check(a.value, idx, callee_info, c)
+            })
+          let args_joined = string.join(arg_strs, ", ")
+          let callee_call = case
+            is_polymorphic_constant(ctx1.current_module, fn_name, ctx1)
+          {
+            True -> fn_name <> "()"
+            False -> fn_name
+          }
+          #(callee_call <> "(" <> args_joined <> ")", ctx1)
+        }
       }
-      let #(arg_strs, ctx1) =
-        map_index_acc(ordered_args, ctx, fn(a, idx, c) {
-          emit_call_arg_with_inspect_check(a.value, idx, callee_info, c)
-        })
-      let args_joined = string.join(arg_strs, ", ")
-      #(fn_name <> "(" <> args_joined <> ")", ctx1)
-    }
 
     _ -> {
       let #(arg_strs, ctx1) =
@@ -1527,11 +1662,8 @@ fn lookup_fn_param_labels(
   case ctx.table {
     Some(tbl) ->
       case dict.get(tbl.modules, mod_name) {
-        Ok(ms) -> {
-          let found =
-            dict.values(ms.functions)
-            |> list.find(fn(fi) { mangle.mangle_ident(fi.name) == fn_name })
-          case found {
+        Ok(ms) ->
+          case dict.get(ms.mangled_functions, fn_name) {
             Ok(fi) ->
               Some(
                 list.map(fi.parameters, fn(p) {
@@ -1540,7 +1672,6 @@ fn lookup_fn_param_labels(
               )
             Error(_) -> None
           }
-        }
         Error(_) -> None
       }
     None ->
@@ -1998,6 +2129,7 @@ fn emit_clause(
   indent: String,
   ctx: EmitCtx,
 ) -> #(String, EmitCtx) {
+  let saved_locals = ctx.local_vars
   let #(alt_strs, ctx1) =
     map_acc(clause.patterns, ctx, fn(alt, c) {
       let #(pat_strs, c_next) = map_acc(alt, c, emit_pattern)
@@ -2008,12 +2140,20 @@ fn emit_clause(
     })
   let pat_part = string.join(alt_strs, " | ")
 
+  let pat_locals =
+    list.fold(clause.patterns, saved_locals, fn(acc, alt) {
+      list.fold(alt, acc, fn(inner, p) {
+        set.union(inner, ir_util.pattern_bound_vars(p))
+      })
+    })
+  let ctx_guard = EmitCtx(..ctx1, local_vars: pat_locals)
+
   let #(guard_part, ctx2) = case clause.guard {
     Some(g) -> {
-      let #(g_str, c_next) = emit_expr_indented(g, indent, ctx1)
+      let #(g_str, c_next) = emit_expr_indented(g, indent, ctx_guard)
       #(" if " <> paren_if_match(g, g_str), c_next)
     }
-    None -> #("", ctx1)
+    None -> #("", ctx_guard)
   }
 
   let body_indent = indent <> "  "
@@ -2023,7 +2163,9 @@ fn emit_clause(
       let #(bind_lines, c_b) =
         map_acc(bindings, ctx2, fn(b, c) {
           let #(val_str, c_v) = emit_expr_indented(b.1, body_indent, c)
-          #(body_indent <> "let " <> b.0 <> " = " <> val_str, c_v)
+          let c_with_var =
+            EmitCtx(..c_v, local_vars: set.insert(c_v.local_vars, b.0))
+          #(body_indent <> "let " <> b.0 <> " = " <> val_str, c_with_var)
         })
       let #(b_str, c_end) = emit_expr_indented(clause.body, body_indent, c_b)
       let lines = list.append(bind_lines, [body_indent <> b_str])
@@ -2031,7 +2173,10 @@ fn emit_clause(
     }
   }
 
-  #(indent <> pat_part <> guard_part <> " => " <> body_str, ctx3)
+  #(
+    indent <> pat_part <> guard_part <> " => " <> body_str,
+    EmitCtx(..ctx3, local_vars: saved_locals),
+  )
 }
 
 fn emit_pattern(pat: IrPattern, ctx: EmitCtx) -> #(String, EmitCtx) {
@@ -2330,7 +2475,8 @@ fn infer_stmts_var_types(
       case stmt {
         IrStmtLet(pattern:, value:, ..) -> {
           let acc1 = infer_expr_var_types(value, tracked, acc)
-          let next_tracked = set.difference(tracked, ir_pattern_vars(pattern))
+          let next_tracked =
+            set.difference(tracked, ir_util.pattern_bound_vars(pattern))
           infer_stmts_var_types(rest, next_tracked, acc1)
         }
         IrStmtGuard(
@@ -2341,7 +2487,8 @@ fn infer_stmts_var_types(
           post_bindings:,
         ) -> {
           let acc1 = infer_expr_var_types(value, tracked, acc)
-          let after_pat = set.difference(tracked, ir_pattern_vars(pattern))
+          let after_pat =
+            set.difference(tracked, ir_util.pattern_bound_vars(pattern))
           let after_post =
             list.fold(post_bindings, after_pat, fn(t, b) { set.delete(t, b.0) })
           let acc2 =
@@ -2443,7 +2590,9 @@ fn infer_expr_var_types(
       list.fold(clauses, acc1, fn(a, c) {
         let pat_shadowed =
           list.fold(c.patterns, set.new(), fn(s, alt) {
-            list.fold(alt, s, fn(s2, p) { set.union(s2, ir_pattern_vars(p)) })
+            list.fold(alt, s, fn(s2, p) {
+              set.union(s2, ir_util.pattern_bound_vars(p))
+            })
           })
         let after_pat = set.difference(tracked, pat_shadowed)
         let after_post =
@@ -2502,26 +2651,6 @@ fn record_tracked_var(
         False -> acc
       }
     _ -> acc
-  }
-}
-
-fn ir_pattern_vars(pat: IrPattern) -> Set(String) {
-  case pat {
-    IrPatVar(name) -> set.from_list([name])
-    IrPatAs(inner, alias) -> set.insert(ir_pattern_vars(inner), alias)
-    IrPatTuple(els) ->
-      list.fold(els, set.new(), fn(acc, el) {
-        set.union(acc, ir_pattern_vars(el))
-      })
-    IrPatVariant(args:, ..) ->
-      list.fold(args, set.new(), fn(acc, arg) {
-        set.union(acc, ir_pattern_vars(arg.pattern))
-      })
-    IrPatBitString(segments:) ->
-      list.fold(segments, set.new(), fn(acc, seg) {
-        set.union(acc, ir_pattern_vars(seg.0))
-      })
-    _ -> set.new()
   }
 }
 

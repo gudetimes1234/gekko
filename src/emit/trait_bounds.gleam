@@ -38,6 +38,7 @@ pub type ProjectTraitBounds {
     fn_bounds: Dict(#(String, String), FnTraitBounds),
     type_eq_hash_params: Dict(#(String, String), Set(Int)),
     all_fns: Dict(#(String, String), IrFunction),
+    all_consts: Dict(#(String, String), IrType),
   )
 }
 
@@ -50,6 +51,7 @@ type AnalyzeCtx {
     all_fns: Dict(#(String, String), IrFunction),
     all_consts: Dict(#(String, String), IrType),
     all_types: Dict(#(String, String), IrTypeDef),
+    all_type_aliases: Dict(#(String, String), ir.IrTypeAlias),
     all_ctors: Dict(#(String, String), #(IrTypeDef, IrVariant)),
     all_getters: Dict(#(String, String, String), GetterSig),
     table: Option(SymbolTable),
@@ -115,8 +117,13 @@ pub fn analyze_project(
   let ctx = build_analyze_ctx(modules, table, ffi_metadata)
   let type_eq_hash_params = compute_type_eq_hash_params(modules, ctx)
   let initial_bounds = seed_all_fn_bounds(modules, ctx)
-  let fn_bounds = propagate_fixpoint(modules, ctx, initial_bounds, 32)
-  ProjectTraitBounds(fn_bounds:, type_eq_hash_params:, all_fns: ctx.all_fns)
+  let fn_bounds = propagate_fixpoint(modules, ctx, initial_bounds, 1024)
+  ProjectTraitBounds(
+    fn_bounds:,
+    type_eq_hash_params:,
+    all_fns: ctx.all_fns,
+    all_consts: ctx.all_consts,
+  )
 }
 
 fn build_analyze_ctx(
@@ -124,12 +131,19 @@ fn build_analyze_ctx(
   table: Option(SymbolTable),
   ffi_metadata: FfiMetadata,
 ) -> AnalyzeCtx {
-  let #(all_fns, all_consts, all_types, all_ctors, all_getters) =
+  let #(
+    all_fns,
+    all_consts,
+    all_types,
+    all_type_aliases,
+    all_ctors,
+    all_getters,
+  ) =
     list.fold(
       modules,
-      #(dict.new(), dict.new(), dict.new(), dict.new(), dict.new()),
+      #(dict.new(), dict.new(), dict.new(), dict.new(), dict.new(), dict.new()),
       fn(acc, mod) {
-        let #(fns, consts, types, ctors, getters) = acc
+        let #(fns, consts, types, aliases, ctors, getters) = acc
         let next_fns =
           list.fold(mod.functions, fns, fn(m, f) {
             dict.insert(m, #(mod.module_name, f.name), f)
@@ -144,6 +158,10 @@ fn build_analyze_ctx(
             |> dict.insert(#(mod.module_name, td.name), td)
             |> dict.insert(#(mod.module_name, td.unmangled_name), td)
           })
+        let next_aliases =
+          list.fold(mod.type_aliases, aliases, fn(m, ta) {
+            dict.insert(m, #(mod.module_name, ta.name), ta)
+          })
         let next_ctors =
           list.fold(mod.types, ctors, fn(m, td) {
             list.fold(td.variants, m, fn(cm, v) {
@@ -156,13 +174,21 @@ fn build_analyze_ctx(
               GetterSig(type_params: g.type_params, return_type: g.return_type)
             dict.insert(m, #(mod.module_name, g.type_name, g.field_name), sig)
           })
-        #(next_fns, next_consts, next_types, next_ctors, next_getters)
+        #(
+          next_fns,
+          next_consts,
+          next_types,
+          next_aliases,
+          next_ctors,
+          next_getters,
+        )
       },
     )
   AnalyzeCtx(
     all_fns:,
     all_consts:,
     all_types:,
+    all_type_aliases:,
     all_ctors:,
     all_getters:,
     table:,
@@ -198,7 +224,7 @@ fn compute_type_eq_hash_params(
         }
       })
     })
-  iterate_type_eq_hash_params(modules, ctx, seeded, 32)
+  iterate_type_eq_hash_params(modules, ctx, seeded, 1024)
 }
 
 fn iterate_type_eq_hash_params(
@@ -266,7 +292,7 @@ fn collect_type_hash_vars(
   ctx: AnalyzeCtx,
   acc: Set(String),
 ) -> Set(String) {
-  case ty {
+  case expand_type_alias(ty, cur_mod, ctx) {
     IrTypeNamed(module:, name:, args:, ..) -> {
       let resolved_mod = case module {
         "" -> cur_mod
@@ -355,10 +381,10 @@ fn extract_ffi_bounds(
   let param_tys = list.map(f.params, fn(p) { p.param_type })
   let subst0 =
     list.fold(list.zip(ext_meta.param_types, param_tys), dict.new(), fn(s, pr) {
-      unify_mbt_ir(pr.0, pr.1, s)
+      unify_mbt_ir(pr.0, pr.1, mod_name, ctx, s)
     })
   let subst = case ext_meta.return_type {
-    Some(ret_mbt) -> unify_mbt_ir(ret_mbt, f.return_type, subst0)
+    Some(ret_mbt) -> unify_mbt_ir(ret_mbt, f.return_type, mod_name, ctx, subst0)
     None -> subst0
   }
   let allowed = set.from_list(f.type_params)
@@ -396,33 +422,42 @@ fn extract_ffi_bounds(
 fn unify_mbt_ir(
   mbt_ty: MbtType,
   ir_ty: IrType,
+  cur_mod: String,
+  ctx: AnalyzeCtx,
   subst: Dict(String, List(IrType)),
 ) -> Dict(String, List(IrType)) {
-  case mbt_ty, ir_ty {
+  let expanded = expand_type_alias(ir_ty, cur_mod, ctx)
+  case mbt_ty, expanded {
     ffi_meta.MbtVar(v), _ -> {
       let prev = dict.get(subst, v) |> unwrap_or([])
-      dict.insert(subst, v, [ir_ty, ..prev])
+      dict.insert(subst, v, [expanded, ..prev])
     }
     ffi_meta.MbtNamed("GList", [m_in]), IrTypeList(ir_in) ->
-      unify_mbt_ir(m_in, ir_in, subst)
+      unify_mbt_ir(m_in, ir_in, cur_mod, ctx, subst)
     ffi_meta.MbtNamed("Result", [m_ok, m_err]), IrTypeResult(ir_ok, ir_err) ->
-      unify_mbt_ir(m_err, ir_err, unify_mbt_ir(m_ok, ir_ok, subst))
+      unify_mbt_ir(
+        m_err,
+        ir_err,
+        cur_mod,
+        ctx,
+        unify_mbt_ir(m_ok, ir_ok, cur_mod, ctx, subst),
+      )
     ffi_meta.MbtNamed("Tuple1", [m_el]), IrTypeTuple([ir_el]) ->
-      unify_mbt_ir(m_el, ir_el, subst)
+      unify_mbt_ir(m_el, ir_el, cur_mod, ctx, subst)
     ffi_meta.MbtTuple(m_els), IrTypeTuple(ir_els) ->
       list.fold(list.zip(m_els, ir_els), subst, fn(s, pr) {
-        unify_mbt_ir(pr.0, pr.1, s)
+        unify_mbt_ir(pr.0, pr.1, cur_mod, ctx, s)
       })
     ffi_meta.MbtFn(m_ps, m_r), IrTypeFn(ir_ps, ir_r) -> {
       let s1 =
         list.fold(list.zip(m_ps, ir_ps), subst, fn(s, pr) {
-          unify_mbt_ir(pr.0, pr.1, s)
+          unify_mbt_ir(pr.0, pr.1, cur_mod, ctx, s)
         })
-      unify_mbt_ir(m_r, ir_r, s1)
+      unify_mbt_ir(m_r, ir_r, cur_mod, ctx, s1)
     }
     ffi_meta.MbtNamed(_, m_args), IrTypeNamed(args: ir_args, ..) ->
       list.fold(list.zip(m_args, ir_args), subst, fn(s, pr) {
-        unify_mbt_ir(pr.0, pr.1, s)
+        unify_mbt_ir(pr.0, pr.1, cur_mod, ctx, s)
       })
     _, _ -> subst
   }
@@ -502,8 +537,27 @@ fn clamp_bounds(b: FnTraitBounds, allowed: Set(String)) -> FnTraitBounds {
 
 fn build_module_const_env(mod: IrModule) -> Dict(String, IrType) {
   list.fold(mod.constants, dict.new(), fn(acc, c) {
-    dict.insert(acc, c.name, c.value_type)
+    dict.insert(acc, c.name, freshen_ir_type(c.value_type))
   })
+}
+
+fn freshen_ir_type(ty: IrType) -> IrType {
+  case ty {
+    IrTypeVar(v) ->
+      case is_free_var(v) {
+        True -> ty
+        False -> IrTypeVar("__free_" <> v)
+      }
+    IrTypeList(inner) -> IrTypeList(freshen_ir_type(inner))
+    IrTypeResult(ok_t, err_t) ->
+      IrTypeResult(freshen_ir_type(ok_t), freshen_ir_type(err_t))
+    IrTypeTuple(els) -> IrTypeTuple(list.map(els, freshen_ir_type))
+    IrTypeFn(ps, r) ->
+      IrTypeFn(list.map(ps, freshen_ir_type), freshen_ir_type(r))
+    IrTypeNamed(args:, ..) ->
+      IrTypeNamed(..ty, args: list.map(args, freshen_ir_type))
+    _ -> ty
+  }
 }
 
 fn walk_stmts(
@@ -739,7 +793,7 @@ fn walk_expr(
           {
             Some(ty), _ -> collect_type_var_names(ty, acc_children.eq_vars)
             None, Some(ty) -> collect_type_var_names(ty, acc_children.eq_vars)
-            None, None -> set.union(acc_children.eq_vars, allowed)
+            None, None -> acc_children.eq_vars
           }
           FnTraitBounds(..acc_children, eq_vars: next_eq)
         }
@@ -1164,7 +1218,8 @@ fn walk_call(
               args: list.map(td.type_params, IrTypeVar),
             )
           let subst = case expected_ret {
-            Some(exp_ty) -> unify_ir_types(td_type, exp_ty, subst0)
+            Some(exp_ty) ->
+              unify_ir_types(td_type, exp_ty, cur_mod, ctx, subst0)
             None -> subst0
           }
           let exp_types =
@@ -1231,7 +1286,8 @@ fn walk_known_fn_call(
   let subst0 =
     unify_aligned_args(callee.params, ordered_args, env, cur_mod, ctx)
   let subst = case expected_ret {
-    Some(exp_ty) -> unify_ir_types(callee.return_type, exp_ty, subst0)
+    Some(exp_ty) ->
+      unify_ir_types(callee.return_type, exp_ty, cur_mod, ctx, subst0)
     None -> subst0
   }
   let callee_bounds = case dict.get(bmap, #(callee_mod, callee.name)) {
@@ -1277,7 +1333,13 @@ fn walk_bare_fn_ref(
           return: ref_fn.return_type,
         )
       let subst =
-        unify_ir_types(ref_fn_ty, IrTypeFn(exp_params, exp_ret), dict.new())
+        unify_ir_types(
+          ref_fn_ty,
+          IrTypeFn(exp_params, exp_ret),
+          ref_mod,
+          ctx,
+          dict.new(),
+        )
       apply_callee_bounds_via_subst(ref_bounds, subst, ref_mod, ctx, acc)
     }
     _, _ -> acc
@@ -1332,7 +1394,7 @@ fn unify_aligned_args(
     case maybe_arg {
       Some(arg_val) ->
         case infer_expr_type(arg_val, env, cur_mod, ctx) {
-          Some(arg_ty) -> unify_ir_types(pi.param_type, arg_ty, s)
+          Some(arg_ty) -> unify_ir_types(pi.param_type, arg_ty, cur_mod, ctx, s)
           None -> s
         }
       None -> s
@@ -1456,7 +1518,7 @@ fn infer_expr_type(
         Ok(ty) -> Some(ty)
         Error(_) ->
           case dict.get(ctx.all_consts, #(cur_mod, name)) {
-            Ok(c_ty) -> Some(c_ty)
+            Ok(c_ty) -> Some(freshen_ir_type(c_ty))
             Error(_) ->
               case dict.get(ctx.all_fns, #(cur_mod, name)) {
                 Ok(f) -> Some(freshen_fn_type(f))
@@ -1466,7 +1528,7 @@ fn infer_expr_type(
       }
     IrModuleRef(target_module:, symbol:, ..) ->
       case dict.get(ctx.all_consts, #(target_module, symbol)) {
-        Ok(c_ty) -> Some(c_ty)
+        Ok(c_ty) -> Some(freshen_ir_type(c_ty))
         Error(_) ->
           case dict.get(ctx.all_fns, #(target_module, symbol)) {
             Ok(f) -> Some(freshen_fn_type(f))
@@ -1503,7 +1565,13 @@ fn infer_expr_type(
       }
     }
     IrTupleIndex(tuple:, index:) ->
-      case infer_expr_type(tuple, env, cur_mod, ctx) {
+      case
+        option.map(infer_expr_type(tuple, env, cur_mod, ctx), expand_type_alias(
+          _,
+          cur_mod,
+          ctx,
+        ))
+      {
         Some(IrTypeTuple(els)) -> list_at_idx(els, index)
         _ -> None
       }
@@ -1514,7 +1582,7 @@ fn infer_expr_type(
           case elements {
             [first, ..] ->
               option.map(infer_expr_type(first, env, cur_mod, ctx), IrTypeList)
-            [] -> None
+            [] -> Some(IrTypeList(IrTypeVar("__free_elem")))
           }
       }
     IrBinOp(op:, ..) ->
@@ -1540,7 +1608,12 @@ fn infer_expr_type(
     IrNegateInt(_) -> Some(IrTypeInt64)
     IrEcho(expr: inner, ..) -> infer_expr_type(inner, env, cur_mod, ctx)
     IrGetterCall(receiver:, field:) ->
-      case infer_expr_type(receiver, env, cur_mod, ctx) {
+      case
+        option.map(
+          infer_expr_type(receiver, env, cur_mod, ctx),
+          expand_type_alias(_, cur_mod, ctx),
+        )
+      {
         Some(IrTypeNamed(module:, name:, args:, ..)) -> {
           let target_mod = case module {
             "" -> cur_mod
@@ -1833,7 +1906,8 @@ fn bind_pattern_types(
   ctx: AnalyzeCtx,
   env: Dict(String, IrType),
 ) -> Dict(String, IrType) {
-  case pat, ty {
+  let expanded_ty = expand_type_alias(ty, cur_mod, ctx)
+  case pat, expanded_ty {
     IrPatVar(name), _ -> dict.insert(env, name, ty)
     IrPatAs(inner, alias), _ ->
       bind_pattern_types(inner, ty, cur_mod, ctx, dict.insert(env, alias, ty))
@@ -2000,42 +2074,53 @@ fn align_ir_call_args(
 fn unify_ir_types(
   pattern_ty: IrType,
   concrete_ty: IrType,
+  cur_mod: String,
+  ctx: AnalyzeCtx,
   subst: Dict(String, IrType),
 ) -> Dict(String, IrType) {
-  case pattern_ty, concrete_ty {
+  let pat_exp = expand_type_alias(pattern_ty, cur_mod, ctx)
+  let con_exp = expand_type_alias(concrete_ty, cur_mod, ctx)
+  case pat_exp, con_exp {
     IrTypeVar(v), _ ->
       case is_free_var(v) {
         True -> subst
         False ->
-          case concrete_ty {
+          case con_exp {
             IrTypeVar(cv) ->
               case is_free_var(cv) {
                 True -> subst
-                False -> insert_if_absent(subst, v, concrete_ty)
+                False -> insert_or_merge_subst(subst, v, con_exp)
               }
-            _ -> insert_if_absent(subst, v, concrete_ty)
+            _ -> insert_or_merge_subst(subst, v, con_exp)
           }
       }
-    IrTypeList(p_in), IrTypeList(c_in) -> unify_ir_types(p_in, c_in, subst)
+    IrTypeList(p_in), IrTypeList(c_in) ->
+      unify_ir_types(p_in, c_in, cur_mod, ctx, subst)
     IrTypeResult(po, pe), IrTypeResult(co, ce) ->
-      unify_ir_types(pe, ce, unify_ir_types(po, co, subst))
+      unify_ir_types(
+        pe,
+        ce,
+        cur_mod,
+        ctx,
+        unify_ir_types(po, co, cur_mod, ctx, subst),
+      )
     IrTypeTuple(ps), IrTypeTuple(cs) ->
       list.fold(list.zip(ps, cs), subst, fn(s, pair) {
-        unify_ir_types(pair.0, pair.1, s)
+        unify_ir_types(pair.0, pair.1, cur_mod, ctx, s)
       })
     IrTypeFn(pp, pr), IrTypeFn(cp, cr) -> {
       let s1 =
         list.fold(list.zip(pp, cp), subst, fn(s, pair) {
-          unify_ir_types(pair.0, pair.1, s)
+          unify_ir_types(pair.0, pair.1, cur_mod, ctx, s)
         })
-      unify_ir_types(pr, cr, s1)
+      unify_ir_types(pr, cr, cur_mod, ctx, s1)
     }
     IrTypeNamed(module: pm, name: pn, args: pas, ..),
       IrTypeNamed(module: cm, name: cn, args: cas, ..)
       if pm == cm && pn == cn
     ->
       list.fold(list.zip(pas, cas), subst, fn(s, pair) {
-        unify_ir_types(pair.0, pair.1, s)
+        unify_ir_types(pair.0, pair.1, cur_mod, ctx, s)
       })
     _, _ -> subst
   }
@@ -2048,14 +2133,105 @@ fn is_free_var(name: String) -> Bool {
   }
 }
 
-fn insert_if_absent(
+fn insert_or_merge_subst(
   subst: Dict(String, IrType),
   key: String,
   val: IrType,
 ) -> Dict(String, IrType) {
-  case dict.has_key(subst, key) {
-    True -> subst
-    False -> dict.insert(subst, key, val)
+  case dict.get(subst, key) {
+    Ok(existing) -> dict.insert(subst, key, merge_bound_type(existing, val))
+    Error(_) -> dict.insert(subst, key, val)
+  }
+}
+
+fn merge_bound_type(existing: IrType, new: IrType) -> IrType {
+  case existing, new {
+    IrTypeVar(v), _ ->
+      case is_free_var(v) {
+        True -> new
+        False -> existing
+      }
+    IrTypeList(e_in), IrTypeList(n_in) ->
+      IrTypeList(merge_bound_type(e_in, n_in))
+    IrTypeResult(eo, ee), IrTypeResult(no, ne) ->
+      IrTypeResult(merge_bound_type(eo, no), merge_bound_type(ee, ne))
+    IrTypeTuple(es), IrTypeTuple(ns) ->
+      case list.length(es) == list.length(ns) {
+        True ->
+          IrTypeTuple(
+            list.map(list.zip(es, ns), fn(p) { merge_bound_type(p.0, p.1) }),
+          )
+        False -> existing
+      }
+    IrTypeFn(ep, er), IrTypeFn(np, nr) ->
+      case list.length(ep) == list.length(np) {
+        True ->
+          IrTypeFn(
+            list.map(list.zip(ep, np), fn(p) { merge_bound_type(p.0, p.1) }),
+            merge_bound_type(er, nr),
+          )
+        False -> existing
+      }
+    IrTypeNamed(module: em, name: en, args: eas, ..),
+      IrTypeNamed(module: nm, name: nn, args: nas, ..)
+      if em == nm && en == nn
+    ->
+      case list.length(eas) == list.length(nas) {
+        True ->
+          IrTypeNamed(
+            ..existing,
+            args: list.map(list.zip(eas, nas), fn(p) {
+              merge_bound_type(p.0, p.1)
+            }),
+          )
+        False -> existing
+      }
+    _, _ -> existing
+  }
+}
+
+fn expand_type_alias(ty: IrType, cur_mod: String, ctx: AnalyzeCtx) -> IrType {
+  expand_type_alias_loop(ty, cur_mod, ctx, set.new())
+}
+
+fn expand_type_alias_loop(
+  ty: IrType,
+  cur_mod: String,
+  ctx: AnalyzeCtx,
+  visited: Set(#(String, String)),
+) -> IrType {
+  case ty {
+    IrTypeNamed(module:, name:, args:, ..) -> {
+      let resolved_mod = case module {
+        "" -> cur_mod
+        m -> m
+      }
+      let key = #(resolved_mod, name)
+      case set.contains(visited, key) {
+        True -> ty
+        False ->
+          case dict.get(ctx.all_type_aliases, key) {
+            Ok(ta) ->
+              case list.length(ta.type_params) == list.length(args) {
+                False -> ty
+                True -> {
+                  let subst =
+                    list.zip(ta.type_params, args)
+                    |> dict.from_list
+                  let expanded = apply_ir_subst(ta.aliased, subst)
+                  expand_type_alias_loop(
+                    expanded,
+                    resolved_mod,
+                    ctx,
+                    set.insert(visited, key),
+                  )
+                }
+              }
+            Error(_) -> ty
+          }
+      }
+    }
+    _ -> ty
   }
 }
 
@@ -2133,7 +2309,7 @@ fn collect_inspectable_type_vars(
   ctx: AnalyzeCtx,
   acc: Set(String),
 ) -> Set(String) {
-  case ty {
+  case expand_type_alias(ty, cur_mod, ctx) {
     IrTypeVar(v) -> set.insert(acc, v)
     IrTypeList(inner) -> collect_inspectable_type_vars(inner, cur_mod, ctx, acc)
     IrTypeResult(ok_t, err_t) ->
