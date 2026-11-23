@@ -134,6 +134,7 @@ pub fn transpile_project_with_tests(
     )
 
   use _ <- result.try(validate_all_int_literals(all_modules, table))
+  use _ <- result.try(validate_module_pkg_dirs(all_modules))
 
   use _ <- result.try(
     simplifile.create_directory_all(out_dir)
@@ -393,6 +394,43 @@ fn calls_gleeunit_main(stmts: List(glance.Statement)) -> Bool {
     ] -> True
     _ -> False
   }
+}
+
+fn validate_module_pkg_dirs(
+  all_modules: List(#(String, String, glance.Module, PrepassResult)),
+) -> Result(Nil, String) {
+  let res =
+    list.try_fold(all_modules, dict.new(), fn(seen, entry) {
+      let #(pkg_name, mod_name, _, _) = entry
+      let pkg_dir = pkg_config.module_to_pkg_dir(mod_name)
+      case pkg_dir == "gprelude" {
+        True ->
+          Error(
+            "Module '"
+            <> mod_name
+            <> "' collides with reserved runtime package directory 'gprelude'",
+          )
+        False ->
+          case dict.get(seen, pkg_dir) {
+            Ok(#(prev_pkg, prev_mod)) ->
+              Error(
+                "Module package directory collision: '"
+                <> prev_mod
+                <> "' ("
+                <> prev_pkg
+                <> ") and '"
+                <> mod_name
+                <> "' ("
+                <> pkg_name
+                <> ") both map to MoonBit package directory '"
+                <> pkg_dir
+                <> "'",
+              )
+            Error(_) -> Ok(dict.insert(seen, pkg_dir, #(pkg_name, mod_name)))
+          }
+      }
+    })
+  result.map(res, fn(_) { Nil })
 }
 
 fn validate_all_int_literals(

@@ -127,7 +127,46 @@ fn rewrite_expr_tail(
   case expr {
     IrCall(function: IrVar(callee), args:) if !shadowed && callee == fn_name ->
       case align_args_to_params(args, params) {
-        Some(ordered_args) -> #(IrContinue(ordered_args), True)
+        Some(#(aligned_indexed, order_changed)) ->
+          case
+            order_changed
+            && list.any(args, fn(a) { !ir_util.is_effect_free_expr(a.value) })
+          {
+            True -> {
+              let let_stmts =
+                list.index_map(args, fn(a, src_idx) { #(src_idx, a.value) })
+                |> list.filter_map(fn(pair) {
+                  let #(src_idx, val) = pair
+                  case ir_util.is_effect_free_expr(val) {
+                    True -> Error(Nil)
+                    False ->
+                      Ok(IrStmtLet(
+                        IrPatVar("__tco_arg_" <> int.to_string(src_idx)),
+                        None,
+                        val,
+                      ))
+                  }
+                })
+              let bound_exprs =
+                list.map(aligned_indexed, fn(pair) {
+                  let #(src_idx, val) = pair
+                  case ir_util.is_effect_free_expr(val) {
+                    True -> val
+                    False -> IrVar("__tco_arg_" <> int.to_string(src_idx))
+                  }
+                })
+              #(
+                IrBlock(
+                  list.append(let_stmts, [IrStmtExpr(IrContinue(bound_exprs))]),
+                ),
+                True,
+              )
+            }
+            False -> #(
+              IrContinue(list.map(aligned_indexed, fn(pair) { pair.1 })),
+              True,
+            )
+          }
         None -> #(IrBreak(expr), False)
       }
 
@@ -159,24 +198,39 @@ fn rewrite_expr_tail(
 fn align_args_to_params(
   args: List(IrCallArg),
   params: List(IrParam),
-) -> Option(List(IrExpr)) {
+) -> Option(#(List(#(Int, IrExpr)), Bool)) {
   case list.length(args) == list.length(params) {
     False -> None
     True -> {
+      let indexed = list.index_map(args, fn(arg, idx) { #(idx, arg) })
       let has_labels = list.any(args, fn(arg) { option.is_some(arg.label) })
       case has_labels {
-        False -> Some(list.map(args, fn(arg) { arg.value }))
+        False ->
+          Some(#(list.map(indexed, fn(pair) { #(pair.0, pair.1.value) }), False))
         True -> {
           let #(labeled_map, rev_positional) =
-            list.fold(args, #(dict.new(), []), fn(acc, arg) {
+            list.fold(indexed, #(dict.new(), []), fn(acc, pair) {
               let #(lmap, pos) = acc
+              let #(src_idx, arg) = pair
               case arg.label {
-                Some(lbl) -> #(dict.insert(lmap, lbl, arg.value), pos)
-                None -> #(lmap, [arg.value, ..pos])
+                Some(lbl) -> #(
+                  dict.insert(lmap, lbl, #(src_idx, arg.value)),
+                  pos,
+                )
+                None -> #(lmap, [#(src_idx, arg.value), ..pos])
               }
             })
           let positional_queue = list.reverse(rev_positional)
-          fill_params(params, labeled_map, positional_queue, [])
+          case fill_params(params, labeled_map, positional_queue, []) {
+            Some(aligned) -> {
+              let order_changed =
+                list.index_fold(aligned, False, fn(acc, pair, idx) {
+                  acc || pair.0 != idx
+                })
+              Some(#(aligned, order_changed))
+            }
+            None -> None
+          }
         }
       }
     }
@@ -185,10 +239,10 @@ fn align_args_to_params(
 
 fn fill_params(
   params: List(IrParam),
-  labeled_map: dict.Dict(String, IrExpr),
-  positional: List(IrExpr),
-  rev_acc: List(IrExpr),
-) -> Option(List(IrExpr)) {
+  labeled_map: dict.Dict(String, #(Int, IrExpr)),
+  positional: List(#(Int, IrExpr)),
+  rev_acc: List(#(Int, IrExpr)),
+) -> Option(List(#(Int, IrExpr))) {
   case params {
     [] ->
       case positional {

@@ -34,19 +34,26 @@ pub fn mangle_keywords_and_type_params_test() {
   assert mangle.mangle_ident("lazy") == "lazy_"
   assert mangle.mangle_ident("ignore") == "ignore_"
   assert mangle.mangle_ident("println") == "println_"
+  assert mangle.mangle_ident("match_") == "match__"
+  assert mangle.mangle_ident("match__") == "match___"
   assert mangle.mangle_ident("normal_var") == "normal_var"
+  assert mangle.mangle_ident("foo_") == "foo_"
 
   assert mangle.is_reserved_type_name("Error") == True
   assert mangle.is_reserved_type_name("Option") == True
   assert mangle.is_reserved_type_name("User") == False
   assert mangle.mangle_type_name("Error") == "Error_"
-  assert mangle.mangle_type_name("Option") == "Option_"
+  assert mangle.mangle_type_name("Error_") == "Error__"
   assert mangle.mangle_type_name("User") == "User"
+  assert mangle.mangle_type_name("User_") == "User_"
 
   assert mangle.mangle_type_param("item") == "Item"
   assert mangle.mangle_type_param("key_value") == "KeyValue"
   assert mangle.mangle_type_param("int") == "T_Int"
   assert mangle.mangle_type_param("string") == "T_String"
+  assert mangle.mangle_type_param("t0") == "T_T0"
+  assert mangle.mangle_type_param("t0") != mangle.type_var_id_to_name(0)
+  assert mangle.mangle_type_param("_a") != mangle.mangle_type_param("a")
   assert mangle.type_var_id_to_name(2) == "T2"
 }
 
@@ -1084,4 +1091,38 @@ pub fn pipe_into_local_closure_and_curried_closure_test() {
   let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
   assert string.contains(mbt, "add(10L, 5L)")
   assert string.contains(mbt, "curried(5L)(10L)")
+}
+
+pub fn workspace_module_pkg_dir_collision_test() {
+  let root = "build/test_fixtures/pkg_dir_collision"
+  let out_dir = "build/test_fixtures/pkg_dir_collision_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src/foo"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"pkg_dir_collision\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/foo/bar.gleam"),
+      contents: "pub fn a() -> Int { 1 }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/foo_bar.gleam"),
+      contents: "pub fn b() -> Int { 2 }\n",
+    )
+    == Ok(Nil)
+
+  let assert Error(err) = workspace.transpile_project(root, out_dir)
+  assert string.contains(err, "collision")
+  assert string.contains(err, "foo/bar")
+  assert string.contains(err, "foo_bar")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
 }

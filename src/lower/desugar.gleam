@@ -951,13 +951,36 @@ fn lower_pipe(
       let #(lowered_fn, ctx2) = lower_expr(function, ctx1)
       let #(before_args, ctx3) = lower_call_args(arguments_before, ctx2)
       let #(after_args, ctx4) = lower_call_args(arguments_after, ctx3)
-      let piped_arg =
-        IrCallArg(
-          label: option.map(label, mangle.mangle_ident),
-          value: lowered_left,
-        )
-      let all_args = list.flatten([before_args, [piped_arg], after_args])
-      #(IrCall(lowered_fn, all_args), ctx4)
+      let has_effectful_before =
+        list.any(before_args, fn(a) { !ir_util.is_effect_free_expr(a.value) })
+      case !ir_util.is_effect_free_expr(lowered_left) && has_effectful_before {
+        True -> {
+          let lhs_var = "__pipe_lhs_" <> int.to_string(ctx4.next_id)
+          let ctx5 = LowerCtx(..ctx4, next_id: ctx4.next_id + 1)
+          let piped_arg =
+            IrCallArg(
+              label: option.map(label, mangle.mangle_ident),
+              value: IrVar(lhs_var),
+            )
+          let all_args = list.flatten([before_args, [piped_arg], after_args])
+          #(
+            IrBlock([
+              IrStmtLet(IrPatVar(lhs_var), None, lowered_left),
+              IrStmtExpr(IrCall(lowered_fn, all_args)),
+            ]),
+            ctx5,
+          )
+        }
+        False -> {
+          let piped_arg =
+            IrCallArg(
+              label: option.map(label, mangle.mangle_ident),
+              value: lowered_left,
+            )
+          let all_args = list.flatten([before_args, [piped_arg], after_args])
+          #(IrCall(lowered_fn, all_args), ctx4)
+        }
+      }
     }
 
     glance.Echo(location:, expression: None, message:) -> {
@@ -976,7 +999,25 @@ fn lower_pipe(
             True -> {
               // Call is already saturated -> returns a 1-arg closure invoked with `left`
               let inner_call = IrCall(lowered_fn, lowered_args)
-              #(IrCall(inner_call, [IrCallArg(None, lowered_left)]), ctx3)
+              case !ir_util.is_effect_free_expr(lowered_left) {
+                True -> {
+                  let lhs_var = "__pipe_lhs_" <> int.to_string(ctx3.next_id)
+                  let ctx4 = LowerCtx(..ctx3, next_id: ctx3.next_id + 1)
+                  #(
+                    IrBlock([
+                      IrStmtLet(IrPatVar(lhs_var), None, lowered_left),
+                      IrStmtExpr(
+                        IrCall(inner_call, [IrCallArg(None, IrVar(lhs_var))]),
+                      ),
+                    ]),
+                    ctx4,
+                  )
+                }
+                False -> #(
+                  IrCall(inner_call, [IrCallArg(None, lowered_left)]),
+                  ctx3,
+                )
+              }
             }
             False -> {
               let piped_label = find_pipe_slot_label(params, arguments)
@@ -993,7 +1034,25 @@ fn lower_pipe(
 
     _ -> {
       let #(lowered_right, ctx2) = lower_expr(right, ctx1)
-      #(IrCall(lowered_right, [IrCallArg(None, lowered_left)]), ctx2)
+      case
+        !ir_util.is_effect_free_expr(lowered_left)
+        && !ir_util.is_effect_free_expr(lowered_right)
+      {
+        True -> {
+          let lhs_var = "__pipe_lhs_" <> int.to_string(ctx2.next_id)
+          let ctx3 = LowerCtx(..ctx2, next_id: ctx2.next_id + 1)
+          #(
+            IrBlock([
+              IrStmtLet(IrPatVar(lhs_var), None, lowered_left),
+              IrStmtExpr(
+                IrCall(lowered_right, [IrCallArg(None, IrVar(lhs_var))]),
+              ),
+            ]),
+            ctx3,
+          )
+        }
+        False -> #(IrCall(lowered_right, [IrCallArg(None, lowered_left)]), ctx2)
+      }
     }
   }
 }

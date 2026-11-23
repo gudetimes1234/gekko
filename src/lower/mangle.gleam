@@ -165,40 +165,84 @@ fn is_builtin_moonbit_type(name: String) -> Bool {
   }
 }
 
-/// Escape MoonBit reserved keywords by appending `_`.
+/// Escape MoonBit reserved keywords (and names ending in `_` whose stem is
+/// a reserved keyword) by appending `_` so mangling is injective.
 pub fn mangle_ident(name: String) -> String {
-  case is_reserved_keyword(name) {
+  let stem = strip_trailing_underscores(name)
+  case is_reserved_keyword(stem) {
     True -> name <> "_"
     False -> name
   }
 }
 
-/// Escape MoonBit reserved type names by appending `_`.
+/// Escape MoonBit reserved type names (and names ending in `_` whose stem is
+/// a reserved type name) by appending `_` so mangling is injective.
 pub fn mangle_type_name(name: String) -> String {
-  case is_reserved_type_name(name) {
+  let stem = strip_trailing_underscores(name)
+  case is_reserved_type_name(stem) {
     True -> name <> "_"
     False -> name
   }
 }
 
 /// Convert a Gleam `snake_case` type parameter into MoonBit `UpperCamelCase`,
-/// prefixing `T_` if it would collide with a MoonBit builtin type name.
+/// preserving underscore distinctions injectively and prefixing `T_` if it
+/// would collide with a MoonBit builtin type name or synthetic `T<digits>` name.
 pub fn mangle_type_param(name: String) -> String {
-  let camel =
-    name
-    |> string.split("_")
-    |> list.filter(fn(part) { part != "" })
-    |> list.map(uppercase_first)
-    |> string.concat
-
-  let base = case camel {
-    "" -> "T"
-    _ -> camel
+  let base = case name {
+    "" | "_" -> "T"
+    _ -> {
+      let parts = string.split(name, "_")
+      case list.all(parts, fn(part) { part != "" }) {
+        True ->
+          parts
+          |> list.map(uppercase_first)
+          |> string.concat
+        False ->
+          parts
+          |> list.map(fn(part) {
+            case part {
+              "" -> "U_"
+              _ -> uppercase_first(part)
+            }
+          })
+          |> string.concat
+      }
+    }
   }
 
-  case is_builtin_moonbit_type(base) {
+  case
+    is_builtin_moonbit_type(base)
+    || is_synthetic_type_var_name(base)
+    || string.starts_with(base, "T_")
+  {
     True -> "T_" <> base
     False -> base
+  }
+}
+
+fn strip_trailing_underscores(s: String) -> String {
+  case string.ends_with(s, "_") {
+    True -> strip_trailing_underscores(string.drop_end(s, 1))
+    False -> s
+  }
+}
+
+fn is_synthetic_type_var_name(name: String) -> Bool {
+  case name {
+    "T" <> rest if rest != "" ->
+      is_all_ascii_digits(string.to_utf_codepoints(rest))
+    _ -> False
+  }
+}
+
+fn is_all_ascii_digits(cps: List(UtfCodepoint)) -> Bool {
+  case cps {
+    [] -> True
+    [cp, ..rest] -> {
+      let n = string.utf_codepoint_to_int(cp)
+      n >= 48 && n <= 57 && is_all_ascii_digits(rest)
+    }
   }
 }
 

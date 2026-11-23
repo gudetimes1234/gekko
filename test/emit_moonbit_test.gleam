@@ -846,3 +846,83 @@ pub fn polymorphic_constants_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
+
+pub fn labeled_args_and_saturated_pipe_eval_order_e2e_test() {
+  let root = "build/test_fixtures/eval_order"
+  let out_dir = "build/test_fixtures/eval_order_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"eval_order\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let lib_src =
+    "pub fn sub(first a: Int, second b: Int) -> Int {\n"
+    <> "  a - b\n"
+    <> "}\n\n"
+    <> "pub fn make_adder(x: Int) -> fn(Int) -> Int {\n"
+    <> "  fn(y) { x + y }\n"
+    <> "}\n\n"
+    <> "pub fn step(n: Int) -> Int {\n"
+    <> "  case n {\n"
+    <> "    0 -> panic as \"boom_0\"\n"
+    <> "    1 -> 10\n"
+    <> "    _ -> n\n"
+    <> "  }\n"
+    <> "}\n\n"
+    <> "pub fn call_reordered(a: Int, b: Int) -> Int {\n"
+    <> "  sub(second: step(a), first: step(b))\n"
+    <> "}\n\n"
+    <> "pub fn pipe_saturated(a: Int, b: Int) -> Int {\n"
+    <> "  step(a) |> make_adder(step(b))\n"
+    <> "}\n"
+
+  let test_src =
+    "import eval_order\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn eval_order_e2e_test() {\n"
+    <> "  assert eval_order.call_reordered(1, 2) == -8\n"
+    <> "  assert eval_order.pipe_saturated(1, 2) == 12\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/eval_order.gleam"),
+      contents: lib_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/eval_order_check.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  let assert Ok(mbt) =
+    simplifile.read(from: filepath.join(out_dir, "eval_order/eval_order.mbt"))
+  assert string.contains(mbt, "let __gekko_arg_0 = step(a)")
+  assert string.contains(mbt, "let __pipe_lhs_")
+
+  list.each(["wasm", "wasm-gc"], fn(target) {
+    let chk =
+      cmd.run(
+        command: "moon",
+        args: ["check", "--deny-warn", "--target", target],
+        cwd: out_dir,
+      )
+    assert chk.exit_code == 0
+
+    let run =
+      cmd.run(command: "moon", args: ["test", "--target", target], cwd: out_dir)
+    assert run.exit_code == 0
+    assert string.contains(run.output, "passed: 1, failed: 0")
+  })
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}

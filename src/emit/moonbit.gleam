@@ -1481,43 +1481,46 @@ fn emit_call_expr(
 ) -> #(String, EmitCtx) {
   case function {
     IrConstructor(module_alias:, target_module:, name:) -> {
-      let normalized_args = case
-        lookup_ctor_field_labels(target_module, name, ctx)
-      {
-        Some(field_labels) -> align_call_args(args, field_labels, True)
-        None -> args
-      }
-      let #(arg_strs, ctx1) = map_acc(normalized_args, ctx, emit_call_arg)
-      let args_joined = string.join(arg_strs, ", ")
-      let #(prefix, ctx2) =
-        emit_constructor_prefix(module_alias, target_module, name, ctx1)
-      case normalized_args {
-        [] -> #(prefix <> name, ctx2)
-        _ -> #(prefix <> name <> "(" <> args_joined <> ")", ctx2)
-      }
+      let field_labels = lookup_ctor_field_labels(target_module, name, ctx)
+      emit_aligned_call(
+        args,
+        field_labels,
+        True,
+        True,
+        fn(c) {
+          let #(prefix, c1) =
+            emit_constructor_prefix(module_alias, target_module, name, c)
+          #(prefix <> name, c1)
+        },
+        fn(arg, _idx, c) { emit_call_arg(arg, c) },
+        ctx,
+      )
     }
 
     IrModuleRef(module_alias:, target_module:, symbol:) -> {
       let callee_info = lookup_callee_with_bounds(target_module, symbol, ctx)
-      let ordered_args = case
+      let param_labels =
         lookup_fn_param_labels(Some(target_module), symbol, ctx)
-      {
-        Some(param_labels) -> align_call_args(args, param_labels, False)
-        None -> args
-      }
-      let #(arg_strs, ctx1) =
-        map_index_acc(ordered_args, ctx, fn(a, idx, c) {
-          emit_call_arg_with_inspect_check(a.value, idx, callee_info, c)
-        })
-      let args_joined = string.join(arg_strs, ", ")
-      let #(alias, ctx2) = add_module_import(ctx1, target_module, module_alias)
-      let callee_call = case
-        is_polymorphic_constant(target_module, symbol, ctx2)
-      {
-        True -> "@" <> alias <> "." <> symbol <> "()"
-        False -> "@" <> alias <> "." <> symbol
-      }
-      #(callee_call <> "(" <> args_joined <> ")", ctx2)
+      emit_aligned_call(
+        args,
+        param_labels,
+        False,
+        False,
+        fn(c) {
+          let #(alias, c1) = add_module_import(c, target_module, module_alias)
+          let callee_call = case
+            is_polymorphic_constant(target_module, symbol, c1)
+          {
+            True -> "@" <> alias <> "." <> symbol <> "()"
+            False -> "@" <> alias <> "." <> symbol
+          }
+          #(callee_call, c1)
+        },
+        fn(arg, idx, c) {
+          emit_call_arg_with_inspect_check(arg.value, idx, callee_info, c)
+        },
+        ctx,
+      )
     }
 
     IrVar(fn_name) ->
@@ -1530,22 +1533,26 @@ fn emit_call_expr(
         False -> {
           let callee_info =
             lookup_callee_with_bounds(ctx.current_module, fn_name, ctx)
-          let ordered_args = case lookup_fn_param_labels(None, fn_name, ctx) {
-            Some(param_labels) -> align_call_args(args, param_labels, False)
-            None -> args
-          }
-          let #(arg_strs, ctx1) =
-            map_index_acc(ordered_args, ctx, fn(a, idx, c) {
-              emit_call_arg_with_inspect_check(a.value, idx, callee_info, c)
-            })
-          let args_joined = string.join(arg_strs, ", ")
-          let callee_call = case
-            is_polymorphic_constant(ctx1.current_module, fn_name, ctx1)
-          {
-            True -> fn_name <> "()"
-            False -> fn_name
-          }
-          #(callee_call <> "(" <> args_joined <> ")", ctx1)
+          let param_labels = lookup_fn_param_labels(None, fn_name, ctx)
+          emit_aligned_call(
+            args,
+            param_labels,
+            False,
+            False,
+            fn(c) {
+              let callee_call = case
+                is_polymorphic_constant(c.current_module, fn_name, c)
+              {
+                True -> fn_name <> "()"
+                False -> fn_name
+              }
+              #(callee_call, c)
+            },
+            fn(arg, idx, c) {
+              emit_call_arg_with_inspect_check(arg.value, idx, callee_info, c)
+            },
+            ctx,
+          )
         }
       }
 
@@ -1555,6 +1562,77 @@ fn emit_call_expr(
       let args_joined = string.join(arg_strs, ", ")
       let #(fn_str, ctx2) = emit_expr(function, ctx1)
       #(wrap_if_compound(function, fn_str) <> "(" <> args_joined <> ")", ctx2)
+    }
+  }
+}
+
+fn emit_aligned_call(
+  args: List(IrCallArg),
+  target_labels: Option(List(Option(String))),
+  keep_labels: Bool,
+  omit_empty_parens: Bool,
+  emit_callee: fn(EmitCtx) -> #(String, EmitCtx),
+  emit_arg: fn(IrCallArg, Int, EmitCtx) -> #(String, EmitCtx),
+  ctx: EmitCtx,
+) -> #(String, EmitCtx) {
+  let #(aligned_indexed, order_changed) = case target_labels {
+    Some(labels) -> align_call_args_tracked(args, labels, keep_labels)
+    None -> #(list.index_map(args, fn(a, idx) { #(idx, a) }), False)
+  }
+  let needs_temps =
+    order_changed
+    && list.any(args, fn(a) { !ir_util.is_effect_free_expr(a.value) })
+  case needs_temps {
+    False -> {
+      let #(arg_strs, ctx1) =
+        map_index_acc(aligned_indexed, ctx, fn(pair, idx, c) {
+          emit_arg(pair.1, idx, c)
+        })
+      let #(callee_str, ctx2) = emit_callee(ctx1)
+      case omit_empty_parens && aligned_indexed == [] {
+        True -> #(callee_str, ctx2)
+        False -> #(
+          callee_str <> "(" <> string.join(arg_strs, ", ") <> ")",
+          ctx2,
+        )
+      }
+    }
+    True -> {
+      let #(rev_lets, ctx1) =
+        list.index_fold(args, #([], ctx), fn(acc, orig_arg, src_idx) {
+          let #(lets, c) = acc
+          case ir_util.is_effect_free_expr(orig_arg.value) {
+            True -> #(lets, c)
+            False -> {
+              let #(val_str, c1) = emit_expr(orig_arg.value, c)
+              let binding =
+                "let __gekko_arg_" <> int.to_string(src_idx) <> " = " <> val_str
+              #([binding, ..lets], c1)
+            }
+          }
+        })
+      let let_bindings = list.reverse(rev_lets)
+      let #(arg_strs, ctx2) =
+        map_index_acc(aligned_indexed, ctx1, fn(pair, idx, c) {
+          let #(src_idx, aligned_arg) = pair
+          case ir_util.is_effect_free_expr(aligned_arg.value) {
+            True -> emit_arg(aligned_arg, idx, c)
+            False -> {
+              let temp_name = "__gekko_arg_" <> int.to_string(src_idx)
+              let rendered = case keep_labels, aligned_arg.label {
+                True, Some(lbl) -> lbl <> "=" <> temp_name
+                _, _ -> temp_name
+              }
+              #(rendered, c)
+            }
+          }
+        })
+      let #(callee_str, ctx3) = emit_callee(ctx2)
+      let call_str = callee_str <> "(" <> string.join(arg_strs, ", ") <> ")"
+      #(
+        "({ " <> string.join(let_bindings, "; ") <> "; " <> call_str <> " })",
+        ctx3,
+      )
     }
   }
 }
@@ -1682,28 +1760,38 @@ fn lookup_fn_param_labels(
   }
 }
 
-fn align_call_args(
+fn align_call_args_tracked(
   args: List(IrCallArg),
   target_labels: List(Option(String)),
   keep_labels: Bool,
-) -> List(IrCallArg) {
+) -> #(List(#(Int, IrCallArg)), Bool) {
+  let indexed = list.index_map(args, fn(a, idx) { #(idx, a) })
   let has_labels = list.any(args, fn(a) { option.is_some(a.label) })
   case list.length(args) == list.length(target_labels) {
     False ->
       case keep_labels {
-        True -> args
-        False -> list.map(args, fn(a) { IrCallArg(None, a.value) })
+        True -> #(indexed, False)
+        False -> #(
+          list.map(indexed, fn(pair) {
+            #(pair.0, IrCallArg(None, pair.1.value))
+          }),
+          False,
+        )
       }
     True ->
       case !has_labels && !keep_labels {
-        True -> args
+        True -> #(indexed, False)
         False -> {
           let #(labeled_map, rev_positional) =
-            list.fold(args, #(dict.new(), []), fn(acc, arg) {
+            list.fold(indexed, #(dict.new(), []), fn(acc, pair) {
               let #(lmap, pos) = acc
+              let #(src_idx, arg) = pair
               case arg.label {
-                Some(lbl) -> #(dict.insert(lmap, lbl, arg.value), pos)
-                None -> #(lmap, [arg.value, ..pos])
+                Some(lbl) -> #(
+                  dict.insert(lmap, lbl, #(src_idx, arg.value)),
+                  pos,
+                )
+                None -> #(lmap, [#(src_idx, arg.value), ..pos])
               }
             })
           let #(rev_out, _) =
@@ -1719,11 +1807,14 @@ fn align_call_args(
                 case lbl_opt {
                   Some(lbl) ->
                     case dict.get(labeled_map, lbl) {
-                      Ok(v) -> #([IrCallArg(out_lbl, v), ..out], pos_q)
+                      Ok(#(src_idx, v)) -> #(
+                        [#(src_idx, IrCallArg(out_lbl, v)), ..out],
+                        pos_q,
+                      )
                       Error(_) ->
                         case pos_q {
-                          [v, ..rest_pos] -> #(
-                            [IrCallArg(out_lbl, v), ..out],
+                          [#(src_idx, v), ..rest_pos] -> #(
+                            [#(src_idx, IrCallArg(out_lbl, v)), ..out],
                             rest_pos,
                           )
                           [] -> #(out, pos_q)
@@ -1731,8 +1822,8 @@ fn align_call_args(
                     }
                   None ->
                     case pos_q {
-                      [v, ..rest_pos] -> #(
-                        [IrCallArg(out_lbl, v), ..out],
+                      [#(src_idx, v), ..rest_pos] -> #(
+                        [#(src_idx, IrCallArg(out_lbl, v)), ..out],
                         rest_pos,
                       )
                       [] -> #(out, pos_q)
@@ -1740,7 +1831,12 @@ fn align_call_args(
                 }
               },
             )
-          list.reverse(rev_out)
+          let aligned = list.reverse(rev_out)
+          let order_changed =
+            list.index_fold(aligned, False, fn(acc, pair, idx) {
+              acc || pair.0 != idx
+            })
+          #(aligned, order_changed)
         }
       }
   }

@@ -259,3 +259,45 @@ fn collect_type_vars(
       })
   }
 }
+
+/// Return True if evaluating `expr` is guaranteed to be pure and side-effect-free
+/// (cannot perform calls, `echo`, or `abort`).
+pub fn is_effect_free_expr(expr: IrExpr) -> Bool {
+  case expr {
+    ir.IrInt(_)
+    | ir.IrFloat(_)
+    | ir.IrString(_)
+    | ir.IrBool(_)
+    | ir.IrUnit
+    | IrVar(_)
+    | ir.IrModuleRef(..)
+    | ir.IrConstructor(..)
+    | IrFn(..) -> True
+    IrNegateInt(inner)
+    | IrNegateBool(inner)
+    | IrTupleIndex(tuple: inner, ..)
+    | IrGetterCall(receiver: inner, ..) -> is_effect_free_expr(inner)
+    IrBinOp(left:, right:, ..) ->
+      is_effect_free_expr(left) && is_effect_free_expr(right)
+    IrTuple(els) -> list.all(els, is_effect_free_expr)
+    IrList(elements:, tail:) ->
+      list.all(elements, is_effect_free_expr)
+      && case tail {
+        Some(t) -> is_effect_free_expr(t)
+        None -> True
+      }
+    IrBitString(segments:) ->
+      list.all(segments, fn(seg) {
+        is_effect_free_expr(seg.0)
+        && list.all(seg.1, fn(opt) {
+          case opt {
+            glance.SizeValueOption(se) -> is_effect_free_expr(se)
+            _ -> True
+          }
+        })
+      })
+    IrCall(function: ir.IrConstructor(..), args:) ->
+      list.all(args, fn(a) { is_effect_free_expr(a.value) })
+    _ -> False
+  }
+}
