@@ -1,7 +1,6 @@
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
-import gleam/set
 import gleam/string
 
 /// Package identifier in a WIT document, e.g. `demo:greeter@0.1.0`.
@@ -150,15 +149,30 @@ pub fn kebab_to_screaming(name: String) -> String {
 
 /// Append `_` if `name` is a reserved Gleam keyword.
 pub fn escape_gleam_ident(name: String) -> String {
-  let keywords =
-    set.from_list([
-      "as", "assert", "auto", "case", "const", "delegate", "derive", "echo",
-      "else", "fn", "if", "implement", "import", "let", "macro", "opaque",
-      "panic", "pub", "test", "todo", "type", "use",
-    ])
-  case set.contains(keywords, name) {
-    True -> name <> "_"
-    False -> name
+  case name {
+    "as"
+    | "assert"
+    | "auto"
+    | "case"
+    | "const"
+    | "delegate"
+    | "derive"
+    | "echo"
+    | "else"
+    | "fn"
+    | "if"
+    | "implement"
+    | "import"
+    | "let"
+    | "macro"
+    | "opaque"
+    | "panic"
+    | "pub"
+    | "test"
+    | "todo"
+    | "type"
+    | "use" -> name <> "_"
+    _ -> name
   }
 }
 
@@ -217,26 +231,105 @@ pub fn gleam_import_module(
 /// Suffix `_export` when a top-level generated Gleam export module name would
 /// collide with a built-in Erlang/OTP module name during `gleam check`.
 pub fn escape_erlang_reserved_module(name: String) -> String {
-  let reserved =
-    set.from_list([
-      "application", "array", "asn1", "base64", "beam_lib", "binary", "calendar",
-      "code", "compile", "crypto", "ct", "dbg", "dialyzer", "diameter", "dict",
-      "digraph", "edlin", "eldap", "epp", "erl_eval", "erl_parse", "erl_scan",
-      "erlang", "error_logger", "escript", "ets", "eunit", "file", "filelib",
-      "filename", "ftp", "gb_sets", "gb_trees", "gen_event", "gen_server",
-      "gen_statem", "gen_tcp", "gen_udp", "global", "httpc", "httpd", "inet",
-      "inets", "init", "io", "json", "kernel", "leex", "lists", "logger", "maps",
-      "math", "megaco", "mnesia", "net", "observer", "odbc", "orddict",
-      "ordsets", "os", "parsetools", "peer", "pg", "proc_lib", "proplists",
-      "public_key", "queue", "rand", "re", "rpc", "runtime_tools", "sasl",
-      "sets", "shell", "snmp", "socket", "sofs", "ssh", "ssl", "stdlib",
-      "string", "supervisor", "syntax_tools", "sys", "tar", "tftp", "timer",
-      "tools", "typer", "unicode", "uri_string", "user", "xmerl", "xref", "yecc",
-      "zip", "zlib",
-    ])
-  case set.contains(reserved, name) {
-    True -> name <> "_export"
-    False -> name
+  case name {
+    "application"
+    | "array"
+    | "asn1"
+    | "base64"
+    | "beam_lib"
+    | "binary"
+    | "calendar"
+    | "code"
+    | "compile"
+    | "crypto"
+    | "ct"
+    | "dbg"
+    | "dialyzer"
+    | "diameter"
+    | "dict"
+    | "digraph"
+    | "edlin"
+    | "eldap"
+    | "epp"
+    | "erl_eval"
+    | "erl_parse"
+    | "erl_scan"
+    | "erlang"
+    | "error_logger"
+    | "escript"
+    | "ets"
+    | "eunit"
+    | "file"
+    | "filelib"
+    | "filename"
+    | "ftp"
+    | "gb_sets"
+    | "gb_trees"
+    | "gen_event"
+    | "gen_server"
+    | "gen_statem"
+    | "gen_tcp"
+    | "gen_udp"
+    | "global"
+    | "httpc"
+    | "httpd"
+    | "inet"
+    | "inets"
+    | "init"
+    | "io"
+    | "json"
+    | "kernel"
+    | "leex"
+    | "lists"
+    | "logger"
+    | "maps"
+    | "math"
+    | "megaco"
+    | "mnesia"
+    | "net"
+    | "observer"
+    | "odbc"
+    | "orddict"
+    | "ordsets"
+    | "os"
+    | "parsetools"
+    | "peer"
+    | "pg"
+    | "proc_lib"
+    | "proplists"
+    | "public_key"
+    | "queue"
+    | "rand"
+    | "re"
+    | "rpc"
+    | "runtime_tools"
+    | "sasl"
+    | "sets"
+    | "shell"
+    | "snmp"
+    | "socket"
+    | "sofs"
+    | "ssh"
+    | "ssl"
+    | "stdlib"
+    | "string"
+    | "supervisor"
+    | "syntax_tools"
+    | "sys"
+    | "tar"
+    | "tftp"
+    | "timer"
+    | "tools"
+    | "typer"
+    | "unicode"
+    | "uri_string"
+    | "user"
+    | "xmerl"
+    | "xref"
+    | "yecc"
+    | "zip"
+    | "zlib" -> name <> "_export"
+    _ -> name
   }
 }
 
