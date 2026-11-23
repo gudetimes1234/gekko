@@ -33,6 +33,14 @@ pub fn extract_zip_entry(
   ffi_extract_zip_entry(zip_path, entry_path)
 }
 
+@external(erlang, "gekko_ffi", "sha256_hex")
+fn ffi_sha256_hex(data: String) -> String
+
+/// Compute a lowercase hexadecimal SHA-256 digest of UTF-8 `data`.
+pub fn sha256_hex(data: String) -> String {
+  ffi_sha256_hex(data)
+}
+
 /// Read an OS environment variable as UTF-8, returning `Error(Nil)` if unset.
 pub fn get_env(name: String) -> Result(String, Nil) {
   ffi_get_env(name)

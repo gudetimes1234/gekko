@@ -974,3 +974,49 @@ pub fn pkg_config_parse_render_roundtrip_and_zip_missing_test() {
   assert cmd.extract_zip_entry("nonexistent_archive.zip", "pkg.generated.mbti")
     == Error(Nil)
 }
+
+pub fn staging_interface_cache_hit_and_invalidation_test() {
+  let root = "build/test_fixtures/staging_cache"
+  let staging_dir = "build/test_fixtures/staging_cache_out"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: staging_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"staging_cache\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/staging_cache.gleam"),
+      contents: "pub fn value() -> Int { 1 }\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(iface1) = staging.extract_project_interface(root, staging_dir)
+  let assert Ok(hash1) =
+    simplifile.read(filepath.join(staging_dir, ".gekko_iface_hash"))
+  assert hash1 != ""
+
+  // Second extraction with identical inputs hits cache and returns same interface
+  let assert Ok(iface2) = staging.extract_project_interface(root, staging_dir)
+  assert iface1 == iface2
+
+  // Modifying source invalidates cache and reflects updated signature
+  assert simplifile.write(
+      to: filepath.join(root, "src/staging_cache.gleam"),
+      contents: "pub fn value(x: String) -> String { x }\n",
+    )
+    == Ok(Nil)
+  let assert Ok(iface3) = staging.extract_project_interface(root, staging_dir)
+  let assert Ok(hash2) =
+    simplifile.read(filepath.join(staging_dir, ".gekko_iface_hash"))
+  assert hash2 != hash1
+  let assert Ok(mod_iface) = dict.get(iface3.modules, "staging_cache")
+  let assert Ok(fn_sig) = dict.get(mod_iface.functions, "value")
+  assert fn_sig.return == interface.NamedType("String", "", "gleam", [])
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: staging_dir)
+  Nil
+}

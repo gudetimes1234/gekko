@@ -10,7 +10,7 @@
 2. **Preserve Standard Gleam Tooling:** Target projects remain valid Gleam projects so `gleam check`, `gleam test`, and `gleam export package-interface` continue to work without modification.
 3. **Hybrid Type Resolution (Shadow `pub` Interface Extraction + MoonBit Local Inference):**
    - MoonBit requires explicit parameter and return type annotations on all top-level functions, whereas Gleam allows private functions to omit annotations and `gleam export package-interface` only exports `pub` declarations.
-   - To avoid re-implementing Hindley-Milner type inference in `gekko`, `gekko` copies modules to a staging directory (`build/gekko/staging/`) where private top-level `fn`, `type`, and `opaque type` declarations are temporarily promoted to `pub`, then runs `gleam export package-interface` to retrieve exact, compiler-verified Hindley-Milner signatures for **all** functions and types.
+   - To avoid re-implementing Hindley-Milner type inference in `gekko`, `gekko` copies modules to a staging directory (`build/.gekko_staging/` and `build/.gekko_staging_deps/<pkg>/`, cached by SHA-256 content fingerprint in `.gekko_iface_hash`) where private top-level `fn`, `type`, `opaque type`, and `const` declarations are temporarily promoted to `pub`, then runs `gleam export package-interface` to retrieve exact, compiler-verified Hindley-Milner signatures for **all** functions, constants, and types.
    - Inside function bodies, MoonBit's own compiler infers all local variables, closures, and pattern bindings.
 
 ---
@@ -28,8 +28,8 @@
           ▼  (Step 1: Staging, Pre-Pass & Shadow `pub` Metadata Extraction)
   • Scan source files for `@external(moonbit, ...)` & `/// @external(moonbit, ...)` pragmas
   • Strip raw `@external(moonbit, ...)` lines in-memory before parsing with `glance`
-  • Stage shadow copies in `build/gekko/staging/` promoting private `fn`/`type` to `pub`
-  • Run `gleam export package-interface` on root & deps -> resolved HM signatures for ALL fns
+  • Stage shadow copies in `build/.gekko_staging/` promoting private `fn`/`type`/`const` to `pub`
+  • Run `gleam export package-interface` on root & deps (cached via `.gekko_iface_hash`) -> resolved HM signatures for ALL fns
           │
           ▼  (Step 2: Project-Wide Indexing Pass)
   • Parse all `.gleam` files via `glance`
@@ -44,17 +44,17 @@
   • Desugar `let assert pat = expr` -> `guard expr is pat else { abort(...) }`
   • Desugar `todo` / `panic` -> `abort(...)`
   • Desugar function captures `f(a, _, c)` -> `fn(__capture_1) { f(a, __capture_1, c) }`
-  • Lower pipelines (`|>`) using Symbol Table arity & label info
+  • Lower pipelines (`|>`) using Symbol Table arity & label info (binding effectful LHS when needed)
   • Rewrite self-tail-recursive functions into MoonBit functional `for` state loops
   • Lower `FieldAccess` (`mod.fn` vs `expr.field()` via Uniform Getter Rule)
   • Lower `RecordUpdate` (`Variant(..r, field: v)`) into `match` reconstruction
-  • Mangle reserved MoonBit keywords and capitalize generic type parameters
+  • Mangle reserved MoonBit keywords injectively and capitalize generic type parameters
           │
           ▼  (Step 4: Modern MoonBit Workspace & Code Emission)
   • Emit `build/moonbit/moon.mod`
-  • Map each Gleam module `pkg/src/a/b.gleam` -> `build/moonbit/src/<pkg>/a/b/`
-    (or `src/deps/<pkg>/a/b/`) with declarative `moon.pkg` and `///|` block separators
-  • Bundle `runtime/prelude/`, `runtime/gleam_stdlib_ffi/`, and `runtime/gleam_json_ffi/`
+  • Map each Gleam module `a/b.gleam` -> `build/moonbit/a_b/` (validating no directory collisions)
+    with declarative `moon.pkg` and `///|` block separators
+  • Bundle `gprelude/` (`@gprelude`) and copy local `moonbit/` FFI packages
   • Run `wit-bindgen moonbit` if `wit/` exists and wire `stub.mbt` exports to Gleam entrypoints
           │
           ▼  (Step 5: Verification, Multi-Target Build & Component Packaging)
@@ -75,32 +75,49 @@ gekko/
 │   ├── SPEC.md
 │   └── ROADMAP.md
 ├── src/
-│   ├── gekko.gleam                # CLI entrypoint (`check`, `build`, `test`) & pipeline driver
+│   ├── gekko.gleam                # CLI entrypoint (`check`, `build`, `test`, `run`, `wit`, `moonbit`)
+│   ├── gekko_ffi.erl              # Erlang FFI (process runner, env, `:zip` reader, SHA-256)
 │   ├── project/
+│   │   ├── cmd.gleam              # External command runner & Erlang FFI bindings
+│   │   ├── ffi_config.gleam       # Parses gekko.toml / [tools.gekko.overrides] / moonbit/moon.mod
+│   │   ├── interface.gleam        # Decodes package-interface JSON into type lookup tables
 │   │   ├── loader.gleam           # Reads gleam.toml, manifest.toml, build/packages/*
-│   │   ├── ffi_config.gleam       # Parses gekko.toml / [tools.gekko.overrides]
+│   │   ├── moonbit_ffi.gleam      # Discovers & copies local moonbit/ FFI packages
 │   │   ├── prepass.gleam          # Extracts & strips `@external(moonbit, ...)` before glance
-│   │   ├── staging.gleam          # Shadow `pub` source staging & `gleam export package-interface`
-│   │   └── interface.gleam        # Decodes package-interface JSON into type lookup tables
+│   │   ├── staging.gleam          # Shadow `pub` source staging & cached `package-interface`
+│   │   ├── text_edit.gleam        # UTF-8 byte-offset edits & line/column mapping
+│   │   └── workspace.gleam        # Emits complete MoonBit workspace & collision checks
 │   ├── index/
 │   │   └── symbol_table.gleam     # Global index: types, variants, shared fields, arities, imports
 │   ├── lower/
+│   │   ├── bit_pattern.gleam      # Lowers BitArray segments into guards & decoded bindings
 │   │   ├── desugar.gleam          # Lowers `use`, `let assert`, `FnCapture`, `|>`, labeled args
+│   │   ├── ir.gleam               # Lowered IR types and expressions
+│   │   ├── ir_util.gleam          # Shared free-var, pattern-var, and purity helpers
+│   │   ├── mangle.gleam           # Injective keyword escaping & type variable normalization
+│   │   ├── pattern.gleam          # Lowers List `[h, ..t]`, String prefixes, and patterns
 │   │   ├── tco.gleam              # Self-tail-recursion -> MoonBit functional `for` loops
-│   │   ├── pattern.gleam          # Lowers List `[h, ..t]`, String prefixes, and BitArray patterns
-│   │   └── mangle.gleam           # Keyword escaping & UpperCamelCase type variable normalization
-│   └── emit/
-│       ├── moonbit.gleam          # Renders lowered IR to modern `.mbt` with `///|` separators
-│       ├── pkg_config.gleam       # Generates `moon.mod` and per-package `moon.pkg` DSL files
-│       └── wit_bridge.gleam       # Orchestrates `wit-bindgen moonbit` & boundary glue in `stub.mbt`
-├── runtime/                       # Hand-written MoonBit runtime copied/linked into build/moonbit/
-│   ├── prelude/                   # GList[T], BitArray, Dynamic, safe Int64/Double div, helpers
-│   ├── gleam_stdlib_ffi/          # Native MoonBit FFI backing packages for gleam_stdlib leaf externals
-│   └── gleam_json_ffi/            # Native MoonBit FFI backing package for gleam_json (@json.Json)
+│   │   └── validate.gleam         # Validates Int64 literal ranges
+│   ├── emit/
+│   │   ├── moonbit.gleam          # Renders lowered IR to `.mbt` with `///|` separators
+│   │   ├── pkg_config.gleam       # Generates `moon.mod` and parses/emits `moon.pkg` DSL files
+│   │   ├── prelude_runtime.gleam  # Embedded `gprelude` runtime (synced via scripts/sync_prelude.sh)
+│   │   ├── trait_bounds.gleam     # Whole-project `Eq`/`Hash`/`GleamInspect`/`ToDynamic` inference
+│   │   └── wit_bridge.gleam       # Orchestrates `wit-bindgen moonbit` & boundary glue in `stub.mbt`
+│   ├── moonbit/
+│   │   ├── bindgen.gleam          # Generates Gleam FFI wrappers for MoonBit packages
+│   │   ├── ffi_meta.gleam         # Scans `.mbt` files for trait & generic signature metadata
+│   │   ├── mbti.gleam             # Parses `pkg.generated.mbti` interface files
+│   │   └── syntax.gleam           # Shared MoonBit delimiter & signature scanning helpers
+│   └── wit/
+│       ├── ast.gleam              # WIT AST & Gleam identifier escaping
+│       ├── gleam_gen.gleam        # Generates Gleam stubs from WIT definitions
+│       └── parser.gleam           # WIT parser
+├── runtime/
+│   └── prelude/                   # Bundled `@gprelude` MoonBit runtime (`gprelude.mbt`, `moon.pkg`)
 ├── fixtures/
 │   └── golden/                    # End-to-end `.gleam` -> `.mbt` -> `moon test` golden fixture projects
-└── test/
-    └── gekko_test.gleam
+└── test/                          # Split unit & E2E test suites (`gekko_test.gleam`, etc.)
 ```
 
 ---
@@ -115,8 +132,8 @@ Gleam downloads all resolved Hex dependencies into `build/packages/<package_name
    - Parse `manifest.toml` (and `build/packages/*/gleam.toml` using `tom`) to determine the exact dependency graph and active package versions.
 2. **Deterministic Namespace Mapping:**
    - MoonBit enforces one package per directory and imports packages via `@alias.symbol` declared in `moon.pkg`.
-   - Root project module `src/auth/token.gleam` $\rightarrow$ `build/moonbit/src/auth/token/` (package `"<root_mod>/auth/token"`).
-   - Dependency module `<pkg>/src/a/b.gleam` $\rightarrow$ `build/moonbit/src/deps/<pkg>/a/b/`.
+   - Gleam module `a/b.gleam` (whether root or dependency) maps to `<out_dir>/a_b/` via `pkg_config.module_to_pkg_dir`, keeping FFI `moon.pkg` package references uniform (e.g. `"<project>/gleam_order" @gleam_order`).
+   - `workspace.validate_module_pkg_dirs` fails fast at compile time if two distinct modules in the workspace map to the same MoonBit package directory (e.g. `foo/bar.gleam` and `foo_bar.gleam`).
 3. **FFI-Backed `gleam_stdlib` and `gleam_json` Strategy:**
    - Most of `gleam_stdlib` and `gleam_json` is pure Gleam (or includes pure-Gleam fallback bodies below `@external(erlang, ...)`). Only a small set of leaf primitives actually invoke host FFI (`gleam/string`, `gleam/dict`, `gleam/bit_array`, `gleam/int`, `gleam/float`, `gleam/dynamic/decode`, `gleam/io`, and ~12 primitives in `gleam/json`).
    - Rather than re-implementing every stdlib module from scratch in MoonBit, `gekko` **transpiles the real `.gleam` files** of `gleam_stdlib` and `gleam_json` from `build/packages/` so APIs and edge-case semantics match standard Gleam 100%.
@@ -276,8 +293,12 @@ Gleam unifies records and algebraic data types under `type`, whereas MoonBit dis
    - Otherwise, emit `(f(b))(a)` (supporting curried/closure-returning expressions).
 4. **Function Captures (`f(a, _, c)`):**
    Lower to `fn(__capture_1) { f(a, __capture_1, c) }`.
-5. **Labeled Arguments:**
-   Emit labeled parameters in definitions as `label~ : Type` and labeled call arguments as `label=expr`.
+5. **Labeled Arguments & Evaluation Order:**
+   - Top-level functions emit positional MoonBit parameters so any function can be passed as a first-class value without eta-wrapping; labeled call arguments are aligned to parameter order.
+   - Whenever labeled-argument reordering (or a saturated pipe) reorders effectful expressions, source-order temporary `let` bindings (`let __gekko_arg_<i> = ...` / `let __pipe_lhs_<i> = ...`) are emitted so Gleam's strict left-to-right evaluation order is preserved.
+6. **Polymorphic Constants:**
+   - Concrete module constants emit as `pub let name : Type = ...`.
+   - Module constants whose resolved type contains type variables (`IrTypeVar`, e.g. `pub const empty = []`) emit as zero-argument generic functions (`pub fn[T0] empty() -> @gprelude.GList[T0]`) and are invoked as `empty()` / `@alias.empty()` at reference sites.
 
 ---
 
@@ -290,6 +311,7 @@ Gleam unifies records and algebraic data types under `type`, whereas MoonBit dis
 | `Bool` | `Bool` | `True` $\rightarrow$ `true`, `False` $\rightarrow$ `false`, `!b` $\rightarrow$ `!b`. |
 | `String` | `String` | Direct literals. `a <> b` $\rightarrow$ `a + b`. String prefix patterns `"pre" <> rest` lower using `has_prefix` and string slicing/guards. |
 | `Nil` | `Unit` | `Nil` type $\rightarrow$ `Unit`, `Nil` value $\rightarrow$ `()`. |
+| `#()`, `#(a)` | `@gprelude.Tuple0`, `@gprelude.Tuple1[A]` | Boxed 0-tuple and 1-tuple wrappers in `@gprelude`. |
 | `#(a, b, c)` | `(A, B, C)` | Positional tuple indexing (`t.0`, `t.1`) matches directly. |
 | `Result(ok, err)` | `Result[Ok, Err]` | `Ok(v)` $\rightarrow$ `Ok(v)`, `Error(e)` $\rightarrow$ `Err(e)`. |
 | `Dynamic` | `@prelude.Dynamic` | Tagged MoonBit sum type (`DynInt`, `DynFloat`, `DynString`, `DynBool`, `DynBytes`, `DynList`, `DynArray`, `DynMap`, `DynNull`, `DynCustom`) backing `gleam/dynamic/decode` and `gleam_json`. |
@@ -316,10 +338,12 @@ Gleam unifies records and algebraic data types under `type`, whereas MoonBit dis
    When emitting executable/component entrypoints (`main` or WIT exports), emit `"is-main": true` (or `options( "is-main": true )` in `moon.pkg`) as required by `moon`.
 2. **Block Separators (`///|`):**
    Every top-level `enum`, `fn`, `let`, and `type` declaration is separated by `///|` so `moon fmt`, `moon info`, and incremental checks operate cleanly.
-3. **Identifier Mangling:**
-   Maintain a reserved keyword table for MoonBit (`match`, `loop`, `for`, `while`, `break`, `continue`, `struct`, `enum`, `trait`, `impl`, `guard`, `async`, `test`, `init`, `main`, `pub`, `priv`, `fn`, `let`, `mut`, `type`, `raise`, `try`, `catch`, `noraise`, `derive`, `extend`, etc.) and append `_` to colliding Gleam identifiers (`match` $\rightarrow$ `match_`).
+3. **Injective Identifier & Type Mangling:**
+   - Maintain reserved keyword and type-name tables for MoonBit (`match`, `loop`, `for`, `Error`, `Option`, etc.). If stripping trailing `_`s yields a reserved name, append `_` injectively (`match` $\rightarrow$ `match_`, `match_` $\rightarrow$ `match__`, while non-reserved `foo_` remains `foo_`).
 4. **Type Parameter Capitalization:**
-   Gleam uses `snake_case` generic parameters (`fn map(list: List(a), f: fn(a) -> b)`), while MoonBit requires `UpperCamelCase` (`pub fn[A, B] map(...)`). Normalize all generic type parameters deterministically (`a` $\rightarrow$ `T_a` or `A`).
+   - Gleam uses `snake_case` generic parameters (`fn map(list: List(a), f: fn(a) -> b)`), while MoonBit requires `UpperCamelCase` (`pub fn[A, B] map(...)`). Normalize generic type parameters injectively (`_a` $\rightarrow$ `U_A`, `t0` $\rightarrow$ `T_T0`) so user parameters never collide with builtin MoonBit types or synthetic HM names (`T0`, `T1`, ...).
+5. **Warning Suppressions:**
+   - `moon.mod` retains `-unresolved_type_variable` for unconstrained local polymorphic expressions in Gleam such as `let _ = []` or `let _ = Ok(1)`.
 
 ---
 

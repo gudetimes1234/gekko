@@ -259,47 +259,216 @@ fn extract_package_interface_impl(
   include_tests: Bool,
 ) -> Result(PackageInterface, String) {
   let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
-  use _ <- result.try(prepare_staging_dir(staging_dir))
-  use _ <- result.try(stage_toml_and_deps(
-    pkg_root,
-    deps_root,
-    staging_dir,
-    include_tests,
-  ))
-  use _ <- result.try(stage_sources(pkg_root, staging_dir))
-  use staged_test_mods <- result.try(case is_root_pkg && include_tests {
-    True -> stage_test_sources(pkg_root, staging_dir)
-    False -> Ok([])
+  let hash_path = filepath.join(staging_dir, ".gekko_iface_hash")
+  let test_mods_path = filepath.join(staging_dir, ".gekko_test_mods")
+  let json_path = filepath.join(staging_dir, "interface.json")
+  let fingerprint_res =
+    compute_staging_fingerprint(pkg_root, deps_root, include_tests)
+
+  let cached = case fingerprint_res {
+    Ok(fingerprint) ->
+      case
+        simplifile.read(hash_path),
+        simplifile.read(json_path),
+        simplifile.read(test_mods_path)
+      {
+        Ok(saved_hash), Ok(json_str), Ok(test_mods_raw)
+          if saved_hash == fingerprint
+        ->
+          case interface.decode_package_interface(json_str) {
+            Ok(iface) -> {
+              let staged_test_mods =
+                test_mods_raw
+                |> string.split("\n")
+                |> list.filter(fn(s) { s != "" })
+              Some(remap_staged_test_modules(iface, staged_test_mods))
+            }
+            Error(_) -> None
+          }
+        _, _, _ -> None
+      }
+    Error(_) -> None
+  }
+
+  case cached {
+    Some(iface) -> Ok(iface)
+    None -> {
+      use _ <- result.try(prepare_staging_dir(staging_dir))
+      use _ <- result.try(stage_toml_and_deps(
+        pkg_root,
+        deps_root,
+        staging_dir,
+        include_tests,
+      ))
+      use _ <- result.try(stage_sources(pkg_root, staging_dir))
+      use staged_test_mods <- result.try(case is_root_pkg && include_tests {
+        True -> stage_test_sources(pkg_root, staging_dir)
+        False -> Ok([])
+      })
+
+      let res =
+        cmd.run(
+          command: "gleam",
+          args: ["export", "package-interface", "--out", "interface.json"],
+          cwd: staging_dir,
+        )
+
+      case res.exit_code {
+        0 -> {
+          use json_str <- result.try(
+            simplifile.read(json_path)
+            |> result.map_error(fn(err) {
+              "Failed to read staged interface.json: "
+              <> simplifile.describe_error(err)
+            }),
+          )
+          use iface <- result.try(interface.decode_package_interface(json_str))
+          case fingerprint_res {
+            Ok(fingerprint) -> {
+              let _ =
+                simplifile.write(
+                  to: test_mods_path,
+                  contents: string.join(staged_test_mods, "\n"),
+                )
+              let _ = simplifile.write(to: hash_path, contents: fingerprint)
+              Nil
+            }
+            Error(_) -> Nil
+          }
+          Ok(remap_staged_test_modules(iface, staged_test_mods))
+        }
+        code ->
+          Error(
+            "gleam export package-interface failed (exit "
+            <> int.to_string(code)
+            <> "):\n"
+            <> res.output,
+          )
+      }
+    }
+  }
+}
+
+fn compute_staging_fingerprint(
+  pkg_root: String,
+  deps_root: String,
+  include_tests: Bool,
+) -> Result(String, String) {
+  let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
+  let inc_flag = case include_tests {
+    True -> "1"
+    False -> "0"
+  }
+  use pkg_toml <- result.try(
+    read_optional_text(filepath.join(pkg_root, "gleam.toml")),
+  )
+  use deps_toml <- result.try(
+    read_optional_text(filepath.join(deps_root, "gleam.toml")),
+  )
+  use manifest_toml <- result.try(
+    read_optional_text(filepath.join(deps_root, "manifest.toml")),
+  )
+  use src_hash <- result.try(hash_gleam_tree(filepath.join(pkg_root, "src")))
+  use test_hash <- result.try(case is_root_pkg && include_tests {
+    True -> hash_gleam_tree(filepath.join(pkg_root, "test"))
+    False -> Ok("")
   })
-
-  let res =
-    cmd.run(
-      command: "gleam",
-      args: ["export", "package-interface", "--out", "interface.json"],
-      cwd: staging_dir,
+  let packages_dir =
+    first_existing_path(
+      deps_root,
+      pkg_root,
+      filepath.join("build", "packages"),
+      simplifile.is_directory,
     )
+  use pkgs_hash <- result.try(case packages_dir {
+    Some(dir) -> hash_packages_dir(dir)
+    None -> Ok("")
+  })
+  let payload =
+    string.join(
+      [
+        inc_flag,
+        pkg_toml,
+        deps_toml,
+        manifest_toml,
+        src_hash,
+        test_hash,
+        pkgs_hash,
+      ],
+      "\n<<GEKKO_SEP>>\n",
+    )
+  Ok(cmd.sha256_hex(payload))
+}
 
-  case res.exit_code {
-    0 -> {
-      let json_path = filepath.join(staging_dir, "interface.json")
-      use json_str <- result.try(
-        simplifile.read(json_path)
-        |> result.map_error(fn(err) {
-          "Failed to read staged interface.json: "
-          <> simplifile.describe_error(err)
+fn read_optional_text(path: String) -> Result(String, String) {
+  case simplifile.is_file(path) {
+    Ok(True) ->
+      simplifile.read(path)
+      |> result.map_error(fn(err) {
+        "Failed to read " <> path <> ": " <> simplifile.describe_error(err)
+      })
+    _ -> Ok("")
+  }
+}
+
+fn hash_gleam_tree(dir: String) -> Result(String, String) {
+  case simplifile.is_directory(dir) {
+    Ok(True) -> {
+      use rels <- result.try(walk_relative_files(dir, ""))
+      let sorted =
+        rels
+        |> list.filter(fn(r) { filepath.extension(r) == Ok("gleam") })
+        |> list.sort(string.compare)
+      use parts <- result.try(
+        list.try_map(sorted, fn(rel) {
+          let full = filepath.join(dir, rel)
+          use content <- result.try(
+            simplifile.read(full)
+            |> result.map_error(fn(err) {
+              "Failed to read "
+              <> full
+              <> ": "
+              <> simplifile.describe_error(err)
+            }),
+          )
+          Ok(rel <> ":" <> content)
         }),
       )
-      use iface <- result.try(interface.decode_package_interface(json_str))
-      Ok(remap_staged_test_modules(iface, staged_test_mods))
+      Ok(cmd.sha256_hex(string.join(parts, "\n<<F>>\n")))
     }
-    code ->
-      Error(
-        "gleam export package-interface failed (exit "
-        <> int.to_string(code)
-        <> "):\n"
-        <> res.output,
-      )
+    _ -> Ok("")
   }
+}
+
+fn hash_packages_dir(packages_dir: String) -> Result(String, String) {
+  use entries <- result.try(
+    simplifile.read_directory(at: packages_dir)
+    |> result.map_error(fn(err) {
+      "Failed to read "
+      <> packages_dir
+      <> ": "
+      <> simplifile.describe_error(err)
+    }),
+  )
+  let sorted_entries = list.sort(entries, string.compare)
+  use parts <- result.try(
+    list.try_map(sorted_entries, fn(entry) {
+      let pkg_dir = filepath.join(packages_dir, entry)
+      case simplifile.is_directory(pkg_dir) {
+        Ok(True) -> {
+          use toml <- result.try(
+            read_optional_text(filepath.join(pkg_dir, "gleam.toml")),
+          )
+          use src_h <- result.try(
+            hash_gleam_tree(filepath.join(pkg_dir, "src")),
+          )
+          Ok(entry <> ":" <> toml <> ":" <> src_h)
+        }
+        _ -> Ok("")
+      }
+    }),
+  )
+  Ok(cmd.sha256_hex(string.join(parts, "\n<<PKG>>\n")))
 }
 
 fn prepare_staging_dir(staging_dir: String) -> Result(Nil, String) {

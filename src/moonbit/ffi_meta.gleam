@@ -7,6 +7,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import moonbit/syntax
 import simplifile
 
 /// Trait implementations and `Eq`-required `Hash` parameter indices
@@ -797,7 +798,7 @@ fn parse_impl_header(
   let after_impl = string.drop_start(after_vis, 4) |> string.trim_start
   let #(tp_bounds, after_tps) = case string.starts_with(after_impl, "[") {
     True ->
-      case split_bracket_block(after_impl) {
+      case syntax.split_bracket_block(after_impl) {
         Some(#(tp_inner, rest)) -> #(
           parse_type_param_bounds(tp_inner) |> dict.from_list,
           string.trim_start(rest),
@@ -813,7 +814,7 @@ fn parse_impl_header(
         raw_trait
         |> string.trim
         |> strip_bracket_suffix
-        |> strip_pkg_qualifier
+        |> syntax.strip_pkg_qualifier
       let target_part = case string.split_once(after_for, " with ") {
         Ok(#(left, _)) -> string.trim(left)
         Error(_) -> string.trim(after_for)
@@ -827,7 +828,7 @@ fn parse_impl_header(
             Some(#(nm, args)) -> #(nm, args)
             None -> #(take_qualified_ident(target_part), [])
           }
-          let target_name = strip_pkg_qualifier(raw_target_name)
+          let target_name = syntax.strip_pkg_qualifier(raw_target_name)
           case target_name {
             "" -> meta
             _ -> {
@@ -908,7 +909,7 @@ fn parse_pub_fn_header(
     string.starts_with(after_fn, "[")
   {
     True ->
-      case split_bracket_block(after_fn) {
+      case syntax.split_bracket_block(after_fn) {
         Some(#(tp_inner, rest)) -> {
           let rest_t = string.trim_start(rest)
           let #(nm, after_nm) = split_fn_name_and_rest(rest_t)
@@ -920,7 +921,7 @@ fn parse_pub_fn_header(
       let #(nm, after_nm) = split_fn_name_and_rest(after_fn)
       case string.starts_with(after_nm, "[") {
         True ->
-          case split_bracket_block(after_nm) {
+          case syntax.split_bracket_block(after_nm) {
             Some(#(tp_inner, rest)) -> #(
               parse_type_param_bounds(tp_inner),
               nm,
@@ -941,13 +942,13 @@ fn parse_pub_fn_header(
   {
     False -> meta
     True ->
-      case split_paren_block(after_name_and_tps) {
+      case syntax.split_paren_block(after_name_and_tps) {
         None -> meta
         Some(#(params_inner, after_parens)) -> {
           let tp_names =
             list.map(tp_list, fn(pair) { pair.0 })
             |> set.from_list
-          let param_chunks = split_top_level_commas(params_inner)
+          let param_chunks = syntax.split_top_level_commas(params_inner)
           let parsed_params =
             list.try_map(param_chunks, fn(chunk) {
               parse_fn_param_type(chunk, tp_names)
@@ -1010,10 +1011,10 @@ fn parse_fn_param_type(
   chunk: String,
   tp_names: Set(String),
 ) -> Result(MbtType, Nil) {
-  case split_top_level_once(chunk, ":") {
+  case syntax.split_top_level_once(chunk, ":") {
     Error(_) -> Error(Nil)
     Ok(#(_, after_colon)) -> {
-      let clean_ty = case split_top_level_once(after_colon, "=") {
+      let clean_ty = case syntax.split_top_level_once(after_colon, "=") {
         Ok(#(ty_only, _)) -> ty_only
         Error(_) -> after_colon
       }
@@ -1046,21 +1047,21 @@ fn parse_fn_return_type(
 }
 
 fn strip_trailing_clause(s: String, marker: String) -> String {
-  case split_top_level_once(s, marker) {
+  case syntax.split_top_level_once(s, marker) {
     Ok(#(left, _)) -> left
     Error(_) -> s
   }
 }
 
 fn strip_trailing_equals_clause(s: String) -> String {
-  case split_top_level_once(s, "=") {
+  case syntax.split_top_level_once(s, "=") {
     Ok(#(left, _)) -> left
     Error(_) -> s
   }
 }
 
 fn parse_type_param_bounds(tp_inner: String) -> List(#(String, Set(String))) {
-  split_top_level_commas(tp_inner)
+  syntax.split_top_level_commas(tp_inner)
   |> list.filter_map(fn(entry) {
     let trimmed = string.trim(entry)
     case trimmed {
@@ -1070,7 +1071,7 @@ fn parse_type_param_bounds(tp_inner: String) -> List(#(String, Set(String))) {
           Ok(#(raw_name, raw_bounds)) -> {
             let bounds =
               string.split(raw_bounds, "+")
-              |> list.map(fn(b) { strip_pkg_qualifier(string.trim(b)) })
+              |> list.map(fn(b) { syntax.strip_pkg_qualifier(string.trim(b)) })
               |> list.filter(fn(b) { b != "" })
               |> set.from_list
             Ok(#(string.trim(raw_name), bounds))
@@ -1084,10 +1085,10 @@ fn parse_type_param_bounds(tp_inner: String) -> List(#(String, Set(String))) {
 /// Parse a MoonBit type expression into `MbtType`.
 pub fn parse_mbt_type(raw: String, tp_names: Set(String)) -> MbtType {
   let trimmed = string.trim(raw)
-  case split_top_level_once(trimmed, "->") {
+  case syntax.split_top_level_once(trimmed, "->") {
     Ok(#(left_raw, right_raw)) -> {
       let left = string.trim(left_raw)
-      let param_inner = case is_outer_paren_wrapped(left) {
+      let param_inner = case syntax.is_outer_paren_wrapped(left) {
         True ->
           left
           |> string.drop_start(1)
@@ -1095,7 +1096,7 @@ pub fn parse_mbt_type(raw: String, tp_names: Set(String)) -> MbtType {
         False -> left
       }
       let params =
-        split_top_level_commas(param_inner)
+        syntax.split_top_level_commas(param_inner)
         |> list.map(parse_mbt_type(_, tp_names))
       let ret = parse_mbt_type(right_raw, tp_names)
       MbtFn(params:, return_type: ret)
@@ -1107,14 +1108,14 @@ pub fn parse_mbt_type(raw: String, tp_names: Set(String)) -> MbtType {
           MbtNamed(name: "Option", args: [inner])
         }
         False ->
-          case is_outer_paren_wrapped(trimmed) {
+          case syntax.is_outer_paren_wrapped(trimmed) {
             True -> {
               let inner =
                 trimmed
                 |> string.drop_start(1)
                 |> string.drop_end(1)
                 |> string.trim
-              let items = split_top_level_commas(inner)
+              let items = syntax.split_top_level_commas(inner)
               case items {
                 [] -> MbtNamed(name: "Unit", args: [])
                 [single] -> parse_mbt_type(single, tp_names)
@@ -1124,7 +1125,7 @@ pub fn parse_mbt_type(raw: String, tp_names: Set(String)) -> MbtType {
             False ->
               case split_target_type_args(trimmed) {
                 Some(#(raw_name, raw_args)) -> {
-                  let clean_name = strip_pkg_qualifier(raw_name)
+                  let clean_name = syntax.strip_pkg_qualifier(raw_name)
                   let args = list.map(raw_args, parse_mbt_type(_, tp_names))
                   MbtNamed(name: clean_name, args:)
                 }
@@ -1132,7 +1133,10 @@ pub fn parse_mbt_type(raw: String, tp_names: Set(String)) -> MbtType {
                   case set.contains(tp_names, trimmed) {
                     True -> MbtVar(trimmed)
                     False ->
-                      MbtNamed(name: strip_pkg_qualifier(trimmed), args: [])
+                      MbtNamed(
+                        name: syntax.strip_pkg_qualifier(trimmed),
+                        args: [],
+                      )
                   }
               }
           }
@@ -1149,7 +1153,7 @@ fn split_target_type_args(s: String) -> Option(#(String, List(String))) {
         Error(_) -> None
         Ok(#(name_part, rest_with_close)) -> {
           let inner = string.drop_end(rest_with_close, 1)
-          Some(#(string.trim(name_part), split_top_level_commas(inner)))
+          Some(#(string.trim(name_part), syntax.split_top_level_commas(inner)))
         }
       }
   }
@@ -1159,14 +1163,6 @@ fn strip_bracket_suffix(s: String) -> String {
   case string.split_once(s, "[") {
     Ok(#(head, _)) -> string.trim(head)
     Error(_) -> s
-  }
-}
-
-fn strip_pkg_qualifier(name: String) -> String {
-  let trimmed = string.trim(name)
-  case string.split_once(trimmed, ".") {
-    Ok(#(_, right)) -> string.trim(right)
-    Error(_) -> trimmed
   }
 }
 
@@ -1198,181 +1194,6 @@ fn take_chars_while_loop(
         True -> take_chars_while_loop(rest, pred, [c, ..acc])
         False -> rev_str(acc)
       }
-  }
-}
-
-fn split_bracket_block(s: String) -> Option(#(String, String)) {
-  split_delim_block(s, "[", "]")
-}
-
-fn split_paren_block(s: String) -> Option(#(String, String)) {
-  split_delim_block(s, "(", ")")
-}
-
-fn split_delim_block(
-  s: String,
-  open_d: String,
-  close_d: String,
-) -> Option(#(String, String)) {
-  case string.starts_with(s, open_d) {
-    False -> None
-    True -> {
-      let chars = string.to_graphemes(s) |> list.drop(1)
-      split_delim_loop(chars, open_d, close_d, 1, [])
-    }
-  }
-}
-
-fn split_delim_loop(
-  chars: List(String),
-  open_d: String,
-  close_d: String,
-  depth: Int,
-  rev_inner: List(String),
-) -> Option(#(String, String)) {
-  case chars {
-    [] -> None
-    [c, ..rest] ->
-      case c == open_d {
-        True ->
-          split_delim_loop(rest, open_d, close_d, depth + 1, [c, ..rev_inner])
-        False ->
-          case c == close_d {
-            True if depth == 1 ->
-              Some(#(rev_str(rev_inner), string.concat(rest)))
-            True ->
-              split_delim_loop(rest, open_d, close_d, depth - 1, [
-                c,
-                ..rev_inner
-              ])
-            False ->
-              split_delim_loop(rest, open_d, close_d, depth, [c, ..rev_inner])
-          }
-      }
-  }
-}
-
-fn is_outer_paren_wrapped(s: String) -> Bool {
-  let trimmed = string.trim(s)
-  case string.starts_with(trimmed, "(") && string.ends_with(trimmed, ")") {
-    False -> False
-    True ->
-      case split_paren_block(trimmed) {
-        Some(#(_, "")) -> True
-        _ -> False
-      }
-  }
-}
-
-fn split_top_level_commas(s: String) -> List(String) {
-  let chars = string.to_graphemes(s)
-  split_commas_loop(chars, 0, 0, [], [])
-  |> list.map(string.trim)
-  |> list.filter(fn(item) { item != "" })
-}
-
-fn split_commas_loop(
-  chars: List(String),
-  parens: Int,
-  brackets: Int,
-  rev_cur: List(String),
-  rev_items: List(String),
-) -> List(String) {
-  case chars {
-    [] -> list.reverse([rev_str(rev_cur), ..rev_items])
-    [c, ..rest] ->
-      case c {
-        "(" ->
-          split_commas_loop(
-            rest,
-            parens + 1,
-            brackets,
-            [c, ..rev_cur],
-            rev_items,
-          )
-        ")" ->
-          split_commas_loop(
-            rest,
-            int.max(0, parens - 1),
-            brackets,
-            [c, ..rev_cur],
-            rev_items,
-          )
-        "[" ->
-          split_commas_loop(
-            rest,
-            parens,
-            brackets + 1,
-            [c, ..rev_cur],
-            rev_items,
-          )
-        "]" ->
-          split_commas_loop(
-            rest,
-            parens,
-            int.max(0, brackets - 1),
-            [c, ..rev_cur],
-            rev_items,
-          )
-        "," if parens == 0 && brackets == 0 ->
-          split_commas_loop(rest, 0, 0, [], [rev_str(rev_cur), ..rev_items])
-        _ ->
-          split_commas_loop(rest, parens, brackets, [c, ..rev_cur], rev_items)
-      }
-  }
-}
-
-fn split_top_level_once(
-  s: String,
-  sep: String,
-) -> Result(#(String, String), Nil) {
-  let sep_chars = string.to_graphemes(sep)
-  split_top_once_loop(string.to_graphemes(s), sep_chars, 0, 0, [])
-}
-
-fn split_top_once_loop(
-  chars: List(String),
-  sep_chars: List(String),
-  parens: Int,
-  brackets: Int,
-  rev_left: List(String),
-) -> Result(#(String, String), Nil) {
-  case chars {
-    [] -> Error(Nil)
-    [c, ..rest] ->
-      case parens == 0 && brackets == 0 {
-        True ->
-          case strip_prefix_list(chars, sep_chars) {
-            Some(after_sep) ->
-              Ok(#(rev_str(rev_left), string.concat(after_sep)))
-            None -> {
-              let #(np, nb) = step_depth(c, parens, brackets)
-              split_top_once_loop(rest, sep_chars, np, nb, [c, ..rev_left])
-            }
-          }
-        False -> {
-          let #(np, nb) = step_depth(c, parens, brackets)
-          split_top_once_loop(rest, sep_chars, np, nb, [c, ..rev_left])
-        }
-      }
-  }
-}
-
-fn strip_prefix_list(items: List(a), pfx: List(a)) -> Option(List(a)) {
-  case pfx, items {
-    [], _ -> Some(items)
-    [ph, ..pt], [ih, ..it] if ph == ih -> strip_prefix_list(it, pt)
-    _, _ -> None
-  }
-}
-
-fn step_depth(c: String, parens: Int, brackets: Int) -> #(Int, Int) {
-  case c {
-    "(" -> #(parens + 1, brackets)
-    ")" -> #(int.max(0, parens - 1), brackets)
-    "[" -> #(parens, brackets + 1)
-    "]" -> #(parens, int.max(0, brackets - 1))
-    _ -> #(parens, brackets)
   }
 }
 

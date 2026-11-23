@@ -1,5 +1,5 @@
 -module(gekko_ffi).
--export([run_command/3, get_env/1, find_executable/1, extract_zip_entry/2]).
+-export([run_command/3, get_env/1, find_executable/1, extract_zip_entry/2, sha256_hex/1]).
 
 run_command(Command, Args, Cwd) ->
     CmdStr = unicode:characters_to_list(Command, utf8),
@@ -71,3 +71,7 @@ extract_zip_entry(ZipPath, EntryPath) ->
         _:_ ->
             {error, nil}
     end.
+
+sha256_hex(Data) ->
+    Digest = crypto:hash(sha256, Data),
+    iolist_to_binary([io_lib:format("~2.16.0b", [B]) || <<B:8>> <= Digest]).

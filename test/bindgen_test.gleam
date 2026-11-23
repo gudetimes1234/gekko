@@ -6,6 +6,7 @@ import gleam/string
 import moonbit/bindgen
 import moonbit/ffi_meta
 import moonbit/mbti
+import moonbit/syntax
 import project/cmd
 import project/moonbit_ffi
 import project/workspace
@@ -992,4 +993,18 @@ pub fn generic_ffi_traits_and_cross_module_bounds_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
+}
+
+pub fn moonbit_syntax_helpers_test() {
+  assert syntax.take_balanced_parens("(a, (b, c)) rest")
+    == Ok(#("a, (b, c)", " rest"))
+  assert syntax.take_balanced_brackets("[K : Eq, V] fn_name")
+    == Ok(#("K : Eq, V", " fn_name"))
+  assert syntax.is_outer_paren_wrapped("(Int, (String, Bool))") == True
+  assert syntax.is_outer_paren_wrapped("(Int) -> (Bool)") == False
+  assert syntax.split_top_level_commas("Int, Map[String, Int], (Bool, Float)")
+    == ["Int", "Map[String, Int]", "(Bool, Float)"]
+  assert syntax.split_top_level_colon("label~ : @pkg.Map[String, Int]")
+    == Some(#("label~ ", " @pkg.Map[String, Int]"))
+  assert syntax.split_top_level_colon("@pkg.Type::method") == option.None
 }

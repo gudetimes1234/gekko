@@ -2,6 +2,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import moonbit/syntax
 
 /// Parsed representation of a MoonBit `pkg.generated.mbti` interface file.
 pub type MbtiPackage {
@@ -410,7 +411,7 @@ fn parse_struct_decl(
   let after_tp = string.trim(after_tp)
   use tuple_fields <- result.try(case string.starts_with(after_tp, "(") {
     True -> {
-      use #(inner, _) <- result.try(take_balanced_parens(after_tp))
+      use #(inner, _) <- result.try(syntax.take_balanced_parens(after_tp))
       parse_comma_types(inner)
     }
     False -> Ok([])
@@ -493,12 +494,12 @@ fn parse_enum_variant(line: String) -> Result(MbtiVariant, String) {
   case string.split_once(line, "(") {
     Error(_) -> Ok(MbtiVariant(name: string.trim(line), params: []))
     Ok(#(vname, rest)) -> {
-      use #(inner, _) <- result.try(take_balanced_parens("(" <> rest))
-      use args <- result.try(split_top_level_commas(inner))
+      use #(inner, _) <- result.try(syntax.take_balanced_parens("(" <> rest))
+      let args = syntax.split_top_level_commas(inner)
       use parsed_params <- result.try(
         list.try_map(args, fn(arg) {
           let a = string.trim(arg)
-          case split_top_level_colon(a) {
+          case syntax.split_top_level_colon(a) {
             Some(#(lbl_raw, ty_src)) -> {
               let lbl =
                 lbl_raw
@@ -541,7 +542,7 @@ fn parse_fn_decl(
     Error(_) -> #(None, name_raw)
   }
 
-  use #(params_src, after_params) <- result.try(take_balanced_parens(
+  use #(params_src, after_params) <- result.try(syntax.take_balanced_parens(
     "(" <> rest_after_name,
   ))
   use params <- result.try(parse_fn_params(params_src))
@@ -575,8 +576,8 @@ fn parse_fn_type_params(
   case string.starts_with(s, "[") {
     False -> Ok(#([], s))
     True -> {
-      use #(inner, after) <- result.try(take_balanced_brackets(s))
-      use parts <- result.try(split_top_level_commas(inner))
+      use #(inner, after) <- result.try(syntax.take_balanced_brackets(s))
+      let parts = syntax.split_top_level_commas(inner)
       let parsed =
         list.filter_map(parts, fn(part) {
           let p = string.trim(part)
@@ -606,10 +607,10 @@ fn parse_fn_params(src: String) -> Result(List(MbtiParam), String) {
   case trimmed {
     "" -> Ok([])
     _ -> {
-      use parts <- result.try(split_top_level_commas(trimmed))
+      let parts = syntax.split_top_level_commas(trimmed)
       list.try_map(parts, fn(raw_part) {
         let p = string.trim(raw_part)
-        case split_top_level_colon(p) {
+        case syntax.split_top_level_colon(p) {
           Some(#(lbl_raw, ty_src)) -> {
             let l = string.trim(lbl_raw)
             let #(label, is_optional) = case string.ends_with(l, "?") {
@@ -649,7 +650,7 @@ pub fn parse_type(src: String) -> Result(#(MbtiType, String), String) {
       }
 
       False, True -> {
-        use #(inner, after_paren) <- result.try(take_balanced_parens(
+        use #(inner, after_paren) <- result.try(syntax.take_balanced_parens(
           after_async,
         ))
         let after_paren_trimmed = string.trim_start(after_paren)
@@ -693,16 +694,16 @@ pub fn parse_type(src: String) -> Result(#(MbtiType, String), String) {
           }
           False -> #(None, after_async)
         }
-        let #(name, after_name) = read_ident(after_q)
+        let #(name, after_name) = syntax.read_ident(after_q)
         case name {
           "" -> Error("Expected type name in .mbti at: " <> src)
           _ -> {
             let after_name_trim = string.trim_start(after_name)
             case string.starts_with(after_name_trim, "[") {
               True -> {
-                use #(inner, after_br) <- result.try(take_balanced_brackets(
-                  after_name_trim,
-                ))
+                use #(inner, after_br) <- result.try(
+                  syntax.take_balanced_brackets(after_name_trim),
+                )
                 use args <- result.try(parse_comma_types(inner))
                 Ok(#(MbtiNamed(qualifier:, name:, args:), after_br))
               }
@@ -733,7 +734,7 @@ fn parse_comma_types(src: String) -> Result(List(MbtiType), String) {
   case trimmed {
     "" -> Ok([])
     _ -> {
-      use parts <- result.try(split_top_level_commas(trimmed))
+      let parts = syntax.split_top_level_commas(trimmed)
       list.try_map(parts, fn(part) {
         use #(ty, _) <- result.try(parse_type(string.trim(part)))
         Ok(ty)
@@ -791,11 +792,11 @@ fn split_name_and_type_params(
   header: String,
 ) -> #(String, List(String), String) {
   let h = string.trim(header)
-  let #(name, after_name) = read_ident(h)
+  let #(name, after_name) = syntax.read_ident(h)
   let after_trim = string.trim_start(after_name)
   case string.starts_with(after_trim, "[") {
     True ->
-      case take_balanced_brackets(after_trim) {
+      case syntax.take_balanced_brackets(after_trim) {
         Ok(#(inner, rem)) -> {
           let tps =
             inner
@@ -827,154 +828,6 @@ fn take_type_atom_loop(
         "]" | ")" if depth > 0 -> take_type_atom_loop(rest, acc <> g, depth - 1)
         "," | "]" | ")" | " " | "\t" if depth == 0 -> #(acc, src)
         _ -> take_type_atom_loop(rest, acc <> g, depth)
-      }
-  }
-}
-
-fn read_ident(src: String) -> #(String, String) {
-  read_ident_loop(src, "")
-}
-
-fn read_ident_loop(src: String, acc: String) -> #(String, String) {
-  case string.pop_grapheme(src) {
-    Error(_) -> #(acc, "")
-    Ok(#(g, rest)) ->
-      case is_ident_char(g) {
-        True -> read_ident_loop(rest, acc <> g)
-        False -> #(acc, src)
-      }
-  }
-}
-
-fn is_ident_char(g: String) -> Bool {
-  case g {
-    "_" -> True
-    _ -> {
-      let lower = string.lowercase(g)
-      let upper = string.uppercase(g)
-      lower != upper
-      || g == "0"
-      || g == "1"
-      || g == "2"
-      || g == "3"
-      || g == "4"
-      || g == "5"
-      || g == "6"
-      || g == "7"
-      || g == "8"
-      || g == "9"
-    }
-  }
-}
-
-fn take_balanced_parens(src: String) -> Result(#(String, String), String) {
-  take_balanced(src, "(", ")")
-}
-
-fn take_balanced_brackets(src: String) -> Result(#(String, String), String) {
-  take_balanced(src, "[", "]")
-}
-
-fn take_balanced(
-  src: String,
-  open: String,
-  close: String,
-) -> Result(#(String, String), String) {
-  case string.pop_grapheme(src) {
-    Ok(#(first, rest)) if first == open ->
-      take_balanced_loop(rest, open, close, 1, "")
-    _ -> Error("Expected '" <> open <> "' in .mbti at: " <> src)
-  }
-}
-
-fn take_balanced_loop(
-  src: String,
-  open: String,
-  close: String,
-  depth: Int,
-  acc: String,
-) -> Result(#(String, String), String) {
-  case string.pop_grapheme(src) {
-    Error(_) -> Error("Unclosed '" <> open <> "' in .mbti")
-    Ok(#(g, rest)) ->
-      case g == open, g == close {
-        True, _ -> take_balanced_loop(rest, open, close, depth + 1, acc <> g)
-        False, True ->
-          case depth == 1 {
-            True -> Ok(#(acc, rest))
-            False -> take_balanced_loop(rest, open, close, depth - 1, acc <> g)
-          }
-        False, False -> take_balanced_loop(rest, open, close, depth, acc <> g)
-      }
-  }
-}
-
-fn split_top_level_commas(src: String) -> Result(List(String), String) {
-  split_commas_loop(src, 0, "", [])
-}
-
-fn split_commas_loop(
-  src: String,
-  depth: Int,
-  cur: String,
-  rev_parts: List(String),
-) -> Result(List(String), String) {
-  case string.pop_grapheme(src) {
-    Error(_) ->
-      case string.trim(cur) {
-        "" if rev_parts == [] -> Ok([])
-        _ -> Ok(list.reverse([cur, ..rev_parts]))
-      }
-    Ok(#(g, rest)) ->
-      case g {
-        "(" | "[" -> split_commas_loop(rest, depth + 1, cur <> g, rev_parts)
-        ")" | "]" ->
-          split_commas_loop(
-            rest,
-            case depth > 0 {
-              True -> depth - 1
-              False -> 0
-            },
-            cur <> g,
-            rev_parts,
-          )
-        "," if depth == 0 ->
-          split_commas_loop(rest, depth, "", [cur, ..rev_parts])
-        _ -> split_commas_loop(rest, depth, cur <> g, rev_parts)
-      }
-  }
-}
-
-fn split_top_level_colon(src: String) -> Option(#(String, String)) {
-  split_colon_loop(src, 0, "")
-}
-
-fn split_colon_loop(
-  src: String,
-  depth: Int,
-  left: String,
-) -> Option(#(String, String)) {
-  case string.pop_grapheme(src) {
-    Error(_) -> None
-    Ok(#(g, rest)) ->
-      case g {
-        "(" | "[" | "{" -> split_colon_loop(rest, depth + 1, left <> g)
-        ")" | "]" | "}" ->
-          split_colon_loop(
-            rest,
-            case depth > 0 {
-              True -> depth - 1
-              False -> 0
-            },
-            left <> g,
-          )
-        ":" if depth == 0 ->
-          case string.starts_with(rest, ":") {
-            True ->
-              split_colon_loop(string.drop_start(rest, 1), depth, left <> "::")
-            False -> Some(#(left, rest))
-          }
-        _ -> split_colon_loop(rest, depth, left <> g)
       }
   }
 }
