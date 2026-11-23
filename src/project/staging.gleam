@@ -982,7 +982,16 @@ fn stage_test_sources(
         let src_path = filepath.join(test_root, rel_path)
         let dest_path = filepath.join(dest_root, rel_path)
         case simplifile.is_file(dest_path) {
-          Ok(True) -> Ok(mods_acc)
+          Ok(True) ->
+            case filepath.extension(rel_path) {
+              Ok("gleam") ->
+                Error(
+                  "Duplicate module '"
+                  <> filepath.strip_extension(rel_path)
+                  <> "' found in both src/ and test/",
+                )
+              _ -> Ok(mods_acc)
+            }
           _ -> {
             use _ <- result.try(
               simplifile.create_directory_all(filepath.directory_name(dest_path))

@@ -122,10 +122,10 @@ fn emit_module_inner(
   let #(raw_type_blocks, ctx1) = map_acc(module.types, ctx0, emit_type_def)
   let type_blocks = list.filter(raw_type_blocks, fn(b) { b != "" })
 
+  let visible_alias_names = collect_visible_alias_names(module)
   let visible_aliases =
     list.filter(module.type_aliases, fn(ta) {
-      ta.publicity == glance.Public
-      || is_alias_referenced_in_module(module, ta.name)
+      set.contains(visible_alias_names, ta.name)
     })
   let #(alias_blocks, ctx2) = map_acc(visible_aliases, ctx1, emit_type_alias)
 
@@ -741,7 +741,7 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
   {
     True ->
       "\n\n///|\ntest \""
-      <> escape_string_literal(f.unmangled_name)
+      <> escape_plain_string(f.unmangled_name)
       <> "\" {\n  @prelude.ignore("
       <> f.name
       <> "())\n}"
@@ -1193,7 +1193,7 @@ fn emit_expr_indented(
       }
       let loc_str =
         "\""
-        <> escape_string_literal(file_path)
+        <> escape_plain_string(file_path)
         <> ":"
         <> int.to_string(line)
         <> "\""
@@ -2579,11 +2579,41 @@ fn align_pat_args(
 }
 
 fn escape_string_literal(raw: String) -> String {
-  // Replace unescaped `\{` interpolation sequence and raw CR/LF inside multiline strings
+  // Escape unescaped `\{` interpolation sequences (odd backslash count before `{`)
+  // and raw CR/LF inside multiline Gleam strings.
+  escape_string_literal_loop(string.to_graphemes(raw), False, [])
+  |> list.reverse
+  |> string.concat
+}
+
+fn escape_string_literal_loop(
+  chars: List(String),
+  prev_backslash: Bool,
+  rev_acc: List(String),
+) -> List(String) {
+  case chars {
+    [] -> rev_acc
+    [ch, ..rest] ->
+      case ch {
+        "\\" ->
+          escape_string_literal_loop(rest, !prev_backslash, [ch, ..rev_acc])
+        "{" if prev_backslash ->
+          escape_string_literal_loop(rest, False, ["\\{", ..rev_acc])
+        "\r" -> escape_string_literal_loop(rest, False, ["\\r", ..rev_acc])
+        "\n" -> escape_string_literal_loop(rest, False, ["\\n", ..rev_acc])
+        _ -> escape_string_literal_loop(rest, False, [ch, ..rev_acc])
+      }
+  }
+}
+
+fn escape_plain_string(raw: String) -> String {
   raw
-  |> string.replace("\\{", "\\\\{")
+  |> string.replace("\\", "\\\\")
+  |> string.replace("\"", "\\\"")
   |> string.replace("\r", "\\r")
   |> string.replace("\n", "\\n")
+  |> string.replace("\t", "\\t")
+  |> string.replace("\\{", "\\\\{")
 }
 
 fn map_acc(
@@ -2694,114 +2724,207 @@ fn emit_type_eq_impl(td: IrTypeDef, dict_key_params: Set(String)) -> String {
   <> "\n}"
 }
 
+fn collect_visible_alias_names(module: IrModule) -> Set(String) {
+  let seed =
+    list.fold(module.type_aliases, set.new(), fn(acc, ta) {
+      case
+        ta.publicity == glance.Public
+        || is_alias_referenced_in_module(module, ta.name)
+      {
+        True -> set.insert(acc, ta.name)
+        False -> acc
+      }
+    })
+  expand_visible_aliases(module.type_aliases, module.module_name, seed)
+}
+
+fn expand_visible_aliases(
+  aliases: List(IrTypeAlias),
+  cur_mod: String,
+  visible: Set(String),
+) -> Set(String) {
+  let #(next_visible, changed) =
+    list.fold(aliases, #(visible, False), fn(acc, ta) {
+      let #(vis_set, _ch) = acc
+      case set.contains(vis_set, ta.name) {
+        True -> acc
+        False -> {
+          let used_by_visible =
+            list.any(aliases, fn(other) {
+              set.contains(vis_set, other.name)
+              && type_uses_local_name(other.aliased, cur_mod, ta.name)
+            })
+          case used_by_visible {
+            True -> #(set.insert(vis_set, ta.name), True)
+            False -> acc
+          }
+        }
+      }
+    })
+  case changed {
+    True -> expand_visible_aliases(aliases, cur_mod, next_visible)
+    False -> next_visible
+  }
+}
+
 fn is_alias_referenced_in_module(module: IrModule, alias_name: String) -> Bool {
+  let cur_mod = module.module_name
   let in_types =
     list.any(module.types, fn(td) {
       td.external_type == None
       && list.any(td.variants, fn(v) {
         list.any(v.fields, fn(f) {
-          type_uses_local_name(f.field_type, alias_name)
+          type_uses_local_name(f.field_type, cur_mod, alias_name)
         })
       })
     })
   let in_aliases =
     list.any(module.type_aliases, fn(ta) {
       ta.publicity == glance.Public
-      && type_uses_local_name(ta.aliased, alias_name)
+      && type_uses_local_name(ta.aliased, cur_mod, alias_name)
     })
   let in_getters =
     list.any(module.getters, fn(g) {
-      type_uses_local_name(g.return_type, alias_name)
+      type_uses_local_name(g.return_type, cur_mod, alias_name)
     })
   let in_consts =
     list.any(module.constants, fn(c) {
-      type_uses_local_name(c.value_type, alias_name)
+      type_uses_local_name(c.value_type, cur_mod, alias_name)
     })
   let in_fns =
     list.any(module.functions, fn(f) {
       list.any(f.params, fn(p) {
-        type_uses_local_name(p.param_type, alias_name)
+        type_uses_local_name(p.param_type, cur_mod, alias_name)
       })
-      || type_uses_local_name(f.return_type, alias_name)
-      || stmts_use_local_type(f.body, alias_name)
+      || type_uses_local_name(f.return_type, cur_mod, alias_name)
+      || stmts_use_local_type(f.body, cur_mod, alias_name)
     })
   in_types || in_aliases || in_getters || in_consts || in_fns
 }
 
-fn type_uses_local_name(ty: IrType, alias_name: String) -> Bool {
+fn type_uses_local_name(
+  ty: IrType,
+  cur_mod: String,
+  alias_name: String,
+) -> Bool {
   case ty {
-    IrTypeNamed(module: "", name:, args:, ..) ->
-      name == alias_name || list.any(args, type_uses_local_name(_, alias_name))
-    IrTypeNamed(args:, ..) ->
-      list.any(args, type_uses_local_name(_, alias_name))
-    IrTypeList(inner) -> type_uses_local_name(inner, alias_name)
+    IrTypeNamed(module:, name:, args:, ..) ->
+      { { module == "" || module == cur_mod } && name == alias_name }
+      || list.any(args, type_uses_local_name(_, cur_mod, alias_name))
+    IrTypeList(inner) -> type_uses_local_name(inner, cur_mod, alias_name)
     IrTypeResult(ok_t, err_t) ->
-      type_uses_local_name(ok_t, alias_name)
-      || type_uses_local_name(err_t, alias_name)
-    IrTypeTuple(els) -> list.any(els, type_uses_local_name(_, alias_name))
+      type_uses_local_name(ok_t, cur_mod, alias_name)
+      || type_uses_local_name(err_t, cur_mod, alias_name)
+    IrTypeTuple(els) ->
+      list.any(els, type_uses_local_name(_, cur_mod, alias_name))
     IrTypeFn(ps, r) ->
-      list.any(ps, type_uses_local_name(_, alias_name))
-      || type_uses_local_name(r, alias_name)
+      list.any(ps, type_uses_local_name(_, cur_mod, alias_name))
+      || type_uses_local_name(r, cur_mod, alias_name)
     _ -> False
   }
 }
 
-fn stmts_use_local_type(stmts: List(IrStmt), alias_name: String) -> Bool {
+fn stmts_use_local_type(
+  stmts: List(IrStmt),
+  cur_mod: String,
+  alias_name: String,
+) -> Bool {
   list.any(stmts, fn(s) {
     case s {
       IrStmtLet(annotation: Some(ann), value:, ..) ->
-        type_uses_local_name(ann, alias_name)
-        || expr_uses_local_type(value, alias_name)
-      IrStmtLet(value:, ..) -> expr_uses_local_type(value, alias_name)
+        type_uses_local_name(ann, cur_mod, alias_name)
+        || expr_uses_local_type(value, cur_mod, alias_name)
+      IrStmtLet(value:, ..) -> expr_uses_local_type(value, cur_mod, alias_name)
       IrStmtGuard(value:, guard_condition:, abort_message:, post_bindings:, ..) ->
-        expr_uses_local_type(value, alias_name)
-        || option.map(guard_condition, expr_uses_local_type(_, alias_name))
+        expr_uses_local_type(value, cur_mod, alias_name)
+        || option.map(guard_condition, expr_uses_local_type(
+          _,
+          cur_mod,
+          alias_name,
+        ))
         == Some(True)
-        || option.map(abort_message, expr_uses_local_type(_, alias_name))
+        || option.map(abort_message, expr_uses_local_type(
+          _,
+          cur_mod,
+          alias_name,
+        ))
         == Some(True)
         || list.any(post_bindings, fn(b) {
-          expr_uses_local_type(b.1, alias_name)
+          expr_uses_local_type(b.1, cur_mod, alias_name)
         })
       IrStmtAssert(condition:, abort_message:) ->
-        expr_uses_local_type(condition, alias_name)
-        || option.map(abort_message, expr_uses_local_type(_, alias_name))
+        expr_uses_local_type(condition, cur_mod, alias_name)
+        || option.map(abort_message, expr_uses_local_type(
+          _,
+          cur_mod,
+          alias_name,
+        ))
         == Some(True)
-      IrStmtExpr(expr) -> expr_uses_local_type(expr, alias_name)
+      IrStmtExpr(expr) -> expr_uses_local_type(expr, cur_mod, alias_name)
     }
   })
 }
 
-fn expr_uses_local_type(expr: IrExpr, alias_name: String) -> Bool {
+fn expr_uses_local_type(
+  expr: IrExpr,
+  cur_mod: String,
+  alias_name: String,
+) -> Bool {
   case expr {
     IrFn(params:, return_type:, body:) ->
       list.any(params, fn(p) {
-        option.map(p.param_type, type_uses_local_name(_, alias_name))
+        option.map(p.param_type, type_uses_local_name(_, cur_mod, alias_name))
         == Some(True)
       })
-      || option.map(return_type, type_uses_local_name(_, alias_name))
+      || option.map(return_type, type_uses_local_name(_, cur_mod, alias_name))
       == Some(True)
-      || stmts_use_local_type(body, alias_name)
-    IrBlock(stmts) -> stmts_use_local_type(stmts, alias_name)
+      || stmts_use_local_type(body, cur_mod, alias_name)
+    IrBlock(stmts) -> stmts_use_local_type(stmts, cur_mod, alias_name)
     IrForLoop(bindings:, body:) ->
-      list.any(bindings, fn(b) { expr_uses_local_type(b.1, alias_name) })
-      || stmts_use_local_type(body, alias_name)
+      list.any(bindings, fn(b) {
+        expr_uses_local_type(b.1, cur_mod, alias_name)
+      })
+      || stmts_use_local_type(body, cur_mod, alias_name)
     IrBinOp(left:, right:, ..) ->
-      expr_uses_local_type(left, alias_name)
-      || expr_uses_local_type(right, alias_name)
-    IrNegateInt(i) | IrNegateBool(i) | IrBreak(i) ->
-      expr_uses_local_type(i, alias_name)
+      expr_uses_local_type(left, cur_mod, alias_name)
+      || expr_uses_local_type(right, cur_mod, alias_name)
+    IrNegateInt(i)
+    | IrNegateBool(i)
+    | IrBreak(i)
+    | IrGetterCall(receiver: i, ..) ->
+      expr_uses_local_type(i, cur_mod, alias_name)
+    IrEcho(expr: i, message:, ..) ->
+      expr_uses_local_type(i, cur_mod, alias_name)
+      || option.map(message, expr_uses_local_type(_, cur_mod, alias_name))
+      == Some(True)
+    IrBitString(segments:) ->
+      list.any(segments, fn(seg) {
+        expr_uses_local_type(seg.0, cur_mod, alias_name)
+        || list.any(seg.1, fn(opt) {
+          case opt {
+            glance.SizeValueOption(e) ->
+              expr_uses_local_type(e, cur_mod, alias_name)
+            _ -> False
+          }
+        })
+      })
     IrTuple(els) | IrContinue(els) ->
-      list.any(els, expr_uses_local_type(_, alias_name))
-    IrTupleIndex(tuple:, ..) -> expr_uses_local_type(tuple, alias_name)
+      list.any(els, expr_uses_local_type(_, cur_mod, alias_name))
+    IrTupleIndex(tuple:, ..) -> expr_uses_local_type(tuple, cur_mod, alias_name)
     IrList(elements:, tail:) ->
-      list.any(elements, expr_uses_local_type(_, alias_name))
-      || option.map(tail, expr_uses_local_type(_, alias_name)) == Some(True)
+      list.any(elements, expr_uses_local_type(_, cur_mod, alias_name))
+      || option.map(tail, expr_uses_local_type(_, cur_mod, alias_name))
+      == Some(True)
     IrCall(function:, args:) ->
-      expr_uses_local_type(function, alias_name)
-      || list.any(args, fn(a) { expr_uses_local_type(a.value, alias_name) })
+      expr_uses_local_type(function, cur_mod, alias_name)
+      || list.any(args, fn(a) {
+        expr_uses_local_type(a.value, cur_mod, alias_name)
+      })
     IrMatch(subjects:, clauses:) ->
-      list.any(subjects, expr_uses_local_type(_, alias_name))
-      || list.any(clauses, fn(c) { expr_uses_local_type(c.body, alias_name) })
+      list.any(subjects, expr_uses_local_type(_, cur_mod, alias_name))
+      || list.any(clauses, fn(c) {
+        expr_uses_local_type(c.body, cur_mod, alias_name)
+      })
     _ -> False
   }
 }

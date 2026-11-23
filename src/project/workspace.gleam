@@ -160,42 +160,6 @@ pub fn transpile_project_with_tests(
     prelude_runtime.gprelude_mbt(),
   ))
 
-  let ir_modules =
-    list.map(all_modules, fn(entry) {
-      let #(_, mod_name, ast_mod, _) = entry
-      desugar.desugar_module(ast_mod, table, mod_name)
-      |> tco.optimize_module
-    })
-
-  let project_bounds =
-    trait_bounds.analyze_project(ir_modules, Some(table), ffi_metadata)
-
-  use rev_emitted <- result.try(
-    list.try_fold(ir_modules, [], fn(names_acc, ir_mod) {
-      let mod_name = ir_mod.module_name
-      let #(mbt_src, imports) =
-        moonbit.emit_module_with_context(
-          ir_mod,
-          Some(table),
-          ffi_metadata,
-          project_bounds,
-        )
-      let is_main = moonbit.module_has_main(ir_mod)
-      let pkg_dir = pkg_config.module_to_pkg_dir(mod_name)
-      let target_dir = filepath.join(out_dir, pkg_dir)
-
-      use _ <- result.try(write_text_file(
-        filepath.join(target_dir, "moon.pkg"),
-        pkg_config.emit_moon_pkg(project_name, imports, is_main),
-      ))
-      use _ <- result.try(write_text_file(
-        filepath.join(target_dir, pkg_dir <> ".mbt"),
-        mbt_src,
-      ))
-      Ok([mod_name, ..names_acc])
-    }),
-  )
-
   let module_pkg_dirs =
     list.map(all_modules, fn(entry) { pkg_config.module_to_pkg_dir(entry.1) })
   let base_reserved =
@@ -226,6 +190,48 @@ pub fn transpile_project_with_tests(
   let local_moonbit_packages =
     list.append(copied_dep_pkgs, root_moonbit_packages)
     |> list.sort(string.compare)
+  let local_pkg_set = set.from_list(local_moonbit_packages)
+
+  let ir_modules =
+    list.map(all_modules, fn(entry) {
+      let #(_, mod_name, ast_mod, _) = entry
+      desugar.desugar_module(ast_mod, table, mod_name)
+      |> tco.optimize_module
+    })
+
+  let project_bounds =
+    trait_bounds.analyze_project(ir_modules, Some(table), ffi_metadata)
+
+  use rev_emitted <- result.try(
+    list.try_fold(ir_modules, [], fn(names_acc, ir_mod) {
+      let mod_name = ir_mod.module_name
+      let #(mbt_src, imports) =
+        moonbit.emit_module_with_context(
+          ir_mod,
+          Some(table),
+          ffi_metadata,
+          project_bounds,
+        )
+      let is_main = moonbit.module_has_main(ir_mod)
+      let pkg_dir = pkg_config.module_to_pkg_dir(mod_name)
+      let target_dir = filepath.join(out_dir, pkg_dir)
+
+      use _ <- result.try(write_text_file(
+        filepath.join(target_dir, "moon.pkg"),
+        pkg_config.emit_moon_pkg_with_local_pkgs(
+          project_name,
+          imports,
+          is_main,
+          local_pkg_set,
+        ),
+      ))
+      use _ <- result.try(write_text_file(
+        filepath.join(target_dir, pkg_dir <> ".mbt"),
+        mbt_src,
+      ))
+      Ok([mod_name, ..names_acc])
+    }),
+  )
 
   let local_top_dirs =
     list.map(local_moonbit_packages, fn(pkg) {

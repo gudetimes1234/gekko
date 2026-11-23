@@ -44,6 +44,7 @@ type PendingHelper {
     id: String,
     dir: ConvDir,
     iface_key: String,
+    iface: WitInterface,
     wit_type_name: String,
     type_def: WitTypeDef,
   )
@@ -1122,6 +1123,7 @@ fn enqueue_helper(
           id: fn_name,
           dir:,
           iface_key: key,
+          iface:,
           wit_type_name:,
           type_def: def,
         )
@@ -1158,7 +1160,7 @@ fn render_helper(
   state: AdapterState,
 ) -> #(String, AdapterState) {
   let use_map = iface_use_map(item.iface_key, state.resolved)
-  let assert Ok(iface) = dict.get(state.resolved.interfaces, item.iface_key)
+  let iface = item.iface
   let #(w_prefix, st1) = ensure_raw_prefix(state, item.iface_key, iface)
   let #(g_prefix, st2) = ensure_gtypes_prefix(st1, iface)
 
@@ -1203,7 +1205,13 @@ fn render_helper(
           let w_field = mangle.mangle_ident(kebab_to_snake(fname))
           let g_field = mangle.mangle_ident(gleam_value_ident(fname))
           let #(conv_expr, st_next) =
-            conv_g2w_expr(fty, item.iface_key, use_map, "g." <> g_field, acc.1)
+            conv_g2w_expr(
+              fty,
+              item.iface_key,
+              use_map,
+              "g." <> g_field <> "()",
+              acc.1,
+            )
           #([w_field <> ": " <> conv_expr, ..acc.0], st_next)
         })
       let body =
@@ -1304,7 +1312,7 @@ fn render_helper(
               let w_fl = kebab_to_screaming(fl)
               "  if g."
               <> g_fl
-              <> " { acc = acc.set("
+              <> "() { acc = acc.set("
               <> w_full
               <> "Flag::"
               <> w_fl

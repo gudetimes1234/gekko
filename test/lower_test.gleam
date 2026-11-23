@@ -1,5 +1,6 @@
 import emit/moonbit
 import filepath
+import glance
 import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
@@ -935,4 +936,82 @@ pub fn int_literal_range_diagnostic_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
+}
+
+pub fn shorthand_fields_and_prelude_shadowing_test() {
+  let dep_src = "pub const shared_name = \"alice\"\n"
+  let main_src =
+    "import dep.{shared_name}\n"
+    <> "pub type User { User(name: String, age: Int) }\n"
+    <> "pub type CustomErr { Error(String) Ok(Int) }\n"
+    <> "pub fn make_user() -> User {\n"
+    <> "  let u = User(name: \"bob\", age: 1)\n"
+    <> "  let _ = User(name: shared_name, age: 2)\n"
+    <> "  let _ = User(shared_name:, age: 3)\n"
+    <> "  User(..u, shared_name:)\n"
+    <> "}\n"
+    <> "pub fn check_custom(e: CustomErr) -> String {\n"
+    <> "  let x = Error(\"custom\")\n"
+    <> "  case x, e {\n"
+    <> "    Error(msg), Ok(_) -> msg\n"
+    <> "    _, Error(msg) -> msg\n"
+    <> "    _, _ -> \"\"\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let assert Ok(#(dep_ast, dep_pre)) = prepass.parse_module("dep", dep_src)
+  let assert Ok(#(main_ast, main_pre)) = prepass.parse_module("main", main_src)
+  let table =
+    symbol_table.index_project(
+      "app",
+      [#("dep", dep_ast, dep_pre), #("main", main_ast, main_pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(main_ast, table, "main")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+
+  assert string.contains(mbt, "@dep.shared_name")
+  assert string.contains(mbt, "Error(\"custom\")")
+  assert !string.contains(mbt, "Err(\"custom\")")
+}
+
+pub fn tco_non_tail_let_and_synthetic_pattern_root_test() {
+  let src =
+    "pub fn sum_with_let(xs: List(Int), acc: Int) -> Int {\n"
+    <> "  case xs {\n"
+    <> "    [] -> {\n"
+    <> "      let out = acc + 1\n"
+    <> "    }\n"
+    <> "    [x, ..rest] -> sum_with_let(rest, acc + x)\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("app", src)
+  let table =
+    symbol_table.index_project(
+      "app",
+      [#("app", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod =
+    desugar.desugar_module(ast_mod, table, "app")
+    |> tco.optimize_module
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+  assert string.contains(mbt, "break out")
+
+  let pat_ast =
+    glance.PatternAssignment(
+      location: glance.Span(0, 0),
+      pattern: glance.PatternVariable(
+        location: glance.Span(0, 0),
+        name: "__user_var",
+      ),
+      name: "user_alias",
+    )
+  let lp = pattern.lower_pattern(pat_ast, table, "app", 0)
+  assert lp.is_synthetic_root == False
+  assert lp.prefix_bindings == []
+  assert lp.pattern == ir.IrPatAs(ir.IrPatVar("__user_var"), "user_alias")
 }

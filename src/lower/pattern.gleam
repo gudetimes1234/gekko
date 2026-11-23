@@ -25,6 +25,7 @@ pub type LoweredPattern {
     guards: List(IrExpr),
     prefix_bindings: List(#(String, IrExpr)),
     bound_names: List(String),
+    is_synthetic_root: Bool,
     next_id: Int,
   )
 }
@@ -45,6 +46,7 @@ pub fn lower_pattern(
         guards: [],
         prefix_bindings: [],
         bound_names: [],
+        is_synthetic_root: False,
         next_id:,
       )
 
@@ -54,6 +56,7 @@ pub fn lower_pattern(
         guards: [],
         prefix_bindings: [],
         bound_names: [],
+        is_synthetic_root: False,
         next_id:,
       )
 
@@ -63,6 +66,7 @@ pub fn lower_pattern(
         guards: [],
         prefix_bindings: [],
         bound_names: [],
+        is_synthetic_root: False,
         next_id:,
       )
 
@@ -72,6 +76,7 @@ pub fn lower_pattern(
         guards: [],
         prefix_bindings: [],
         bound_names: [],
+        is_synthetic_root: False,
         next_id:,
       )
 
@@ -82,6 +87,7 @@ pub fn lower_pattern(
         guards: [],
         prefix_bindings: [],
         bound_names: [name],
+        is_synthetic_root: False,
         next_id:,
       )
     }
@@ -94,6 +100,7 @@ pub fn lower_pattern(
         guards:,
         prefix_bindings: bindings,
         bound_names: names,
+        is_synthetic_root: False,
         next_id: cur_id,
       )
     }
@@ -138,6 +145,7 @@ pub fn lower_pattern(
         guards: list.append(el_guards, guards),
         prefix_bindings: list.append(el_bindings, bindings),
         bound_names: list.append(el_names, names),
+        is_synthetic_root: False,
         next_id: final_id,
       )
     }
@@ -145,35 +153,26 @@ pub fn lower_pattern(
     glance.PatternAssignment(pattern: inner, name:, ..) -> {
       let lowered = lower_pattern(inner, table, current_module, next_id)
       let mangled = mangle.mangle_ident(name)
-      case lowered.pattern {
-        IrPatVar(existing) ->
-          case string.starts_with(existing, "__") {
-            True ->
-              LoweredPattern(
-                pattern: IrPatVar(existing),
-                guards: lowered.guards,
-                prefix_bindings: [
-                  #(mangled, IrVar(existing)),
-                  ..lowered.prefix_bindings
-                ],
-                bound_names: [name, ..lowered.bound_names],
-                next_id: lowered.next_id,
-              )
-            False ->
-              LoweredPattern(
-                pattern: IrPatAs(lowered.pattern, mangled),
-                guards: lowered.guards,
-                prefix_bindings: lowered.prefix_bindings,
-                bound_names: [name, ..lowered.bound_names],
-                next_id: lowered.next_id,
-              )
-          }
-        _ ->
+      case lowered.pattern, lowered.is_synthetic_root {
+        IrPatVar(existing), True ->
+          LoweredPattern(
+            pattern: IrPatVar(existing),
+            guards: lowered.guards,
+            prefix_bindings: [
+              #(mangled, IrVar(existing)),
+              ..lowered.prefix_bindings
+            ],
+            bound_names: [name, ..lowered.bound_names],
+            is_synthetic_root: True,
+            next_id: lowered.next_id,
+          )
+        _, _ ->
           LoweredPattern(
             pattern: IrPatAs(lowered.pattern, mangled),
             guards: lowered.guards,
             prefix_bindings: lowered.prefix_bindings,
             bound_names: [name, ..lowered.bound_names],
+            is_synthetic_root: lowered.is_synthetic_root,
             next_id: lowered.next_id,
           )
       }
@@ -228,6 +227,7 @@ pub fn lower_pattern(
         guards: [prefix_check],
         prefix_bindings: list.append(pfx_bindings, rest_bindings),
         bound_names: list.append(pfx_names, rest_names),
+        is_synthetic_root: True,
         next_id: cur_id,
       )
     }
@@ -257,11 +257,20 @@ fn lower_pattern_variant(
   current_module: String,
   next_id: Int,
 ) -> LoweredPattern {
-  case module, constructor, arguments {
-    None, "True", [] -> LoweredPattern(IrPatBool(True), [], [], [], next_id)
-    None, "False", [] -> LoweredPattern(IrPatBool(False), [], [], [], next_id)
-    None, "Nil", [] -> LoweredPattern(IrPatUnit, [], [], [], next_id)
-    _, _, _ -> {
+  let shadowed_builtin =
+    module == None
+    && {
+      constructor == "True" || constructor == "False" || constructor == "Nil"
+    }
+    && arguments == []
+    && symbol_table.lookup_constructor(table, current_module, None, constructor)
+    == None
+  case shadowed_builtin, constructor {
+    True, "True" -> LoweredPattern(IrPatBool(True), [], [], [], False, next_id)
+    True, "False" ->
+      LoweredPattern(IrPatBool(False), [], [], [], False, next_id)
+    True, "Nil" -> LoweredPattern(IrPatUnit, [], [], [], False, next_id)
+    _, _ -> {
       let #(rev_args, guards, bindings, names, cur_id) =
         list.fold(arguments, #([], [], [], [], next_id), fn(acc, field) {
           let #(args_acc, g_acc, b_acc, n_acc, id_acc) = acc
@@ -316,6 +325,7 @@ fn lower_pattern_variant(
         guards:,
         prefix_bindings: bindings,
         bound_names: names,
+        is_synthetic_root: False,
         next_id: cur_id,
       )
     }
@@ -328,33 +338,33 @@ fn resolve_variant_constructor(
   table: SymbolTable,
   current_module: String,
 ) -> #(Option(String), Option(String), String) {
-  case qualifier, constructor {
-    None, "Ok" -> #(None, None, "Ok")
-    None, "Error" -> #(None, None, "Err")
-    _, _ ->
-      case
-        symbol_table.lookup_constructor(
-          table,
-          current_module,
-          qualifier,
-          constructor,
-        )
-      {
-        Some(ctor) ->
-          case ctor.module == current_module {
-            True -> #(None, None, ctor.variant_name)
-            False -> {
-              let alias =
-                resolve_alias_for_module(
-                  table,
-                  current_module,
-                  ctor.module,
-                  qualifier,
-                )
-              #(alias, Some(ctor.module), ctor.variant_name)
-            }
-          }
-        None -> #(qualifier, None, constructor)
+  case
+    symbol_table.lookup_constructor(
+      table,
+      current_module,
+      qualifier,
+      constructor,
+    )
+  {
+    Some(ctor) ->
+      case ctor.module == current_module {
+        True -> #(None, None, ctor.variant_name)
+        False -> {
+          let alias =
+            resolve_alias_for_module(
+              table,
+              current_module,
+              ctor.module,
+              qualifier,
+            )
+          #(alias, Some(ctor.module), ctor.variant_name)
+        }
+      }
+    None ->
+      case qualifier, constructor {
+        None, "Ok" -> #(None, None, "Ok")
+        None, "Error" -> #(None, None, "Err")
+        _, _ -> #(qualifier, None, constructor)
       }
   }
 }
@@ -424,6 +434,7 @@ fn lower_bit_string_pattern(
         guards: [],
         prefix_bindings: [],
         bound_names: [],
+        is_synthetic_root: False,
         next_id:,
       )
     [#(glance.PatternDiscard(..), opts)] ->
@@ -434,6 +445,7 @@ fn lower_bit_string_pattern(
             guards: [],
             prefix_bindings: [],
             bound_names: [],
+            is_synthetic_root: False,
             next_id:,
           )
         False -> lower_non_empty_bit_string(segments, next_id)
@@ -446,6 +458,7 @@ fn lower_bit_string_pattern(
             guards: [],
             prefix_bindings: [],
             bound_names: [name],
+            is_synthetic_root: False,
             next_id:,
           )
         False -> lower_non_empty_bit_string(segments, next_id)
@@ -495,6 +508,7 @@ fn lower_non_empty_bit_string(
     guards:,
     prefix_bindings: bindings,
     bound_names: names,
+    is_synthetic_root: True,
     next_id: final_id,
   )
 }

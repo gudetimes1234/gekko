@@ -1,5 +1,6 @@
 import gleam/dict
 import gleam/list
+import gleam/set.{type Set}
 import gleam/string
 
 /// Map a Gleam module path (`"my_app/auth/token"`) into a MoonBit package
@@ -58,7 +59,18 @@ pub fn emit_moon_pkg(
   imports: List(#(String, String)),
   is_main: Bool,
 ) -> String {
-  let deduped = deduplicate_imports(project_name, imports)
+  emit_moon_pkg_with_local_pkgs(project_name, imports, is_main, set.new())
+}
+
+/// Generate a declarative `moon.pkg` file, prefixing `project_name <> "/"`
+/// for any multi-segment local package present in `local_pkgs`.
+pub fn emit_moon_pkg_with_local_pkgs(
+  project_name: String,
+  imports: List(#(String, String)),
+  is_main: Bool,
+  local_pkgs: Set(String),
+) -> String {
+  let deduped = deduplicate_imports(project_name, imports, local_pkgs)
 
   let import_block = case deduped {
     [] -> ""
@@ -90,13 +102,16 @@ pub fn emit_moon_pkg(
 fn deduplicate_imports(
   project_name: String,
   imports: List(#(String, String)),
+  local_pkgs: Set(String),
 ) -> List(#(String, String)) {
   imports
   |> list.fold(dict.new(), fn(acc, entry) {
     let #(pkg_or_dir, alias) = entry
-    let full_pkg = case string.contains(pkg_or_dir, "/") {
-      True -> pkg_or_dir
-      False -> project_name <> "/" <> pkg_or_dir
+    let full_pkg = case
+      set.contains(local_pkgs, pkg_or_dir) || !string.contains(pkg_or_dir, "/")
+    {
+      True -> project_name <> "/" <> pkg_or_dir
+      False -> pkg_or_dir
     }
     dict.insert(acc, alias, full_pkg)
   })

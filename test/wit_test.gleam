@@ -361,3 +361,68 @@ pub fn wit_wasmtime_runtime_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
+
+pub fn wit_g2w_record_and_flags_roundtrip_test() {
+  let root = "build/test_fixtures/wit_g2w_roundtrip"
+  let wit_dir = filepath.join(root, "wit")
+  let out_dir = filepath.join(root, "build/moonbit")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(wit_dir) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"wit_g2w\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(wit_dir, "world.wit"),
+      contents: "package demo:g2w@0.1.0;\n\n"
+        <> "interface types {\n"
+        <> "  flags perms { read, write }\n"
+        <> "  record meta { active: bool, perms: perms }\n"
+        <> "}\n\n"
+        <> "interface api {\n"
+        <> "  use types.{meta, perms};\n"
+        <> "  roundtrip: func(m: meta) -> meta;\n"
+        <> "}\n\n"
+        <> "world app {\n"
+        <> "  import api;\n"
+        <> "  export api;\n"
+        <> "}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(resolved) = wit_parser.load_wit_dir(wit_dir, None)
+  let assert Ok(_) = gleam_gen.generate_project_bindings(resolved, root)
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/api.gleam"),
+      contents: "import wit/types_types.{type Meta}\n\n"
+        <> "pub fn roundtrip(m: Meta) -> Meta {\n"
+        <> "  m\n"
+        <> "}\n",
+    )
+    == Ok(Nil)
+
+  let check_gleam = cmd.run(command: "gleam", args: ["check"], cwd: root)
+  assert check_gleam.exit_code == 0
+
+  let assert Ok(summary) =
+    wit_bridge.bridge_wit_workspace(root, out_dir, wit_dir, None)
+  let assert Ok(_) = wit_bridge.check_wit_workspace(summary)
+
+  let assert Ok(imp_adapter) =
+    simplifile.read(from: filepath.join(
+      out_dir,
+      "wit_imp_demo_g2w_api/wit_imp_demo_g2w_api.mbt",
+    ))
+  assert string.contains(imp_adapter, "g.active()")
+  assert string.contains(imp_adapter, "g.perms()")
+  assert string.contains(imp_adapter, "g.read()")
+  assert string.contains(imp_adapter, "g.write()")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}

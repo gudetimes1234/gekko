@@ -70,10 +70,44 @@ fn rewrite_stmts_tail(
             rewrite_expr_tail(expr, fn_name, params, shadowed)
           #([IrStmtExpr(rewritten_expr)], found)
         }
-        IrStmtLet(_, _, _) | IrStmtGuard(_, _, _, _, _) | IrStmtAssert(_, _) -> #(
-          [last],
+        IrStmtLet(IrPatVar(v), _, _) -> #(
+          [last, IrStmtExpr(IrBreak(IrVar(v)))],
           False,
         )
+        IrStmtLet(IrPatDiscard, None, val)
+        | IrStmtLet(ir.IrPatUnit, None, val) -> #(
+          [IrStmtExpr(IrBreak(val))],
+          False,
+        )
+        IrStmtLet(pat, ann, val) -> #(
+          [
+            IrStmtLet(IrPatVar("__gekko_tco_let"), ann, val),
+            IrStmtLet(pat, None, IrVar("__gekko_tco_let")),
+            IrStmtExpr(IrBreak(IrVar("__gekko_tco_let"))),
+          ],
+          False,
+        )
+        IrStmtGuard(
+          value:,
+          pattern:,
+          guard_condition:,
+          abort_message:,
+          post_bindings:,
+        ) -> #(
+          [
+            IrStmtLet(IrPatVar("__gekko_tco_guard"), None, value),
+            IrStmtGuard(
+              IrVar("__gekko_tco_guard"),
+              pattern,
+              guard_condition,
+              abort_message,
+              post_bindings,
+            ),
+            IrStmtExpr(IrBreak(IrVar("__gekko_tco_guard"))),
+          ],
+          False,
+        )
+        IrStmtAssert(_, _) -> #([last, IrStmtExpr(IrBreak(ir.IrUnit))], False)
       }
     [head, ..tail] -> {
       let next_shadowed = shadowed || stmt_shadows_name(head, fn_name)

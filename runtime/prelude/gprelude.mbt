@@ -947,10 +947,9 @@ pub impl Hash for Dynamic with hash_combine(self, hasher) {
     DynMap(m) => {
       hasher.combine_int(8)
       hasher.combine_int(m.length())
-      m.each(fn(k, v) {
-        hasher.combine(k)
-        hasher.combine(v)
-      })
+      let mut sum = 0
+      m.each(fn(k, v) { sum = sum + (Hash::hash(k) * 31 + Hash::hash(v)) })
+      hasher.combine_int(sum)
     }
   }
 }
@@ -1200,7 +1199,7 @@ pub impl[T : GleamInspect] GleamInspect for GList[T] with gleam_inspect(self) {
       }
       list_buf.write_char(']')
       if all_char {
-        "charlist.from_string(\"" + char_buf.to_string() + "\")"
+        "charlist.from_string(" + escape_gleam_string(char_buf.to_string()) + ")"
       } else {
         list_buf.to_string()
       }

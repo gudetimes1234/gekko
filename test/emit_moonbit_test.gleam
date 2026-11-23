@@ -7,6 +7,7 @@ import glance
 import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/set
 import gleam/string
 import index/symbol_table
 import lower/desugar
@@ -697,4 +698,55 @@ pub fn int_div_rem_int64_min_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
+}
+
+pub fn private_chained_type_aliases_and_string_escapes_test() {
+  let src =
+    "type Base = Int\n"
+    <> "type Alias = Base\n"
+    <> "pub fn use_alias(x: Alias) -> String {\n"
+    <> "  let local_val: Alias = x\n"
+    <> "  let f = fn(y: Alias) { y }\n"
+    <> "  let _ = f(local_val)\n"
+    <> "  \"\\\\{escaped}\"\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("app", src)
+  let table =
+    symbol_table.index_project(
+      "app",
+      [#("app", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "app")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+  assert string.contains(mbt, "priv type Base = Int64")
+  assert string.contains(mbt, "priv type Alias = Base")
+  assert string.contains(mbt, "\"\\\\{escaped}\"")
+  assert !string.contains(mbt, "\"\\\\\\{escaped}\"")
+}
+
+pub fn pkg_config_nested_local_pkgs_test() {
+  let mpkg =
+    pkg_config.emit_moon_pkg_with_local_pkgs(
+      "my_app",
+      [#("nested/ffi", "nested_ffi"), #("moonbitlang/core/math", "math")],
+      False,
+      set.from_list(["nested/ffi"]),
+    )
+  assert string.contains(mpkg, "\"my_app/nested/ffi\" @nested_ffi,")
+  assert string.contains(mpkg, "\"moonbitlang/core/math\" @math,")
+}
+
+pub fn gprelude_dynmap_hash_and_charlist_inspect_test() {
+  let mbt = prelude_runtime.gprelude_mbt()
+  assert string.contains(
+    mbt,
+    "sum = sum + (Hash::hash(k) * 31 + Hash::hash(v))",
+  )
+  assert string.contains(
+    mbt,
+    "\"charlist.from_string(\" + escape_gleam_string(char_buf.to_string()) + \")\"",
+  )
 }

@@ -1132,7 +1132,7 @@ fn lower_record_update(
       let #(map_acc, cur_ctx) = acc
       let #(val_expr, next_ctx) = case ruf.item {
         Some(e) -> lower_expr(e, cur_ctx)
-        None -> #(IrVar(mangle.mangle_ident(ruf.label)), cur_ctx)
+        None -> #(resolve_variable(ruf.label, cur_ctx), cur_ctx)
       }
       #(dict.insert(map_acc, ruf.label, val_expr), next_ctx)
     })
@@ -1252,7 +1252,7 @@ fn lower_record_update(
         list.map(fields, fn(ruf) {
           let val = case dict.get(updates_map, ruf.label) {
             Ok(v) -> v
-            Error(_) -> IrVar(mangle.mangle_ident(ruf.label))
+            Error(_) -> resolve_variable(ruf.label, ctx2)
           }
           IrCallArg(Some(mangle.mangle_ident(ruf.label)), val)
         })
@@ -1633,7 +1633,8 @@ fn lower_call_args(
         }
         glance.ShorthandField(label:, ..) -> {
           let mangled = mangle.mangle_ident(label)
-          #([IrCallArg(Some(mangled), IrVar(mangled)), ..args_acc], cur_ctx)
+          let val = resolve_variable(label, cur_ctx)
+          #([IrCallArg(Some(mangled), val), ..args_acc], cur_ctx)
         }
       }
     })
@@ -1715,42 +1716,42 @@ fn resolve_variable(name: String, ctx: LowerCtx) -> IrExpr {
   case set.contains(ctx.local_vars, name) {
     True -> IrVar(mangle.mangle_ident(name))
     False ->
-      case name {
-        "True" -> IrBool(True)
-        "False" -> IrBool(False)
-        "Nil" -> IrUnit
-        "Ok" -> IrConstructor(None, None, "Ok")
-        "Error" -> IrConstructor(None, None, "Err")
-        _ ->
-          case dict.get(ctx.mod_syms.constructors, name) {
-            Ok(ctor) -> IrConstructor(None, None, ctor.variant_name)
+      case dict.get(ctx.mod_syms.constructors, name) {
+        Ok(ctor) -> IrConstructor(None, None, ctor.variant_name)
+        Error(_) ->
+          case dict.get(ctx.mod_syms.unqualified_values, name) {
+            Ok(#(target_mod, orig_name)) -> {
+              let alias = find_import_alias(ctx.mod_syms, target_mod)
+              case
+                symbol_table.lookup_constructor(
+                  ctx.table,
+                  ctx.current_module,
+                  None,
+                  name,
+                )
+              {
+                Some(ctor) ->
+                  IrConstructor(
+                    module_alias: Some(alias),
+                    target_module: Some(ctor.module),
+                    name: ctor.variant_name,
+                  )
+                None ->
+                  IrModuleRef(
+                    module_alias: Some(alias),
+                    target_module: target_mod,
+                    symbol: mangle.mangle_ident(orig_name),
+                  )
+              }
+            }
             Error(_) ->
-              case dict.get(ctx.mod_syms.unqualified_values, name) {
-                Ok(#(target_mod, orig_name)) -> {
-                  let alias = find_import_alias(ctx.mod_syms, target_mod)
-                  case
-                    symbol_table.lookup_constructor(
-                      ctx.table,
-                      ctx.current_module,
-                      None,
-                      name,
-                    )
-                  {
-                    Some(ctor) ->
-                      IrConstructor(
-                        module_alias: Some(alias),
-                        target_module: Some(ctor.module),
-                        name: ctor.variant_name,
-                      )
-                    None ->
-                      IrModuleRef(
-                        module_alias: Some(alias),
-                        target_module: target_mod,
-                        symbol: mangle.mangle_ident(orig_name),
-                      )
-                  }
-                }
-                Error(_) -> IrVar(mangle.mangle_ident(name))
+              case name {
+                "True" -> IrBool(True)
+                "False" -> IrBool(False)
+                "Nil" -> IrUnit
+                "Ok" -> IrConstructor(None, None, "Ok")
+                "Error" -> IrConstructor(None, None, "Err")
+                _ -> IrVar(mangle.mangle_ident(name))
               }
           }
       }

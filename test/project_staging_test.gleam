@@ -904,3 +904,34 @@ pub fn staging_dev_deps_and_test_remapping_test() {
       parameters: [],
     )
 }
+
+pub fn staging_rejects_duplicate_src_and_test_module_test() {
+  let root = "build/test_fixtures/staging_dup_mod"
+  let staging_dir = filepath.join(root, "build/.gekko_staging")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"dup_app\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/dup.gleam"),
+      contents: "pub fn a() -> Int { 1 }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/dup.gleam"),
+      contents: "pub fn a_test() -> Nil { Nil }\n",
+    )
+    == Ok(Nil)
+
+  let assert Error(msg) =
+    staging.extract_project_interface_with_options(root, staging_dir, True)
+  assert string.contains(msg, "Duplicate module 'dup'")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
