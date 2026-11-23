@@ -92,6 +92,7 @@ gekko/
 │   ├── lower/
 │   │   ├── bit_pattern.gleam      # Lowers BitArray segments into guards & decoded bindings
 │   │   ├── desugar.gleam          # Lowers `use`, `let assert`, `FnCapture`, `|>`, labeled args
+│   │   ├── desugar_types.gleam    # Lowers types, getters, arity, and scope/alias resolution
 │   │   ├── ir.gleam               # Lowered IR types and expressions
 │   │   ├── ir_util.gleam          # Shared free-var, pattern-var, and purity helpers
 │   │   ├── mangle.gleam           # Injective keyword escaping & type variable normalization
@@ -99,13 +100,16 @@ gekko/
 │   │   ├── tco.gleam              # Self-tail-recursion -> MoonBit functional `for` loops
 │   │   └── validate.gleam         # Validates Int64 literal ranges
 │   ├── emit/
-│   │   ├── moonbit.gleam          # Renders lowered IR to `.mbt` with `///|` separators
+│   │   ├── moonbit.gleam          # Renders lowered IR functions/statements/exprs to `.mbt`
+│   │   ├── moonbit_decl.gleam     # Emits MoonBit types, traits, patterns, imports & helpers
 │   │   ├── pkg_config.gleam       # Generates `moon.mod` and parses/emits `moon.pkg` DSL files
 │   │   ├── prelude_runtime.gleam  # Embedded `gprelude` runtime (synced via scripts/sync_prelude.sh)
 │   │   ├── trait_bounds.gleam     # Whole-project `Eq`/`Hash`/`GleamInspect`/`ToDynamic` inference
+│   │   ├── trait_infer.gleam      # Local IR type inference, unification, and alias expansion
 │   │   └── wit_bridge.gleam       # Orchestrates `wit-bindgen moonbit` & boundary glue in `stub.mbt`
 │   ├── moonbit/
-│   │   ├── bindgen.gleam          # Generates Gleam FFI wrappers for MoonBit packages
+│   │   ├── bindgen.gleam          # Generates Gleam FFI stubs from parsed `.mbti` packages
+│   │   ├── bindgen_adapter.gleam  # Generates MoonBit adapter packages & type conversions
 │   │   ├── ffi_meta.gleam         # Scans `.mbt` files for trait & generic signature metadata
 │   │   ├── mbti.gleam             # Parses `pkg.generated.mbti` interface files
 │   │   └── syntax.gleam           # Shared MoonBit delimiter & signature scanning helpers
