@@ -1,5 +1,5 @@
 -module(gekko_ffi).
--export([run_command/3, get_env/1, find_executable/1]).
+-export([run_command/3, get_env/1, find_executable/1, extract_zip_entry/2]).
 
 run_command(Command, Args, Cwd) ->
     CmdStr = unicode:characters_to_list(Command, utf8),
@@ -55,4 +55,19 @@ find_executable(Command) ->
     case resolve_executable(CmdStr) of
         false -> {error, nil};
         Exe -> {ok, unicode:characters_to_binary(Exe)}
+    end.
+
+extract_zip_entry(ZipPath, EntryPath) ->
+    ZipStr = unicode:characters_to_list(ZipPath, utf8),
+    EntryStr = unicode:characters_to_list(EntryPath, utf8),
+    try zip:unzip(ZipStr, [memory, {file_list, [EntryStr]}]) of
+        {ok, [{_, Bin}]} when is_binary(Bin) ->
+            {ok, Bin};
+        {ok, [{_, List}]} when is_list(List) ->
+            {ok, list_to_binary(List)};
+        _ ->
+            {error, nil}
+    catch
+        _:_ ->
+            {error, nil}
     end.

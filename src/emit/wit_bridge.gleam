@@ -1567,47 +1567,7 @@ fn read_moon_pkg(
       "Failed to read '" <> path <> "': " <> simplifile.describe_error(err)
     }),
   )
-  let lines = string.split(content, "\n")
-  let #(_, rev_imports) =
-    list.fold(lines, #(False, []), fn(acc, line) {
-      let #(in_imp, imp_acc) = acc
-      let trimmed = string.trim(line)
-      case in_imp, trimmed {
-        False, "import {" -> #(True, imp_acc)
-        True, "}" -> #(False, imp_acc)
-        True, _ ->
-          case parse_import_line(trimmed) {
-            Some(pair) -> #(True, [pair, ..imp_acc])
-            None -> #(True, imp_acc)
-          }
-        _, _ -> #(in_imp, imp_acc)
-      }
-    })
-  let warnings_line =
-    list.find(lines, fn(l) { string.starts_with(string.trim(l), "warnings =") })
-    |> option.from_result
-    |> option.map(string.trim)
-  Ok(#(list.reverse(rev_imports), warnings_line))
-}
-
-fn parse_import_line(trimmed: String) -> Option(#(String, String)) {
-  let cleaned = case string.ends_with(trimmed, ",") {
-    True -> string.drop_end(trimmed, 1) |> string.trim
-    False -> trimmed
-  }
-  case string.split_once(cleaned, on: "\" @") {
-    Ok(#(left, alias)) -> {
-      let pkg = case string.starts_with(left, "\"") {
-        True -> string.drop_start(left, 1)
-        False -> left
-      }
-      case pkg != "" && alias != "" {
-        True -> Some(#(pkg, alias))
-        False -> None
-      }
-    }
-    Error(_) -> None
-  }
+  Ok(pkg_config.parse_moon_pkg(content))
 }
 
 fn extract_raw_prefixes_from_imports(
@@ -1637,21 +1597,7 @@ fn render_moon_pkg(
   pkg_imports: Dict(String, String),
   warnings_line: Option(String),
 ) -> String {
-  let entries =
-    pkg_imports
-    |> dict.to_list
-    |> list.sort(fn(a, b) { string.compare(a.1, b.1) })
-    |> list.map(fn(entry) { "  \"" <> entry.0 <> "\" @" <> entry.1 <> "," })
-    |> string.join("\n")
-  let imp_block = case entries {
-    "" -> ""
-    _ -> "import {\n" <> entries <> "\n}\n"
-  }
-  let warn_block = case warnings_line {
-    Some(w) -> "\n" <> w <> "\n"
-    None -> ""
-  }
-  imp_block <> warn_block
+  pkg_config.render_moon_pkg(pkg_imports, warnings_line)
 }
 
 fn write_file(path: String, contents: String) -> Result(Nil, String) {

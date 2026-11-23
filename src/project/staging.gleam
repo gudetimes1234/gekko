@@ -77,12 +77,13 @@ fn extract_dev_deps_and_keys(
   case lines {
     [] -> #(deps_keys, list.reverse(rev_dev_lines), list.reverse(rev_out))
     [line, ..rest] -> {
+      let header = strip_toml_line_comment(line)
       let trimmed = string.trim(line)
       case
-        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+        string.starts_with(header, "[") && !string.starts_with(header, "[[")
       {
         True ->
-          case trimmed {
+          case header {
             "[dependencies]" ->
               extract_dev_deps_and_keys(rest, 1, deps_keys, rev_dev_lines, [
                 line,
@@ -182,9 +183,9 @@ fn insert_deps_loop(
         False -> #(inserted, rev_acc)
       }
     [line, ..rest] -> {
-      let trimmed = string.trim(line)
+      let header = strip_toml_line_comment(line)
       case
-        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+        string.starts_with(header, "[") && !string.starts_with(header, "[[")
       {
         True ->
           case in_deps && !inserted {
@@ -192,7 +193,7 @@ fn insert_deps_loop(
               let with_dev = list.append(list.reverse(dev_lines), rev_acc)
               insert_deps_loop(
                 rest,
-                trimmed == "[dependencies]",
+                header == "[dependencies]",
                 True,
                 dev_lines,
                 [line, ..with_dev],
@@ -201,7 +202,7 @@ fn insert_deps_loop(
             False ->
               insert_deps_loop(
                 rest,
-                trimmed == "[dependencies]",
+                header == "[dependencies]",
                 inserted,
                 dev_lines,
                 [line, ..rev_acc],
@@ -581,12 +582,12 @@ fn strip_section_loop(
   case lines {
     [] -> list.reverse(rev_acc)
     [line, ..rest] -> {
-      let trimmed = string.trim(line)
+      let header = strip_toml_line_comment(line)
       case
-        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+        string.starts_with(header, "[") && !string.starts_with(header, "[[")
       {
         True -> {
-          let is_dev_deps = trimmed == "[dev-dependencies]"
+          let is_dev_deps = header == "[dev-dependencies]"
           let next_acc = case is_dev_deps {
             True -> rev_acc
             False -> [line, ..rev_acc]
@@ -621,12 +622,13 @@ fn rewrite_deps_loop(
   case lines {
     [] -> list.reverse(rev_acc)
     [line, ..rest] -> {
+      let header = strip_toml_line_comment(line)
       let trimmed = string.trim(line)
       case
-        string.starts_with(trimmed, "[") && !string.starts_with(trimmed, "[[")
+        string.starts_with(header, "[") && !string.starts_with(header, "[[")
       {
         True ->
-          rewrite_deps_loop(rest, trimmed == "[dependencies]", dep_paths, [
+          rewrite_deps_loop(rest, header == "[dependencies]", dep_paths, [
             line,
             ..rev_acc
           ])
@@ -664,8 +666,12 @@ fn rewrite_deps_loop(
 }
 
 fn escape_toml_str(s: String) -> String {
-  string.replace(s, "\\", "\\\\")
+  s
+  |> string.replace("\\", "\\\\")
   |> string.replace("\"", "\\\"")
+  |> string.replace("\n", "\\n")
+  |> string.replace("\r", "\\r")
+  |> string.replace("\t", "\\t")
 }
 
 /// Resolve any relative `path = "..."` TOML values against `abs_base_dir`,
@@ -777,8 +783,15 @@ fn take_double_quoted(
       list.reverse(rev_full) |> string.concat,
       [],
     )
-    ["\\", esc, ..rest] ->
-      take_double_quoted(rest, [esc, ..rev_inner], [esc, "\\", ..rev_full])
+    ["\\", esc, ..rest] -> {
+      let decoded = case esc {
+        "n" -> "\n"
+        "t" -> "\t"
+        "r" -> "\r"
+        _ -> esc
+      }
+      take_double_quoted(rest, [decoded, ..rev_inner], [esc, "\\", ..rev_full])
+    }
     ["\"", ..rest] -> #(
       list.reverse(rev_inner) |> string.concat,
       list.reverse(["\"", ..rev_full]) |> string.concat,
@@ -1496,13 +1509,65 @@ fn is_internal_modules_assignment(trimmed: String) -> Bool {
 }
 
 fn count_brackets(line: String) -> Int {
-  line
-  |> string.to_graphemes
-  |> list.fold(0, fn(acc, ch) {
-    case ch {
-      "[" -> acc + 1
-      "]" -> acc - 1
-      _ -> acc
-    }
-  })
+  count_brackets_loop(string.to_graphemes(line), False, False, 0)
+}
+
+fn count_brackets_loop(
+  chars: List(String),
+  in_double: Bool,
+  in_single: Bool,
+  acc: Int,
+) -> Int {
+  case chars, in_double, in_single {
+    [], _, _ -> acc
+    ["\\", _, ..rest], True, False ->
+      count_brackets_loop(rest, True, False, acc)
+    ["\"", ..rest], True, False -> count_brackets_loop(rest, False, False, acc)
+    [_, ..rest], True, False -> count_brackets_loop(rest, True, False, acc)
+    ["'", ..rest], False, True -> count_brackets_loop(rest, False, False, acc)
+    [_, ..rest], False, True -> count_brackets_loop(rest, False, True, acc)
+    ["#", ..], False, False -> acc
+    ["\"", ..rest], False, False -> count_brackets_loop(rest, True, False, acc)
+    ["'", ..rest], False, False -> count_brackets_loop(rest, False, True, acc)
+    ["[", ..rest], False, False ->
+      count_brackets_loop(rest, False, False, acc + 1)
+    ["]", ..rest], False, False ->
+      count_brackets_loop(rest, False, False, acc - 1)
+    [_, ..rest], False, False -> count_brackets_loop(rest, False, False, acc)
+    _, _, _ -> acc
+  }
+}
+
+fn strip_toml_line_comment(line: String) -> String {
+  strip_toml_comment_loop(string.to_graphemes(line), False, False, [])
+  |> string.trim
+}
+
+fn strip_toml_comment_loop(
+  chars: List(String),
+  in_double: Bool,
+  in_single: Bool,
+  rev_acc: List(String),
+) -> String {
+  case chars, in_double, in_single {
+    [], _, _ -> list.reverse(rev_acc) |> string.concat
+    ["\\", esc, ..rest], True, False ->
+      strip_toml_comment_loop(rest, True, False, [esc, "\\", ..rev_acc])
+    ["\"", ..rest], True, False ->
+      strip_toml_comment_loop(rest, False, False, ["\"", ..rev_acc])
+    [ch, ..rest], True, False ->
+      strip_toml_comment_loop(rest, True, False, [ch, ..rev_acc])
+    ["'", ..rest], False, True ->
+      strip_toml_comment_loop(rest, False, False, ["'", ..rev_acc])
+    [ch, ..rest], False, True ->
+      strip_toml_comment_loop(rest, False, True, [ch, ..rev_acc])
+    ["#", ..], False, False -> list.reverse(rev_acc) |> string.concat
+    ["\"", ..rest], False, False ->
+      strip_toml_comment_loop(rest, True, False, ["\"", ..rev_acc])
+    ["'", ..rest], False, False ->
+      strip_toml_comment_loop(rest, False, True, ["'", ..rev_acc])
+    [ch, ..rest], False, False ->
+      strip_toml_comment_loop(rest, False, False, [ch, ..rev_acc])
+    _, _, _ -> list.reverse(rev_acc) |> string.concat
+  }
 }

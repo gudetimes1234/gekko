@@ -1,5 +1,6 @@
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 import gleam/string
 
@@ -118,4 +119,75 @@ fn deduplicate_imports(
   |> dict.to_list
   |> list.map(fn(pair) { #(pair.1, pair.0) })
   |> list.sort(fn(a, b) { string.compare(a.1, b.1) })
+}
+
+/// Parse a `moon.pkg` file into its `import { "pkg" @alias, ... }` pairs and
+/// optional `warnings = ...` directive line.
+pub fn parse_moon_pkg(
+  content: String,
+) -> #(List(#(String, String)), Option(String)) {
+  let lines = string.split(content, "\n")
+  let #(_, rev_imports) =
+    list.fold(lines, #(False, []), fn(acc, line) {
+      let #(in_imp, imp_acc) = acc
+      let trimmed = string.trim(line)
+      case in_imp, trimmed {
+        False, "import {" -> #(True, imp_acc)
+        True, "}" -> #(False, imp_acc)
+        True, _ ->
+          case parse_import_line(trimmed) {
+            Some(pair) -> #(True, [pair, ..imp_acc])
+            None -> #(True, imp_acc)
+          }
+        _, _ -> #(in_imp, imp_acc)
+      }
+    })
+  let warnings_line =
+    list.find(lines, fn(l) { string.starts_with(string.trim(l), "warnings =") })
+    |> option.from_result
+    |> option.map(string.trim)
+  #(list.reverse(rev_imports), warnings_line)
+}
+
+fn parse_import_line(trimmed: String) -> Option(#(String, String)) {
+  let cleaned = case string.ends_with(trimmed, ",") {
+    True -> string.drop_end(trimmed, 1) |> string.trim
+    False -> trimmed
+  }
+  case string.split_once(cleaned, on: "\" @") {
+    Ok(#(left, alias)) -> {
+      let pkg = case string.starts_with(left, "\"") {
+        True -> string.drop_start(left, 1)
+        False -> left
+      }
+      case pkg != "" && alias != "" {
+        True -> Some(#(pkg, alias))
+        False -> None
+      }
+    }
+    Error(_) -> None
+  }
+}
+
+/// Render a `moon.pkg` file from a `pkg_path -> alias` dictionary and an
+/// optional `warnings = ...` line.
+pub fn render_moon_pkg(
+  pkg_imports: Dict(String, String),
+  warnings_line: Option(String),
+) -> String {
+  let entries =
+    pkg_imports
+    |> dict.to_list
+    |> list.sort(fn(a, b) { string.compare(a.1, b.1) })
+    |> list.map(fn(entry) { "  \"" <> entry.0 <> "\" @" <> entry.1 <> "," })
+    |> string.join("\n")
+  let imp_block = case entries {
+    "" -> ""
+    _ -> "import {\n" <> entries <> "\n}\n"
+  }
+  let warn_block = case warnings_line {
+    Some(w) -> "\n" <> w <> "\n"
+    None -> ""
+  }
+  imp_block <> warn_block
 }

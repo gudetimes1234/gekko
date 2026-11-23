@@ -1,5 +1,4 @@
 import glance
-import gleam/bit_array
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -812,14 +811,5 @@ fn skip_type(
 }
 
 fn line_at_offset(source: String, offset: Int) -> Int {
-  let bytes = bit_array.from_string(source)
-  let prefix = case bit_array.slice(bytes, 0, offset) {
-    Ok(slice) ->
-      bit_array.to_string(slice)
-      |> result.unwrap("")
-    Error(_) -> ""
-  }
-  prefix
-  |> string.split("\n")
-  |> list.length
+  text_edit.byte_offset_to_line(source, offset)
 }

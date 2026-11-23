@@ -935,3 +935,42 @@ pub fn staging_rejects_duplicate_src_and_test_module_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   Nil
 }
+
+pub fn toml_internal_modules_brackets_in_strings_and_comments_test() {
+  let toml =
+    "name = \"app\"\n"
+    <> "internal_modules = [\n"
+    <> "  \"app/a[0]\", # ] comment bracket\n"
+    <> "  \"app/b]\",\n"
+    <> "] # trailing ]\n"
+    <> "description = \"kept\"\n"
+    <> "\n"
+    <> "[dependencies] # deps\n"
+    <> "gleam_stdlib = \">= 0.40.0\"\n"
+    <> "\n"
+    <> "[dev-dependencies] # dev deps\n"
+    <> "gleeunit = \">= 1.0.0\"\n"
+
+  let overridden = staging.override_gleam_toml_internal_modules(toml)
+  assert string.contains(overridden, "internal_modules = []")
+  assert !string.contains(overridden, "app/a[0]")
+  assert !string.contains(overridden, "app/b]")
+  assert string.contains(overridden, "description = \"kept\"")
+
+  let merged = staging.merge_dev_dependencies_into_dependencies(overridden)
+  assert string.contains(merged, "gleeunit = \">= 1.0.0\"")
+  assert !string.contains(merged, "[dev-dependencies]")
+}
+
+pub fn pkg_config_parse_render_roundtrip_and_zip_missing_test() {
+  let rendered =
+    pkg_config.render_moon_pkg(
+      dict.from_list([#("app/sub", "sub"), #("gprelude", "gprelude")]),
+      Some("warnings = \"-unused_value\""),
+    )
+  let #(imports, warnings) = pkg_config.parse_moon_pkg(rendered)
+  assert imports == [#("gprelude", "gprelude"), #("app/sub", "sub")]
+  assert warnings == Some("warnings = \"-unused_value\"")
+  assert cmd.extract_zip_entry("nonexistent_archive.zip", "pkg.generated.mbti")
+    == Error(Nil)
+}

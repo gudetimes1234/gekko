@@ -19,6 +19,20 @@ fn ffi_get_env(name: String) -> Result(String, Nil)
 @external(erlang, "gekko_ffi", "find_executable")
 fn ffi_find_executable(command: String) -> Result(String, Nil)
 
+@external(erlang, "gekko_ffi", "extract_zip_entry")
+fn ffi_extract_zip_entry(
+  zip_path: String,
+  entry_path: String,
+) -> Result(String, Nil)
+
+/// Extract a single UTF-8 file entry from a `.zip` archive in memory using OTP `:zip`.
+pub fn extract_zip_entry(
+  zip_path: String,
+  entry_path: String,
+) -> Result(String, Nil) {
+  ffi_extract_zip_entry(zip_path, entry_path)
+}
+
 /// Read an OS environment variable as UTF-8, returning `Error(Nil)` if unset.
 pub fn get_env(name: String) -> Result(String, Nil) {
   ffi_get_env(name)

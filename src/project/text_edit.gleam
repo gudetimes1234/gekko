@@ -94,3 +94,42 @@ pub fn stripped_comment_preserving_lines(
   list.repeat(comment_line, line_count)
   |> string.join("\n")
 }
+
+/// Convert a UTF-8 byte offset into a 1-based `#(line, column)` pair.
+pub fn byte_offset_to_line_col(
+  source: String,
+  byte_offset: Int,
+) -> #(Int, Int) {
+  let src_bits = bit_array.from_string(source)
+  let limit = int.min(int.max(byte_offset, 0), bit_array.byte_size(src_bits))
+  case bit_array.slice(src_bits, at: 0, take: limit) {
+    Ok(prefix) ->
+      case bit_array.to_string(prefix) {
+        Ok(prefix_str) -> {
+          let lines = string.split(prefix_str, "\n")
+          let line = list.length(lines)
+          let col = case list.last(lines) {
+            Ok(last) -> string.length(last) + 1
+            Error(_) -> 1
+          }
+          #(line, col)
+        }
+        Error(_) -> #(count_newlines(prefix, 1), 1)
+      }
+    Error(_) -> #(1, 1)
+  }
+}
+
+/// Convert a UTF-8 byte offset into a 1-based line number.
+pub fn byte_offset_to_line(source: String, byte_offset: Int) -> Int {
+  let #(line, _) = byte_offset_to_line_col(source, byte_offset)
+  line
+}
+
+fn count_newlines(bits: BitArray, line: Int) -> Int {
+  case bits {
+    <<10, rest:bits>> -> count_newlines(rest, line + 1)
+    <<_, rest:bits>> -> count_newlines(rest, line)
+    _ -> line
+  }
+}

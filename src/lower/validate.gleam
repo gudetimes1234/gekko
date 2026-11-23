@@ -1,5 +1,4 @@
 import glance
-import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -8,6 +7,7 @@ import gleam/result
 import gleam/set
 import gleam/string
 import index/symbol_table.{type ModuleSymbols, type SymbolTable}
+import project/text_edit
 
 /// Minimum value representable in MoonBit `Int64` (`-2^63`).
 pub const int64_min = -9_223_372_036_854_775_808
@@ -447,7 +447,7 @@ fn format_range_error(
     True -> base_path
     False -> ctx.package_name <> ":" <> base_path
   }
-  let #(line, col) = offset_to_line_col(ctx.source, span.start)
+  let #(line, col) = text_edit.byte_offset_to_line_col(ctx.source, span.start)
   file_path
   <> ":"
   <> int.to_string(line)
@@ -456,33 +456,4 @@ fn format_range_error(
   <> ": Integer literal `"
   <> raw
   <> "` is out of signed 64-bit Int64 range (-9223372036854775808..9223372036854775807)"
-}
-
-fn offset_to_line_col(source: String, byte_offset: Int) -> #(Int, Int) {
-  let src_bits = bit_array.from_string(source)
-  let limit = int.min(int.max(byte_offset, 0), bit_array.byte_size(src_bits))
-  case bit_array.slice(src_bits, at: 0, take: limit) {
-    Ok(prefix) ->
-      case bit_array.to_string(prefix) {
-        Ok(prefix_str) -> {
-          let lines = string.split(prefix_str, "\n")
-          let line = list.length(lines)
-          let col = case list.last(lines) {
-            Ok(last) -> string.length(last) + 1
-            Error(_) -> 1
-          }
-          #(line, col)
-        }
-        Error(_) -> #(count_newlines(prefix, 1), 1)
-      }
-    Error(_) -> #(1, 1)
-  }
-}
-
-fn count_newlines(bits: BitArray, line: Int) -> Int {
-  case bits {
-    <<10, rest:bits>> -> count_newlines(rest, line + 1)
-    <<_, rest:bits>> -> count_newlines(rest, line)
-    _ -> line
-  }
 }

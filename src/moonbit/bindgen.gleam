@@ -394,11 +394,10 @@ fn read_mbti_from_registry_cache(
       string.drop_start(rel_pkg, string.length(dep_mod) + 1)
       <> "/pkg.generated.mbti"
   }
-  let unzip_res =
-    cmd.run(command: "unzip", args: ["-p", zip_path, inner_mbti], cwd: ".")
-  case unzip_res.exit_code == 0 && unzip_res.output != "" {
-    True -> Ok(#(unzip_res.output, "ffi/" <> last_segment_snake(rel_pkg)))
-    False ->
+  case cmd.extract_zip_entry(zip_path, inner_mbti) {
+    Ok(content) if content != "" ->
+      Ok(#(content, "ffi/" <> last_segment_snake(rel_pkg)))
+    _ ->
       Error(
         "failed to read '" <> inner_mbti <> "' from cached archive " <> zip_path,
       )

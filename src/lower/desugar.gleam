@@ -1,5 +1,4 @@
 import glance
-import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -33,6 +32,7 @@ import project/interface.{
   type ResolvedType, FnType, NamedType, TupleType, VariableType,
 }
 import project/prepass.{ExternalType}
+import project/text_edit
 
 type LowerCtx {
   LowerCtx(
@@ -923,21 +923,7 @@ fn echo_location(
     True -> module_name <> ".gleam"
     False -> "src/" <> module_name <> ".gleam"
   }
-  let src_bits = bit_array.from_string(source)
-  let limit = int.min(int.max(byte_offset, 0), bit_array.byte_size(src_bits))
-  let line = case bit_array.slice(src_bits, at: 0, take: limit) {
-    Ok(prefix) -> count_newlines(prefix, 1)
-    Error(_) -> 1
-  }
-  #(file_path, line)
-}
-
-fn count_newlines(bits: BitArray, line: Int) -> Int {
-  case bits {
-    <<10, rest:bits>> -> count_newlines(rest, line + 1)
-    <<_, rest:bits>> -> count_newlines(rest, line)
-    _ -> line
-  }
+  #(file_path, text_edit.byte_offset_to_line(source, byte_offset))
 }
 
 fn lower_pipe(
