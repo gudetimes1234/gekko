@@ -8,7 +8,7 @@ This document maps every public AST node and variant in `glance` (`build/package
 
 | `glance` Type / Variant | Meaning | `gekko` Handling / MoonBit Target |
 | --- | --- | --- |
-| `Module(imports, custom_types, type_aliases, constants, functions)` | Parsed `.gleam` module | Mapped to a dedicated MoonBit package directory (`src/<pkg>/...` or `src/deps/<pkg>/...`) with `moon.pkg` and `.mbt` files. |
+| `Module(imports, custom_types, type_aliases, constants, functions)` | Parsed `.gleam` module | Mapped to a dedicated MoonBit package directory (`<out_dir>/<pkg_dir>/`, collision-disambiguated) with `moon.pkg` and `.mbt` files. |
 | `Definition(attributes, definition)` | Annotated top-level item | Attributes inspected for `@external(erlang/javascript, ...)` and `@deprecated(...)`. Raw `@external(moonbit, ...)` is extracted by `prepass.gleam` before `glance`. |
 | `Attribute(name, arguments)` | Module/item attribute (`@external`, `@deprecated`, `@internal`) | `@external` resolved against `prepass`, `gekko.toml`, or built-in FFI registries; `@deprecated` maps to `#deprecated(...)`. |
 | `Publicity` (`Public` / `Private`) | Visibility modifier | `Public` $\rightarrow$ `pub`; `Private` $\rightarrow$ `priv` (or omitted). |
@@ -81,7 +81,7 @@ This document maps every public AST node and variant in `glance` (`build/package
 | `Call(location, function, arguments)` | `f(a, b: c)` | Emitted as `f(a, b=c)` (with pipeline/capture lowering and constructor normalization). |
 | `TupleIndex(location, tuple, index)` | `t.0` | Emitted directly as `t.0`. |
 | `FnCapture(location, label, function, arguments_before, arguments_after)` | `f(a, _, c)` | Desugared to `fn(__capture_1) { f(a, __capture_1, c) }`. |
-| `BitString(location, segments)` | `<<...>>` | Tier 1 (Phase 3/4): byte-aligned `@prelude.BitArray` constructor calls; Tier 2 (Phase 6): arbitrary bit-level packing. |
+| `BitString(location, segments)` | `<<...>>` | `@gprelude.BitArray` constructor calls supporting byte-aligned segments and arbitrary bit-offset/bit-width packing. |
 | `Case(location, subjects, clauses)` | `case a, b { ... }` | Emitted as `match (a, b) { ... }` (or `match a { ... }` for single subject) with `if` guards (`match x { pat if cond => body }`). |
 | `BinaryOperator(location, name, left, right)` | Binary operators | See Section 9 below (`Pipe` desugared in Pass 3). |
 | `Echo(location, expression, message)` | `echo expr` / `echo expr as msg` | Lowered to `@prelude.echo(expr, msg)` (inspects/prints and returns `expr`). |
@@ -104,7 +104,7 @@ This document maps every public AST node and variant in `glance` (`build/package
 | `PatternList(location, elements, tail)` | `[]`, `[x]`, `[x, ..rest]` | Lowered to nested `@prelude.GList` patterns: `Nil`, `Cons(x, Nil)`, `Cons(x, rest)`. |
 | `PatternAssignment(location, pattern, name)` | `Pat as x` | Emitted as MoonBit `Pat as x`. |
 | `PatternConcatenate(location, prefix, prefix_name, rest_name)` | `"pre" <> rest` / `"pre" as p <> rest` | Lowered in `pattern.gleam` to guard/branch using `has_prefix` + substring slice (binding `prefix_name` and `rest_name` when named). |
-| `PatternBitString(location, segments)` | `<<...>>` | Lowered in `pattern.gleam` via byte-aligned `Bytes` / `BitArray` matchers (Tier 1) and arbitrary bit extractors (Tier 2). |
+| `PatternBitString(location, segments)` | `<<...>>` | Lowered in `bit_pattern.gleam` via byte-aligned `Bytes` / `BitArray` matchers and arbitrary bit extractors. |
 | `PatternVariant(location, module, constructor, arguments, with_spread)` | `Ok(x)`, `User(name:, ..)` | Emitted as `Ok(x)` / `@mod.User(name~, ..)`; `with_spread == True` appends `, ..` in MoonBit. |
 
 ---

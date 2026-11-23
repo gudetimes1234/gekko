@@ -96,3 +96,14 @@ Gleam `panic`, `todo`, `assert`, and failing `let assert` patterns lower to Moon
 
 - **Self vs. mutual tail recursion:** Self-tail-recursive functions rewrite to MoonBit functional `for` loops (`src/lower/tco.gleam`), guaranteeing $O(1)$ stack usage on all targets. Mutually recursive tail calls remain ordinary calls (`wasm-gc` supports native tail calls via `return_call`, while linear `wasm` / `js` / `native` are not yet loop-rewritten by `gekko`).
 - **`gleam test` vs. `gekko test`:** Standard `gleam test` runs on Erlang or Node/JS and cannot invoke `@external(moonbit, ...)` functions unless an Erlang/JS external or pure-Gleam fallback is provided. Use `gekko test` to transpile and run tests via `moon test`.
+
+---
+
+## 8. WIT Boundary Semantics (`gekko wit`)
+
+When bridging Gleam modules across the WebAssembly Component Model (`wit-bindgen moonbit` + `emit/wit_bridge.gleam`), boundary values convert between `gekko`'s uniform Gleam types and Canonical ABI MoonBit types:
+
+- **Integers (`s8`/`s16`/`s32`/`s64`, `u8`/`u16`/`u32`/`u64`):** Every WIT integer type maps to Gleam `Int` (`Int64` in MoonBit). Narrower signed/unsigned widths (`s8`–`u32`) widen on import/entry and narrow with `.to_int()` / `.to_byte()` on export/call; `u64` uses bitwise reinterpretation (`.reinterpret_as_int64()` / `.reinterpret_as_uint64()`), so unsigned values $\ge 2^{63}$ appear negative in Gleam `Int` while preserving their exact 64-bit bit pattern.
+- **Floats (`f32`/`f64`) & `char`:** `f32` widens to `Double` (`to_double()`) and narrows via `Float::from_double`. WIT `char` converts to/from a single-codepoint Gleam `String`.
+- **`list<u8>` & `list<T>`:** `list<u8>` maps to Gleam `BitArray` (`@gprelude.BitArray` ↔ `FixedArray[Byte]`). General `list<T>` maps to `List(T)` (`@gprelude.GList[T]` ↔ `Array[T]`).
+- **Imported `resource` (`own<T>` / `borrow<T>`):** Imported WIT resources map to Gleam opaque types (`/// @external_type(moonbit, ...)`). Both `own<T>` and `borrow<T>` pass the underlying handle across the adapter boundary; call the generated `drop_<resource>(handle)` binding when explicitly releasing a handle. Exported WIT resources are not yet supported.

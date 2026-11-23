@@ -7,6 +7,7 @@ import gleam/option.{None, Some}
 import gleam/string
 import index/symbol_table
 import project/cmd
+import project/diagnostics
 import project/ffi_config
 import project/interface
 import project/loader
@@ -659,10 +660,12 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
     )
     == Ok(Nil)
 
-  assert loader.load_dependencies(root, dict.new())
-    == Error(
-      "Unmapped external function bad_pkg:bad_mod.missing (add an override in gekko.toml)",
-    )
+  let assert Error(unmapped_err) = loader.load_dependencies(root, dict.new())
+  assert string.contains(
+    unmapped_err,
+    "Unmapped external function bad_pkg:bad_mod.missing at bad_pkg:src/bad_mod.gleam:",
+  )
+  assert string.contains(unmapped_err, "[tools.gekko.overrides]")
 
   // Adding a gekko.toml override satisfies validation and loads both deps
   assert simplifile.write(
@@ -1018,5 +1021,76 @@ pub fn staging_interface_cache_hit_and_invalidation_test() {
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: staging_dir)
+  Nil
+}
+
+pub fn toolchain_version_parallel_and_diagnostics_test() {
+  assert cmd.parse_moon_date_version("moon 0.1.20261119 (738607b 2026-11-19)")
+    == Some(#(0, 1, 20_261_119))
+  assert cmd.parse_moonc_version("v0.10.22+124d61d05 (2026-11-19)")
+    == Some(#(0, 10, 22))
+  assert cmd.is_version_at_least(#(0, 1, 20_261_119), cmd.min_moon_version)
+  assert !cmd.is_version_at_least(#(0, 1, 20_261_001), cmd.min_moon_version)
+
+  // Parallel map preserves order and surfaces first error
+  assert cmd.parallel_try_map([1, 2, 3, 4], fn(n) { Ok(n * 10) })
+    == Ok([10, 20, 30, 40])
+  assert cmd.parallel_try_map([1, 2, 3], fn(n) {
+      case n == 2 {
+        True -> Error("boom-2")
+        False -> Ok(n)
+      }
+    })
+    == Error("boom-2")
+
+  // Source-map annotation attaches Gleam file & line to MoonBit errors
+  let origins = [
+    diagnostics.DeclOrigin(
+      mbt_file: "app/app.mbt",
+      start_line: 10,
+      end_line: 18,
+      gleam_file: "src/app.gleam",
+      gleam_line: 42,
+      symbol: "compute",
+    ),
+  ]
+  let raw_moon_err =
+    "error: type mismatch\n  ┌─ /tmp/build/moonbit/app/app.mbt:14:5\n"
+  let annotated = diagnostics.annotate_with_origins(origins, raw_moon_err)
+  assert string.contains(
+    annotated,
+    "↳ Gleam source: src/app.gleam:42 (compute)",
+  )
+
+  // Write-if-changed + .gekko_sourcemap E2E check
+  let wroot = "build/test_fixtures/write_if_changed_app"
+  let wout = "build/test_fixtures/write_if_changed_mbt"
+  let _ = simplifile.delete(file_or_dir_at: wroot)
+  let _ = simplifile.delete(file_or_dir_at: wout)
+  assert simplifile.create_directory_all(filepath.join(wroot, "src")) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(wroot, "gleam.toml"),
+      contents: "name = \"write_if_changed_app\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(wroot, "src/write_if_changed_app.gleam"),
+      contents: "pub fn add_one(x: Int) -> Int {\n  x + 1\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(wroot, wout)
+  let gprelude_mbt = filepath.join(wout, "gprelude/gprelude.mbt")
+  let assert Ok(info1) = simplifile.file_info(gprelude_mbt)
+  let assert Ok(smap) =
+    simplifile.read(filepath.join(wout, diagnostics.sourcemap_filename))
+  assert string.contains(smap, "src/write_if_changed_app.gleam\t1\tadd_one")
+
+  let assert Ok(_) = workspace.transpile_project(wroot, wout)
+  let assert Ok(info2) = simplifile.file_info(gprelude_mbt)
+  assert info1.mtime_seconds == info2.mtime_seconds
+
+  let _ = simplifile.delete(file_or_dir_at: wroot)
+  let _ = simplifile.delete(file_or_dir_at: wout)
   Nil
 }

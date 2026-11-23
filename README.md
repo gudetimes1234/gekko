@@ -56,9 +56,29 @@ scripts/install.sh            # installs to ~/.local/bin/gekko
 scripts/install.sh /some/bin  # or choose another directory (must be on PATH)
 ```
 
-The script runs `gleam export erlang-shipment` and writes a small `gekko` launcher into the bin directory. The launcher runs the shipment in this repository's `build/erlang-shipment/`, so you can call `gekko` from any directory, and `--root`/`--out` resolve relative to your current directory. Re-run `scripts/install.sh` after pulling or changing gekko's source. Don't delete or move the repository, since the launcher points into it.
+The script runs `gleam export erlang-shipment`, copies the standalone shipment to `~/.local/share/gekko/erlang-shipment` (override via `GEKKO_INSTALL_DIR`), and writes a `gekko` launcher into the bin directory. You can call `gekko` from any directory, `--root`/`--work-dir`/`--output` resolve relative to your current directory, and moving or deleting the source checkout will not break the installed binary. Re-run `scripts/install.sh` after pulling or changing `gekko`'s source.
 
-Without installing, you can still run `gleam run -- <command>` from the repository.
+Without installing, you can still run `gleam run -- <command>` from the repository, or verify your toolchain with `gekko doctor`.
+
+---
+
+## Quick Start
+
+```bash
+gekko new hello_gekko
+cd hello_gekko
+gekko run                  # auto-downloads deps, transpiles to MoonBit, and runs on wasm-gc
+gekko build --release      # emits optimized hello_gekko.wasm in the current directory
+```
+
+For a WebAssembly Component starter project:
+
+```bash
+gekko new hello_wit --wit
+cd hello_wit
+gekko wit check
+gekko wit build --release  # outputs dist/app.wasm
+```
 
 ---
 
@@ -79,35 +99,47 @@ Because the package names remain `gleam_stdlib` and `gleam_json`, any transitive
 ## CLI Usage
 
 ```bash
+# Scaffold a new project (or initialize in an existing directory)
+gekko new <name> [--wit]
+gekko init [--root <dir>] [--wit]
+
+# Verify required & optional toolchain binaries (gleam, moon, moonc, wit-bindgen, wasm-tools)
+gekko doctor
+
+# Remove generated build/moonbit and staging directories
+gekko clean [--root <dir>]
+
 # Type-check transpiled MoonBit output for a Gleam project (--root defaults to `.`)
-gekko check [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <dir>]
+gekko check [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>]
 
 # Transpile and build targeting wasm-gc (default), wasm, js, or native.
 # Writes the compiled artifact (<name>.wasm / .js / .exe) into the current
-# directory by default (or to --out / -o), keeping intermediates in build/moonbit.
-gekko build [--release] [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--out <file> | -o <file>]
+# directory by default (or to --output / -o), keeping intermediates in build/moonbit.
+gekko build [--release] [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]
 gekko build --target wasm-gc
 gekko build --target wasm
 gekko build --target js
-gekko build --target native --out myfile.exe
+gekko build --target native -o myfile.exe
 gekko build --release --target wasm   # optimized, much smaller output
 
-# Run tests or execute `main()` through MoonBit
-gekko test [--target <wasm-gc|wasm|js|native>] [--root <dir>]
-gekko run  [--target <wasm-gc|wasm|js|native>] [--root <dir>]
+# Run tests or execute `main()` (forwarding program args after `--`)
+gekko test [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>]
+gekko run  [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>] [-- <args>...]
 
 # Generate Gleam FFI stubs + MoonBit adapter from a MoonBit package (.mbti)
-gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--out <dir>]
+gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--work-dir <dir>]
 
 # Generate WIT bindings, type-check, and bundle a Wasm Component (WIT / WASI Preview 2)
 gekko wit gen   [--root <dir>] [--wit <dir>] [--world <name>]
-gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]
-gekko wit build [--root <dir>] [--wit <dir>] [--world <name>] [--output <file.wasm> | -o <file.wasm>]
+gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]
+gekko wit build [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--output <file.wasm> | -o <file.wasm>]
 
 # Show version or help
 gekko --version
 gekko --help
 ```
+
+*(Note: `--out` is accepted as a backwards-compatible alias for `--work-dir` across commands and `-o` on `build`.)*
 
 ---
 
@@ -132,9 +164,9 @@ gekko wit gen [--root <dir>] [--wit <dir>] [--world <name>]
 
 Parses `<root>/wit/*.wit` (or `--wit <dir>`) and generates Gleam source files under `<root>/src/`:
 
-- **`src/wit/<iface>_types.gleam` *(auto-regenerated — do not edit)*:** Gleam custom types for WIT `record`, `variant`, `enum`, `flags`, and `type` aliases (with WIT `list<u8>` mapped to `BitArray`, `list<T>` to `List(T)`, `option<T>` to `Option(T)`, `result<T, E>` to `Result(T, E)`, integer types to `Int`, and floats to `Float`).
-- **`src/wit/<iface>.gleam` *(auto-regenerated — do not edit)*:** Callable Gleam functions for every WIT `import`, wired via `/// @external(moonbit, ...)` to the generated Canonical ABI import adapters.
-- **`src/<iface>.gleam` / `src/<world>.gleam` *(created once — safe to edit)*:** Starter Gleam modules containing `todo` stubs with the exact function signatures required for each exported WIT interface or world-level function. Re-running `gekko wit gen` after updating your `.wit` file refreshes `src/wit/*.gleam` without overwriting your implementations in `src/<iface>.gleam`.
+- **`src/wit/<iface>_types.gleam` *(auto-regenerated — do not edit)*:** Gleam custom types for WIT `record`, `variant`, `enum`, `flags`, `type` aliases, and imported `resource` handles (`/// @external_type(moonbit, ...)`), with WIT `list<u8>` mapped to `BitArray`, `list<T>` to `List(T)`, `option<T>` to `Option(T)`, `result<T, E>` to `Result(T, E)`, integer types to `Int`, and floats to `Float`.
+- **`src/wit/<iface>.gleam` *(auto-regenerated — do not edit)*:** Callable Gleam functions for every WIT `import` (including imported `resource` constructors, methods, static methods, and `drop_<resource>`), wired via `/// @external(moonbit, ...)` to the generated Canonical ABI import adapters.
+- **`src/<iface>.gleam` / `src/<world>.gleam` *(created once — safe to edit)*:** Starter Gleam modules containing `todo` stubs with the exact function signatures required for each exported WIT interface or world-level function. World `include` composition (including `with` renames) is resolved automatically. Re-running `gekko wit gen` after updating your `.wit` file refreshes `src/wit/*.gleam` without overwriting your implementations in `src/<iface>.gleam`.
 
 #### 2. `gekko wit check` — Bridge and type-check the MoonBit + WIT workspace
 
@@ -152,12 +184,12 @@ Validates that your Gleam export implementations match the WIT contract and type
 #### 3. `gekko wit build` — Compile and bundle the `.wasm` Component
 
 ```bash
-gekko wit build [--root <dir>] [--wit <dir>] [--world <name>] [--output <file.wasm> | -o <file.wasm>]
+gekko wit build [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--output <file.wasm> | -o <file.wasm>]
 ```
 
 Performs the full bridge pipeline from `gekko wit check`, then:
 
-1. Compiles the core linear-memory Wasm module via `moon build --target wasm`.
+1. Compiles the core linear-memory Wasm module via `moon build [--release] --target wasm`.
 2. Embeds the WIT component type metadata into the core Wasm binary via `wasm-tools component embed --encoding utf16`.
 3. Wraps the embedded module into a WebAssembly Component via `wasm-tools component new`, writing the final component to `<root>/dist/<world>.wasm` by default (or to the path passed via `--output` / `-o`).
 
@@ -175,7 +207,8 @@ wasm-tools component wit dist/<world>.wasm
 | `--wit <dir>` | `<root>/wit` | Directory containing `.wit` files. |
 | `--world <name>` | Only world in `--wit` | Selects which WIT `world` to target when multiple worlds exist. |
 | `--output <file>`, `-o <file>` | `<root>/dist/<world>.wasm` | Output `.wasm` file path for `gekko wit build`. |
-| `--out <dir>` | `<root>/build/moonbit` | Intermediate MoonBit workspace directory (`wit check` / `wit build`). |
+| `--work-dir <dir>` | `<root>/build/moonbit` | Intermediate MoonBit workspace directory (`wit check` / `wit build`). |
+| `--release` | `false` | Build the core Wasm module in release mode (`wit build`). |
 
 ---
 
@@ -266,11 +299,38 @@ Standalone example projects are hosted in [`gekko_examples`](https://github.com/
 - **[`docs/GLEAM_SYNTAX_MAP.md`](./docs/GLEAM_SYNTAX_MAP.md)** — Complete mapping from `glance` AST nodes to MoonBit lowering rules.
 - **[`LICENSE`](./LICENSE)** — MIT License.
 
+## Release Output Sizes
+
+Measured with `gekko 0.1.0` (`gleam 1.19.2`, `moon 0.1.20261119`) using `--release` on a minimal `hello` app (`echo "Hello, gekko!"`) and a minimal WIT greeter component (`export greet: func(name: string) -> string`):
+
+| Target | Command | Output Size |
+| :--- | :--- | :--- |
+| `wasm-gc` | `gekko build --release --target wasm-gc` | `4.7 KiB` (4,767 bytes) |
+| `wasm` (linear) | `gekko build --release --target wasm` | `9.2 KiB` (9,375 bytes) |
+| `js` | `gekko build --release --target js` | `4.8 KiB` (4,902 bytes) |
+| `native` | `gekko build --release --target native` | `389 KiB` (397,600 bytes) |
+| Wasm Component (WIT) | `gekko wit build --release` | `3.3 KiB` (3,353 bytes) |
+
+---
+
 ## Known Limitations
 
 - **Fixed-width 64-bit `Int`s and runtime differences:** Gleam `Int` maps to signed 64-bit `Int64` with wrapping overflow rather than Erlang arbitrary-precision integers (or JS 53-bit safe integers). See [`docs/SEMANTICS.md`](./docs/SEMANTICS.md) for the full list of documented differences.
 - **Testing MoonBit FFI code:** `gleam test` runs on Erlang/JS and cannot execute `@external(moonbit, ...)` functions unless they also provide an Erlang/JS external or pure-Gleam fallback. Use `gekko test` to transpile and run tests on MoonBit targets.
-- **Mutual tail recursion:** Self-recursive tail calls are lowered to MoonBit `for` loops, while mutually recursive functions are not yet tail-call optimized.
+- **Mutual tail recursion & exported WIT resources:** Self-recursive tail calls are lowered to MoonBit `for` loops, while mutually recursive functions are not yet tail-call optimized. Imported WIT `resource` handles (`own<T>`, `borrow<T>`) are supported, while exported WIT resources are not yet supported.
+
+## Contributing
+
+Contributions are welcome! Before opening a pull request:
+
+```sh
+gleam format --check src test
+gleam check
+gleam test
+```
+
+- If you edit `runtime/prelude/gprelude.mbt` or `runtime/prelude/moon.pkg`, run `./scripts/sync_prelude.sh` so `src/emit/prelude_runtime.gleam` stays byte-identical.
+- To run the full downstream regression suite across `gekko_gleam_stdlib`, `gekko_gleam_json`, and `gekko_examples`, run `./scripts/test_ecosystem.sh`.
 
 ## AI Usage
 

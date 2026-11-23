@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
 
 jobs:
   test:
@@ -57,5 +60,52 @@ jobs:
         run: |
           scripts/install.sh "$HOME/.local/bin"
           "$HOME/.local/bin/gekko" --version
+          "$HOME/.local/bin/gekko" doctor
           "$HOME/.local/bin/gekko" --help
           "$HOME/.local/bin/gekko" check --help
+
+  ecosystem:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gekko
+    steps:
+      - name: Checkout gekko
+        uses: actions/checkout@v4
+        with:
+          path: gekko
+
+      - name: Checkout gleam_stdlib fork
+        uses: actions/checkout@v4
+        with:
+          repository: spiral-nights/gekko_gleam_stdlib
+          path: gleam_stdlib
+
+      - name: Checkout gleam_json fork
+        uses: actions/checkout@v4
+        with:
+          repository: spiral-nights/gekko_gleam_json
+          path: gleam_json
+
+      - name: Setup Erlang and Gleam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          gleam-version: "1.19.2"
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Install Wasm component tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools,wit-bindgen-cli,wasmtime
+
+      - name: Run full ecosystem regression suite
+        run: |
+          GEKKO_STDLIB_DIR="$PWD/../gleam_stdlib" \
+          GEKKO_JSON_DIR="$PWD/../gleam_json" \
+          ./scripts/test_ecosystem.sh

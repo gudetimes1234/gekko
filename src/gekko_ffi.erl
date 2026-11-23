@@ -1,7 +1,13 @@
 -module(gekko_ffi).
--export([run_command/3, get_env/1, find_executable/1, extract_zip_entry/2, sha256_hex/1]).
+-export([run_command/3, run_command_streaming/3, parallel_map/2, get_env/1, find_executable/1, extract_zip_entry/2, sha256_hex/1]).
 
 run_command(Command, Args, Cwd) ->
+    run_command_impl(Command, Args, Cwd, false).
+
+run_command_streaming(Command, Args, Cwd) ->
+    run_command_impl(Command, Args, Cwd, true).
+
+run_command_impl(Command, Args, Cwd, Stream) ->
     CmdStr = unicode:characters_to_list(Command, utf8),
     case resolve_executable(CmdStr) of
         false ->
@@ -15,7 +21,7 @@ run_command(Command, Args, Cwd) ->
             end,
             try
                 Port = open_port({spawn_executable, Exe}, Opts),
-                collect_port(Port, [])
+                collect_port(Port, [], Stream)
             catch
                 error:Reason ->
                     Msg = iolist_to_binary(io_lib:format("Failed to spawn ~s: ~p", [CmdStr, Reason])),
@@ -34,12 +40,47 @@ resolve_executable(CmdStr) ->
             os:find_executable(CmdStr)
     end.
 
-collect_port(Port, Acc) ->
+collect_port(Port, Acc, Stream) ->
     receive
         {Port, {data, Data}} ->
-            collect_port(Port, [Data | Acc]);
+            case Stream of
+                true -> io:put_chars(Data);
+                false -> ok
+            end,
+            collect_port(Port, [Data | Acc], Stream);
         {Port, {exit_status, Status}} ->
             {Status, iolist_to_binary(lists:reverse(Acc))}
+    end.
+
+parallel_map([], _Fun) ->
+    [];
+parallel_map([Item], Fun) ->
+    [Fun(Item)];
+parallel_map(Items, Fun) ->
+    Parent = self(),
+    Indexed = lists:zip(lists:seq(1, length(Items)), Items),
+    Workers = [
+        begin
+            {Pid, Ref} = spawn_monitor(fun() ->
+                Res = Fun(Item),
+                Parent ! {gekko_par_res, Idx, Res}
+            end),
+            {Idx, Pid, Ref}
+        end
+        || {Idx, Item} <- Indexed
+    ],
+    ResultsMap = collect_workers(Workers, #{}),
+    [maps:get(Idx, ResultsMap) || {Idx, _} <- Indexed].
+
+collect_workers([], Acc) ->
+    Acc;
+collect_workers([{Idx, Pid, Ref} | Rest], Acc) ->
+    receive
+        {gekko_par_res, Idx, Res} ->
+            erlang:demonitor(Ref, [flush]),
+            collect_workers(Rest, maps:put(Idx, Res, Acc));
+        {'DOWN', Ref, process, Pid, Reason} ->
+            error({parallel_map_worker_failed, Reason})
     end.
 
 

@@ -4,7 +4,7 @@ import emit/prelude_runtime
 import emit/trait_bounds
 import filepath
 import glance
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -15,6 +15,8 @@ import lower/desugar
 import lower/tco
 import lower/validate
 import moonbit/ffi_meta
+import project/cmd
+import project/diagnostics
 import project/ffi_config
 import project/interface.{type PackageInterface, PackageInterface}
 import project/loader.{type LoadedDependency}
@@ -22,6 +24,7 @@ import project/moonbit_ffi
 import project/prepass.{type PrepassResult}
 import project/staging
 import simplifile
+import tom
 
 /// Summary returned after transpiling a Gleam project into a MoonBit workspace.
 pub type TranspileSummary {
@@ -31,6 +34,7 @@ pub type TranspileSummary {
     out_dir: String,
     emitted_modules: List(String),
     local_moonbit_packages: List(String),
+    module_pkg_dirs: Dict(String, String),
   )
 }
 
@@ -53,16 +57,21 @@ pub fn transpile_project_with_tests(
   use #(project_name, version) <- result.try(loader.read_project_meta(
     project_root,
   ))
+  use _ <- result.try(ensure_deps_downloaded(project_root, include_tests))
+  use packages_hash <- result.try(staging.compute_packages_dir_hash(
+    project_root,
+  ))
   use ffi_overrides <- result.try(ffi_config.load_project_overrides(
     project_root,
   ))
   use root_moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
     project_root,
   ))
-  use loaded_deps <- result.try(loader.load_dependencies_with_options(
+  use loaded_deps <- result.try(loader.load_dependencies_with_packages_hash(
     project_root,
     ffi_overrides,
     include_tests,
+    Some(packages_hash),
   ))
   use dep_moonbit_deps <- result.try(
     list.try_map(loaded_deps, fn(dep) {
@@ -79,11 +88,14 @@ pub fn transpile_project_with_tests(
     |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
 
   let staging_dir = filepath.join(project_root, "build/.gekko_staging")
-  use root_iface <- result.try(staging.extract_project_interface_with_options(
-    project_root,
-    staging_dir,
-    include_tests,
-  ))
+  use root_iface <- result.try(
+    staging.extract_project_interface_with_packages_hash(
+      project_root,
+      staging_dir,
+      include_tests,
+      Some(packages_hash),
+    ),
+  )
   let merged_iface = merge_package_interfaces(root_iface, loaded_deps)
 
   let src_dir = filepath.join(project_root, "src")
@@ -134,7 +146,11 @@ pub fn transpile_project_with_tests(
     )
 
   use _ <- result.try(validate_all_int_literals(all_modules, table))
-  use _ <- result.try(validate_module_pkg_dirs(all_modules))
+
+  let resolved_pkg_dirs =
+    all_modules
+    |> list.map(fn(entry) { entry.1 })
+    |> pkg_config.resolve_module_pkg_dirs
 
   use _ <- result.try(
     simplifile.create_directory_all(out_dir)
@@ -162,7 +178,10 @@ pub fn transpile_project_with_tests(
   ))
 
   let module_pkg_dirs =
-    list.map(all_modules, fn(entry) { pkg_config.module_to_pkg_dir(entry.1) })
+    list.map(all_modules, fn(entry) {
+      dict.get(resolved_pkg_dirs, entry.1)
+      |> result.unwrap(pkg_config.module_to_pkg_dir(entry.1))
+    })
   let base_reserved =
     ["gprelude", ..module_pkg_dirs]
     |> set.from_list
@@ -203,19 +222,30 @@ pub fn transpile_project_with_tests(
   let project_bounds =
     trait_bounds.analyze_project(ir_modules, Some(table), ffi_metadata)
 
-  use rev_emitted <- result.try(
-    list.try_fold(ir_modules, [], fn(names_acc, ir_mod) {
+  let module_meta_by_name =
+    list.fold(all_modules, dict.new(), fn(acc, entry) {
+      let #(pkg_name, mod_name, ast_mod, pre) = entry
+      dict.insert(acc, mod_name, #(pkg_name, ast_mod, pre.cleaned_source))
+    })
+
+  use #(rev_emitted, rev_origins) <- result.try(
+    list.try_fold(ir_modules, #([], []), fn(acc, ir_mod) {
+      let #(names_acc, origins_acc) = acc
       let mod_name = ir_mod.module_name
       let #(mbt_src, imports) =
-        moonbit.emit_module_with_context(
+        moonbit.emit_module_with_pkg_dirs(
           ir_mod,
           Some(table),
           ffi_metadata,
           project_bounds,
+          resolved_pkg_dirs,
         )
       let is_main = moonbit.module_has_main(ir_mod)
-      let pkg_dir = pkg_config.module_to_pkg_dir(mod_name)
+      let pkg_dir =
+        dict.get(resolved_pkg_dirs, mod_name)
+        |> result.unwrap(pkg_config.module_to_pkg_dir(mod_name))
       let target_dir = filepath.join(out_dir, pkg_dir)
+      let mbt_rel = pkg_dir <> "/" <> pkg_dir <> ".mbt"
 
       use _ <- result.try(write_text_file(
         filepath.join(target_dir, "moon.pkg"),
@@ -230,9 +260,30 @@ pub fn transpile_project_with_tests(
         filepath.join(target_dir, pkg_dir <> ".mbt"),
         mbt_src,
       ))
-      Ok([mod_name, ..names_acc])
+      let mod_origins = case dict.get(module_meta_by_name, mod_name) {
+        Ok(#(pkg_name, ast_mod, gleam_src)) ->
+          diagnostics.collect_module_origins(
+            project_name,
+            pkg_name,
+            mod_name,
+            ast_mod,
+            gleam_src,
+            mbt_rel,
+            mbt_src,
+          )
+        Error(_) -> []
+      }
+      Ok(#(
+        [mod_name, ..names_acc],
+        list.append(list.reverse(mod_origins), origins_acc),
+      ))
     }),
   )
+
+  use _ <- result.try(write_text_file(
+    filepath.join(out_dir, diagnostics.sourcemap_filename),
+    diagnostics.format_sourcemap(list.reverse(rev_origins)),
+  ))
 
   let local_top_dirs =
     list.map(local_moonbit_packages, fn(pkg) {
@@ -260,6 +311,7 @@ pub fn transpile_project_with_tests(
     out_dir:,
     emitted_modules: list.reverse(rev_emitted),
     local_moonbit_packages:,
+    module_pkg_dirs: resolved_pkg_dirs,
   ))
 }
 
@@ -299,7 +351,10 @@ fn clean_stale_generated_dirs(
   }
 
   let protected =
-    ["", ".", "..", "_build", ".mooncakes", "gprelude", ".gekko_generated"]
+    [
+      "", ".", "..", "_build", ".mooncakes", "gprelude", ".gekko_generated",
+      diagnostics.sourcemap_filename,
+    ]
     |> set.from_list
   let keep = set.union(protected, set.from_list(new_generated_dirs))
 
@@ -396,41 +451,65 @@ fn calls_gleeunit_main(stmts: List(glance.Statement)) -> Bool {
   }
 }
 
-fn validate_module_pkg_dirs(
-  all_modules: List(#(String, String, glance.Module, PrepassResult)),
+fn ensure_deps_downloaded(
+  project_root: String,
+  include_tests: Bool,
 ) -> Result(Nil, String) {
-  let res =
-    list.try_fold(all_modules, dict.new(), fn(seen, entry) {
-      let #(pkg_name, mod_name, _, _) = entry
-      let pkg_dir = pkg_config.module_to_pkg_dir(mod_name)
-      case pkg_dir == "gprelude" {
-        True ->
-          Error(
-            "Module '"
-            <> mod_name
-            <> "' collides with reserved runtime package directory 'gprelude'",
-          )
-        False ->
-          case dict.get(seen, pkg_dir) {
-            Ok(#(prev_pkg, prev_mod)) ->
-              Error(
-                "Module package directory collision: '"
-                <> prev_mod
-                <> "' ("
-                <> prev_pkg
-                <> ") and '"
-                <> mod_name
-                <> "' ("
-                <> pkg_name
-                <> ") both map to MoonBit package directory '"
-                <> pkg_dir
-                <> "'",
-              )
-            Error(_) -> Ok(dict.insert(seen, pkg_dir, #(pkg_name, mod_name)))
+  let packages_dir = filepath.join(project_root, "build/packages")
+  case simplifile.is_directory(packages_dir) {
+    Ok(True) -> Ok(Nil)
+    _ -> {
+      let toml_path = filepath.join(project_root, "gleam.toml")
+      case simplifile.read(toml_path) {
+        Error(_) -> Ok(Nil)
+        Ok(content) ->
+          case tom.parse(content) {
+            Error(_) -> Ok(Nil)
+            Ok(parsed) -> {
+              let has_remote_in = fn(section) {
+                case tom.get_table(parsed, [section]) {
+                  Error(_) -> False
+                  Ok(tbl) ->
+                    dict.values(tbl)
+                    |> list.any(fn(val) {
+                      case val {
+                        tom.InlineTable(dep_tbl) | tom.Table(dep_tbl) ->
+                          case tom.get_string(dep_tbl, ["path"]) {
+                            Ok(_) -> False
+                            Error(_) -> True
+                          }
+                        _ -> True
+                      }
+                    })
+                }
+              }
+              let needs_download =
+                has_remote_in("dependencies")
+                || { include_tests && has_remote_in("dev-dependencies") }
+              case needs_download {
+                False -> Ok(Nil)
+                True -> {
+                  let res =
+                    cmd.run(
+                      command: "gleam",
+                      args: ["deps", "download"],
+                      cwd: project_root,
+                    )
+                  case res.exit_code {
+                    0 -> Ok(Nil)
+                    _ ->
+                      Error(
+                        "`gleam deps download` failed while fetching missing dependencies:\n"
+                        <> res.output,
+                      )
+                  }
+                }
+              }
+            }
           }
       }
-    })
-  result.map(res, fn(_) { Nil })
+    }
+  }
 }
 
 fn validate_all_int_literals(
@@ -459,18 +538,23 @@ fn validate_all_int_literals(
 }
 
 fn write_text_file(path: String, contents: String) -> Result(Nil, String) {
-  let dir = filepath.directory_name(path)
-  use _ <- result.try(
-    simplifile.create_directory_all(dir)
-    |> result.map_error(fn(err) {
-      "Failed to create directory "
-      <> dir
-      <> ": "
-      <> simplifile.describe_error(err)
-    }),
-  )
-  simplifile.write(to: path, contents:)
-  |> result.map_error(fn(err) {
-    "Failed to write " <> path <> ": " <> simplifile.describe_error(err)
-  })
+  case simplifile.read(from: path) {
+    Ok(existing) if existing == contents -> Ok(Nil)
+    _ -> {
+      let dir = filepath.directory_name(path)
+      use _ <- result.try(
+        simplifile.create_directory_all(dir)
+        |> result.map_error(fn(err) {
+          "Failed to create directory "
+          <> dir
+          <> ": "
+          <> simplifile.describe_error(err)
+        }),
+      )
+      simplifile.write(to: path, contents:)
+      |> result.map_error(fn(err) {
+        "Failed to write " <> path <> ": " <> simplifile.describe_error(err)
+      })
+    }
+  }
 }

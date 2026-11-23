@@ -13,14 +13,15 @@ import project/workspace
 import simplifile
 import wit/ast.{
   type ResolvedWit, type WitFunc, type WitInterface, type WitPackageId,
-  type WitType, type WitTypeDef, WitAlias, WitBool, WitChar, WitEnum, WitF32,
-  WitF64, WitFlags, WitList, WitNamed, WitOption, WitRecord, WitResult, WitS16,
-  WitS32, WitS64, WitS8, WitString, WitTuple, WitU16, WitU32, WitU64, WitU8,
-  WitVariant, WorldExportFunc, WorldExportIface, WorldImportFunc,
+  type WitType, type WitTypeDef, ResourceConstructor, ResourceMethod,
+  ResourceStatic, WitAlias, WitBool, WitBorrow, WitChar, WitEnum, WitF32, WitF64,
+  WitFlags, WitList, WitNamed, WitOption, WitOwn, WitRecord, WitResource,
+  WitResult, WitS16, WitS32, WitS64, WitS8, WitString, WitTuple, WitU16, WitU32,
+  WitU64, WitU8, WitVariant, WorldExportFunc, WorldExportIface, WorldImportFunc,
   WorldImportIface, WorldUse, gleam_export_module, gleam_type_name,
   gleam_types_module, gleam_value_ident, gleam_variant_name,
   gleam_world_export_module, iface_key, kebab_to_screaming, kebab_to_snake,
-  moonbit_imp_adapter_pkg, moonbit_world_imp_adapter_pkg, resolve_iface_ref,
+  lookup_interface, moonbit_imp_adapter_pkg, moonbit_world_imp_adapter_pkg,
   wit_bindgen_iface_gen_dir, wit_bindgen_iface_raw_dir,
   wit_bindgen_world_gen_dir, wit_bindgen_world_raw_dir,
 }
@@ -130,10 +131,7 @@ pub fn bridge_wit_workspace(
     list.filter_map(resolved.world.items, fn(item) {
       case item {
         WorldImportIface(ref) ->
-          dict.get(
-            resolved.interfaces,
-            resolve_iface_ref(resolved.root_pkg, ref),
-          )
+          lookup_interface(resolved.interfaces, resolved.root_pkg, ref)
         _ -> Error(Nil)
       }
     })
@@ -161,10 +159,7 @@ pub fn bridge_wit_workspace(
     list.filter_map(resolved.world.items, fn(item) {
       case item {
         WorldExportIface(ref) ->
-          dict.get(
-            resolved.interfaces,
-            resolve_iface_ref(resolved.root_pkg, ref),
-          )
+          lookup_interface(resolved.interfaces, resolved.root_pkg, ref)
         _ -> Error(Nil)
       }
     })
@@ -221,22 +216,39 @@ pub fn bundle_component(
   world_name: Option(String),
   output_wasm: String,
 ) -> Result(String, String) {
+  bundle_component_with_profile(summary, world_name, output_wasm, False)
+}
+
+/// Like `bundle_component`, optionally building the core Wasm module with
+/// `moon build --release --target wasm`.
+pub fn bundle_component_with_profile(
+  summary: WitBridgeSummary,
+  world_name: Option(String),
+  output_wasm: String,
+  release: Bool,
+) -> Result(String, String) {
+  let build_args = case release {
+    True -> ["build", "--release", "--target", "wasm"]
+    False -> ["build", "--target", "wasm"]
+  }
   let build_res =
-    cmd.run(
-      command: "moon",
-      args: ["build", "--target", "wasm"],
-      cwd: summary.out_dir,
-    )
+    cmd.run(command: "moon", args: build_args, cwd: summary.out_dir)
   use _ <- result.try(case build_res.exit_code {
     0 -> Ok(Nil)
     _ -> Error("`moon build --target wasm` failed:\n" <> build_res.output)
   })
 
+  let core_wasm_path = case release {
+    True ->
+      filepath.join(summary.out_dir, "_build/wasm/release/build/gen/gen.wasm")
+    False -> summary.core_wasm_path
+  }
+
   use has_core <- result.try(
-    simplifile.is_file(summary.core_wasm_path)
+    simplifile.is_file(core_wasm_path)
     |> result.map_error(fn(err) {
       "Failed to check built Wasm module '"
-      <> summary.core_wasm_path
+      <> core_wasm_path
       <> "': "
       <> simplifile.describe_error(err)
     }),
@@ -246,7 +258,7 @@ pub fn bundle_component(
     False ->
       Error(
         "`moon build --target wasm` succeeded, but expected core Wasm module was not found at "
-        <> summary.core_wasm_path,
+        <> core_wasm_path,
       )
   })
 
@@ -257,7 +269,7 @@ pub fn bundle_component(
     _ ->
       Error(
         "Built core Wasm module at "
-        <> summary.core_wasm_path
+        <> core_wasm_path
         <> ", but `wasm-tools` is not installed to package it into a Wasm component.\n"
         <> "Install with: cargo install wasm-tools",
       )
@@ -270,7 +282,7 @@ pub fn bundle_component(
     "--encoding",
     "utf16",
     summary.wit_dir,
-    summary.core_wasm_path,
+    core_wasm_path,
     "-o",
     embedded_wasm,
   ]
@@ -339,11 +351,27 @@ fn emit_iface_import_adapter(
       #([code, ..fn_acc], next_st)
     })
 
-  let #(rev_helpers, final_state) = drain_pending_helpers(state1, [])
+  let #(rev_res_blocks, state2) =
+    list.fold(iface.types, #(rev_fns, state1), fn(acc, td) {
+      case td {
+        WitResource(name:, methods:) ->
+          emit_resource_import_wrappers(
+            name,
+            methods,
+            self_key,
+            use_map,
+            acc.0,
+            acc.1,
+          )
+        _ -> acc
+      }
+    })
+
+  let #(rev_helpers, final_state) = drain_pending_helpers(state2, [])
   let mbt_src =
     "// Generated by gekko wit bridge.\n\n"
     <> string.join(
-      list.append(list.reverse(rev_helpers), list.reverse(rev_fns)),
+      list.append(list.reverse(rev_helpers), list.reverse(rev_res_blocks)),
       "\n\n",
     )
     <> "\n"
@@ -352,6 +380,80 @@ fn emit_iface_import_adapter(
   let dir = filepath.join(out_dir, adapter_pkg)
   use _ <- result.try(write_file(filepath.join(dir, "moon.pkg"), moon_pkg))
   write_file(filepath.join(dir, adapter_pkg <> ".mbt"), mbt_src)
+}
+
+fn emit_resource_import_wrappers(
+  res_name: String,
+  methods: List(ast.WitResourceMethod),
+  owner_key: String,
+  use_map: Dict(String, #(String, String)),
+  rev_blocks: List(String),
+  state: AdapterState,
+) -> #(List(String), AdapterState) {
+  let ty_name = gleam_type_name(res_name)
+  let res_snake = kebab_to_snake(res_name)
+  let type_alias = "///|\npub type " <> ty_name <> " = @wit_raw." <> ty_name
+  let rev_with_type = [type_alias, ..rev_blocks]
+
+  let #(rev_after_methods, st1) =
+    list.fold(methods, #(rev_with_type, state), fn(acc, m) {
+      let #(blk_acc, st) = acc
+      let #(fake_func, raw_prefix) = case m.kind {
+        ResourceConstructor -> #(
+          ast.WitFunc(
+            name: "new-" <> res_name,
+            params: m.params,
+            result: Some(WitNamed(res_name)),
+          ),
+          "@wit_raw." <> ty_name <> "::",
+        )
+        ResourceMethod -> #(
+          ast.WitFunc(
+            name: res_snake <> "-" <> m.name,
+            params: [#("self", WitNamed(res_name)), ..m.params],
+            result: m.result,
+          ),
+          "@wit_raw." <> ty_name <> "::",
+        )
+        ResourceStatic -> #(
+          ast.WitFunc(
+            name: res_snake <> "-" <> m.name,
+            params: m.params,
+            result: m.result,
+          ),
+          "@wit_raw." <> ty_name <> "::",
+        )
+      }
+      let raw_target_name = case m.kind {
+        ResourceConstructor -> mangle.mangle_ident(kebab_to_snake(res_name))
+        _ -> mangle.mangle_ident(kebab_to_snake(m.name))
+      }
+      let #(code, next_st) =
+        emit_import_wrapper_with_target(
+          fake_func,
+          raw_prefix <> raw_target_name,
+          owner_key,
+          use_map,
+          st,
+        )
+      #([code, ..blk_acc], next_st)
+    })
+
+  let drop_func =
+    ast.WitFunc(
+      name: "drop-" <> res_name,
+      params: [#("self", WitNamed(res_name))],
+      result: None,
+    )
+  let #(drop_code, st2) =
+    emit_import_wrapper_with_target(
+      drop_func,
+      "@wit_raw." <> ty_name <> "::drop",
+      owner_key,
+      use_map,
+      st1,
+    )
+  #([drop_code, ..rev_after_methods], st2)
 }
 
 fn emit_world_import_adapter(
@@ -416,8 +518,24 @@ fn emit_import_wrapper_fn(
   raw_call_prefix: String,
   state: AdapterState,
 ) -> #(String, AdapterState) {
-  let fn_ident = mangle.mangle_ident(gleam_value_ident(f.name))
   let wit_fn_name = mangle.mangle_ident(kebab_to_snake(f.name))
+  emit_import_wrapper_with_target(
+    f,
+    raw_call_prefix <> wit_fn_name,
+    owner_key,
+    use_map,
+    state,
+  )
+}
+
+fn emit_import_wrapper_with_target(
+  f: WitFunc,
+  raw_callee: String,
+  owner_key: String,
+  use_map: Dict(String, #(String, String)),
+  state: AdapterState,
+) -> #(String, AdapterState) {
+  let fn_ident = mangle.mangle_ident(gleam_value_ident(f.name))
 
   let #(rev_params, rev_args, st1) =
     list.fold(f.params, #([], [], state), fn(acc, param) {
@@ -433,21 +551,13 @@ fn emit_import_wrapper_fn(
   let #(ret_ty, call_wrapped, st2) = case f.result {
     None -> {
       let call =
-        raw_call_prefix
-        <> wit_fn_name
-        <> "("
-        <> string.join(list.reverse(rev_args), ", ")
-        <> ")"
+        raw_callee <> "(" <> string.join(list.reverse(rev_args), ", ") <> ")"
       #("Unit", call, st1)
     }
     Some(rty) -> {
       let #(g_rty, st_r) = gleam_mbt_type(rty, owner_key, use_map, st1)
       let call =
-        raw_call_prefix
-        <> wit_fn_name
-        <> "("
-        <> string.join(list.reverse(rev_args), ", ")
-        <> ")"
+        raw_callee <> "(" <> string.join(list.reverse(rev_args), ", ") <> ")"
       let #(wrapped, st_w) = conv_w2g_expr(rty, owner_key, use_map, call, st_r)
       #(g_rty, wrapped, st_w)
     }
@@ -705,7 +815,8 @@ fn type_def_name(td: WitTypeDef) -> String {
     | WitEnum(name:, ..)
     | WitVariant(name:, ..)
     | WitFlags(name:, ..)
-    | WitAlias(name:, ..) -> name
+    | WitAlias(name:, ..)
+    | WitResource(name:, ..) -> name
   }
 }
 
@@ -754,7 +865,7 @@ fn wit_mbt_type(
         })
       #("(" <> string.join(list.reverse(rev_els), ", ") <> ")", st1)
     }
-    WitNamed(wit_name) ->
+    WitOwn(wit_name) | WitBorrow(wit_name) | WitNamed(wit_name) ->
       case resolve_named_type(wit_name, owner_key, use_map, state.resolved) {
         Some(UnfoldedAlias(target:, source_iface_key:)) ->
           wit_mbt_type(
@@ -814,7 +925,7 @@ fn gleam_mbt_type(
         })
       #("(" <> string.join(list.reverse(rev_els), ", ") <> ")", st1)
     }
-    WitNamed(wit_name) ->
+    WitOwn(wit_name) | WitBorrow(wit_name) | WitNamed(wit_name) ->
       case resolve_named_type(wit_name, owner_key, use_map, state.resolved) {
         Some(UnfoldedAlias(target:, source_iface_key:)) ->
           gleam_mbt_type(
@@ -823,6 +934,15 @@ fn gleam_mbt_type(
             iface_use_map(source_iface_key, state.resolved),
             state,
           )
+        Some(ConcreteDef(
+          iface_key: key,
+          iface:,
+          wit_type_name:,
+          def: WitResource(..),
+        )) -> {
+          let #(prefix, st1) = ensure_raw_prefix(state, key, iface)
+          #(prefix <> gleam_type_name(wit_type_name), st1)
+        }
         Some(ConcreteDef(iface:, wit_type_name:, ..)) -> {
           let #(prefix, st1) = ensure_gtypes_prefix(state, iface)
           let gtype = mangle.mangle_type_name(gleam_type_name(wit_type_name))
@@ -936,7 +1056,7 @@ fn conv_w2g_expr(
         st2,
       )
     }
-    WitNamed(wit_name) ->
+    WitOwn(wit_name) | WitBorrow(wit_name) | WitNamed(wit_name) ->
       case resolve_named_type(wit_name, owner_key, use_map, state.resolved) {
         Some(UnfoldedAlias(target:, source_iface_key:)) ->
           conv_w2g_expr(
@@ -946,6 +1066,7 @@ fn conv_w2g_expr(
             expr,
             state,
           )
+        Some(ConcreteDef(def: WitResource(..), ..)) -> #(expr, state)
         Some(ConcreteDef(iface_key: key, iface:, wit_type_name:, def:)) -> {
           let #(fn_name, st1) =
             enqueue_helper(state, W2G, key, iface, wit_type_name, def)
@@ -1078,7 +1199,7 @@ fn conv_g2w_expr(
         st2,
       )
     }
-    WitNamed(wit_name) ->
+    WitOwn(wit_name) | WitBorrow(wit_name) | WitNamed(wit_name) ->
       case resolve_named_type(wit_name, owner_key, use_map, state.resolved) {
         Some(UnfoldedAlias(target:, source_iface_key:)) ->
           conv_g2w_expr(
@@ -1088,6 +1209,7 @@ fn conv_g2w_expr(
             expr,
             state,
           )
+        Some(ConcreteDef(def: WitResource(..), ..)) -> #(expr, state)
         Some(ConcreteDef(iface_key: key, iface:, wit_type_name:, def:)) -> {
           let #(fn_name, st1) =
             enqueue_helper(state, G2W, key, iface, wit_type_name, def)
@@ -1421,7 +1543,10 @@ fn render_helper(
       )
     }
 
-    _, WitAlias(..) -> #("// unused alias helper", st2)
+    _, WitAlias(..) | _, WitResource(..) -> #(
+      "// unused alias or resource helper",
+      st2,
+    )
   }
 }
 
@@ -1601,18 +1726,23 @@ fn render_moon_pkg(
 }
 
 fn write_file(path: String, contents: String) -> Result(Nil, String) {
-  let dir = filepath.directory_name(path)
-  use _ <- result.try(
-    simplifile.create_directory_all(dir)
-    |> result.map_error(fn(err) {
-      "Failed to create directory '"
-      <> dir
-      <> "': "
-      <> simplifile.describe_error(err)
-    }),
-  )
-  simplifile.write(to: path, contents:)
-  |> result.map_error(fn(err) {
-    "Failed to write '" <> path <> "': " <> simplifile.describe_error(err)
-  })
+  case simplifile.read(from: path) {
+    Ok(existing) if existing == contents -> Ok(Nil)
+    _ -> {
+      let dir = filepath.directory_name(path)
+      use _ <- result.try(
+        simplifile.create_directory_all(dir)
+        |> result.map_error(fn(err) {
+          "Failed to create directory '"
+          <> dir
+          <> "': "
+          <> simplifile.describe_error(err)
+        }),
+      )
+      simplifile.write(to: path, contents:)
+      |> result.map_error(fn(err) {
+        "Failed to write '" <> path <> "': " <> simplifile.describe_error(err)
+      })
+    }
+  }
 }

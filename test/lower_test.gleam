@@ -13,6 +13,7 @@ import lower/mangle
 import lower/pattern
 import lower/tco
 import lower/validate
+import project/cmd
 import project/prepass
 import project/workspace
 import simplifile
@@ -1116,11 +1117,20 @@ pub fn workspace_module_pkg_dir_collision_test() {
       contents: "pub fn b() -> Int { 2 }\n",
     )
     == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/pkg_dir_collision.gleam"),
+      contents: "import foo/bar\nimport foo_bar\npub fn total() -> Int { bar.a() + foo_bar.b() }\n",
+    )
+    == Ok(Nil)
 
-  let assert Error(err) = workspace.transpile_project(root, out_dir)
-  assert string.contains(err, "collision")
-  assert string.contains(err, "foo/bar")
-  assert string.contains(err, "foo_bar")
+  let assert Ok(summary) = workspace.transpile_project(root, out_dir)
+  let assert Ok(dir_nested) = dict.get(summary.module_pkg_dirs, "foo/bar")
+  let assert Ok(dir_flat) = dict.get(summary.module_pkg_dirs, "foo_bar")
+  assert dir_flat == "foo_bar"
+  assert dir_nested != dir_flat
+  let check_res =
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+  assert check_res.exit_code == 0
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)

@@ -4,22 +4,16 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 
 ---
 
-## Phase 1: Project Scaffold, Shadow `pub` Interface Extractor, Pre-Pass & Symbol Indexer
+## Phase 1: Project Scaffold, Shadow `pub` Interface Extractor, Pre-Pass & Symbol Indexer *(Completed)*
 
 **Goal:** Parse any multi-module Gleam project (including FFI pragmas and private functions) and construct a complete, type-resolved Global Symbol Table.
 
 ### Deliverables
-- Initialize the `gekko` Gleam package (`gleam.toml` with `glance`, `simplifile`, `filepath`, `tom`, `gleam_json`, `argv`, and `gleeunit`).
-- **`src/project/prepass.gleam`**:
-  - Extract `/// @external(moonbit, "pkg", "fn")` doc-comment pragmas.
-  - Scan and strip raw `@external(moonbit, "pkg", "fn")` attributes in-memory (preserving line numbers and injecting `{ panic }` for bodyless signatures) before passing to `glance.module()`.
-- **`src/project/ffi_config.gleam`**:
-  - Parse `gekko.toml` and `[tools.gekko.overrides]` in `gleam.toml`.
-- **`src/project/staging.gleam` & `src/project/interface.gleam`**:
-  - Stage source copies in `build/gekko/staging/` promoting private `fn`, `type`, and `opaque type` declarations to `pub`.
-  - Invoke `gleam export package-interface` and decode the JSON into resolved parameter types, return types, custom types, and type aliases for both public and private declarations.
-- **`src/index/symbol_table.gleam`**:
-  - Index all modules, import aliases, custom type variants, field names/types, shared fields across variants, transitive `has_function_field` flags, function arities, and labeled argument ordering.
+- [x] Initialize the `gekko` Gleam package (`gleam.toml` with `glance`, `simplifile`, `filepath`, `tom`, `gleam_json`, `argv`, and `gleeunit`).
+- [x] **`src/project/prepass.gleam`**: Extract `/// @external(moonbit, ...)` / `/// @external_type(moonbit, ...)` pragmas and strip raw attributes while preserving line numbers.
+- [x] **`src/project/ffi_config.gleam`**: Parse `gekko.toml`, `[tools.gekko.overrides]` in `gleam.toml`, and `moonbit/moon.mod`.
+- [x] **`src/project/staging.gleam` & `src/project/interface.gleam`**: Stage shadow copies promoting private declarations to `pub` (cached by SHA-256 fingerprint) and decode `gleam export package-interface`.
+- [x] **`src/index/symbol_table.gleam`**: Index modules, import aliases, custom type variants, shared fields, `has_function_field` flags, function arities, and labeled argument ordering.
 
 ### Verification Gate
 - `gleam test` passes unit tests verifying FFI pragma extraction, shadow `pub` staging + `package-interface` decoding, and symbol indexing on multi-module Gleam fixtures with private functions, labeled arguments, and shared-field custom types.
@@ -71,20 +65,14 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 
 ---
 
-## Phase 4: Hex Dependency Loader & FFI-Backed `gleam_stdlib` + `gleam_json` Support
+## Phase 4: Hex Dependency Loader & FFI-Backed `gleam_stdlib` + `gleam_json` Support *(Completed)*
 
 **Goal:** Support real-world Gleam projects using Hex dependencies, `gleam_stdlib`, and `gleam_json`.
 
 ### Deliverables
-- **`src/project/loader.gleam`**:
-  - Parse `manifest.toml` and `build/packages/*/gleam.toml` in topological order.
-  - Transpile pure-Gleam Hex dependencies and emit deterministic `src/deps/<pkg>/...` MoonBit packages.
-  - Route missing Erlang/JS external leaf functions through the built-in FFI shim registry and `gekko.toml` overrides, failing fast with exact `package:module.function` errors when unmapped.
-- **`runtime/gleam_stdlib_ffi/`**:
-  - Implement MoonBit FFI backing primitives for `gleam_stdlib` leaf externals (`gleam/string`, `gleam/int`, `gleam/float`, `gleam/dict`, `gleam/bit_array`, `gleam/dynamic/decode`, `gleam/io`, `gleam/list` hot-path helpers, `gleam/regex` where applicable).
-  - Transpile the actual `.gleam` sources of `gleam_stdlib` against these FFI primitives.
-- **`runtime/gleam_json_ffi/`**:
-  - Implement the ~12 MoonBit FFI backing primitives for `gleam_json` delegating to `moonbitlang/core/json` (`@json.Json`, `@json.parse`, `stringify`), and transpile `gleam_json`'s `.gleam` source directly.
+- [x] **`src/project/loader.gleam`**: Parse `manifest.toml` and `build/packages/*/gleam.toml` in topological order, transpile pure-Gleam Hex dependencies, and fail fast with `package:module.function` + `file:line:col` errors when externals are unmapped.
+- [x] **MoonBit-enabled `gleam_stdlib` (`gekko_gleam_stdlib`):** Transpiled directly from Gleam sources with bundled `moonbit/` leaf FFI packages (`gleam/string`, `gleam/int`, `gleam/float`, `gleam/dict`, `gleam/bit_array`, `gleam/dynamic/decode`, `gleam/io`, `gleam/list`, etc.).
+- [x] **MoonBit-enabled `gleam_json` (`gekko_gleam_json`):** Transpiled directly from Gleam sources with bundled `moonbit/` leaf FFI backed by `moonbitlang/core/json`.
 
 ### Verification Gate
 - Transpile non-trivial Gleam projects importing `gleam_stdlib`, `gleam_json`, and pure-Gleam third-party Hex packages.
@@ -92,33 +80,29 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 
 ---
 
-## Phase 5: Wasm Component Model (WIT / WASI Preview 2) & CLI Packaging
+## Phase 5: Wasm Component Model (WIT / WASI Preview 2) & CLI Packaging *(Completed)*
 
 **Goal:** Compile Gleam programs implementing WIT interfaces into standalone Wasm Components.
 
 ### Deliverables
-- **`src/emit/wit_bridge.gleam`**:
-  - Detect `wit/` or `--wit <dir>` and invoke `wit-bindgen moonbit <wit_dir> --out-dir build/moonbit --derive-debug --derive-eq`.
-  - Parse generated export signatures in `build/moonbit/gen/world/<world>/stub.mbt`.
-  - Generate boundary type adapters (`Array[T]` $\leftrightarrow$ `@prelude.GList[T]`, `Result`, `Option`, `Bytes` $\leftrightarrow$ `BitArray`) and wire WIT export stubs to transpiled Gleam module functions.
-- **Component Bundling CLI (`src/gekko.gleam`)**:
-  - Implement `gekko build --wit ./wit --component dist/app.wasm` orchestrating `moon build --target wasm`, `wasm-tools component embed`, and `wasm-tools component new`.
-  - Provide clean error messages when external host tools (`wit-bindgen`, `wasm-tools`, `moon`) are missing or fail.
+- [x] **`src/wit/` & `src/emit/wit_bridge.gleam`**: Built-in WIT parser (including `include` and imported `resource` / `own<T>` / `borrow<T>`), `gekko wit gen` Gleam bindings, `wit-bindgen moonbit` orchestration, boundary type adapters, and `gekko wit check` / `gekko wit build [--release]`.
+- [x] **CLI Packaging (`src/gekko.gleam`):** Complete CLI covering `new`, `init`, `clean`, `doctor`, `check`, `build [--release]`, `test`, `run -- <args>`, `moonbit bind`, and `wit gen|check|build`.
 
 ### Verification Gate
-- Compile a Gleam application importing and exporting WIT interfaces (including records, lists, results, and strings) into `dist/app.wasm`, validate with `wasm-tools component wit dist/app.wasm`, and execute via a WASI Preview 2 host (e.g., `wasmtime`).
+- Compile a Gleam application importing and exporting WIT interfaces (including records, lists, results, strings, and imported resources) into `dist/<world>.wasm`, validate with `wasm-tools component wit`, and execute via `wasmtime`.
 
 ---
 
-## Phase 6: Ecosystem Hardening, BitArray Tier 2, Diagnostics & v1.0
+## Phase 6: Ecosystem Hardening, BitArray Tier 2, Diagnostics & v1.0 *(In Progress)*
 
 **Goal:** Close long-tail Gleam language edge cases and polish developer ergonomics for v1.0.
 
 ### Deliverables
-- **BitArray Tier 2 (Implemented):** Support arbitrary non-byte-aligned bit-level packing, `size(n)` expressions, signed/unsigned/endianness/float/UTF segments, and bit-level pattern matching in `gprelude.BitArray`.
-- **Mutual Tail Recursion & Optimization:** Add optional flags/diagnostics for mutually recursive functions on linear `wasm` vs `wasm-gc`.
-- **Source-Mapped Error Reporting:** Format transpiler errors (unmapped externals, unsupported constructs) with exact original `.gleam` file paths, line numbers, and actionable `gekko.toml` hints.
-- **Additional Popular Hex FFI Packs & Golden Suite:** Expand golden test matrix across real-world Gleam libraries and edge cases (nested generics, shadowed variables, opaque types, constant blocks, bit-syntax protocols).
+- [x] **BitArray Tier 2:** Support arbitrary non-byte-aligned bit-level packing, `size(n)` expressions, signed/unsigned/endianness/float/UTF segments, and bit-level pattern matching in `gprelude.BitArray`.
+- [x] **Source-Mapped Diagnostics:** Emit `.gekko_sourcemap` and annotate `moon` compiler errors with originating `.gleam` file/line hints, plus `file:line:col` range and unmapped-external diagnostics.
+- [x] **Collision-Free Package Mapping & Incremental Builds:** Deterministic `resolve_module_pkg_dirs` disambiguation, write-if-changed emission, and parallel dependency interface extraction.
+- [ ] **Mutual Tail Recursion & Exported WIT Resources:** Lower mutually recursive tail calls on linear `wasm` / `js` / `native` and support exporting WIT `resource` handles.
+- [ ] **Upstream Hex FFI Overlay Packs:** Allow transpiling unmodified upstream Hex `gleam_stdlib` / `gleam_json` without Git overrides.
 
 ### Verification Gate
 - Comprehensive golden test suite passes cleanly across `wasm-gc`, `wasm`, `js`, `native`, and Wasm Component targets with zero `moon check` warnings.

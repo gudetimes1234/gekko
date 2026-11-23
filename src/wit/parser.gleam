@@ -4,18 +4,21 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
 import simplifile
 import wit/ast.{
   type ResolvedWit, type WitDocument, type WitFunc, type WitIfaceRef,
-  type WitInterface, type WitPackageId, type WitType, type WitTypeDef,
-  type WitUse, type WitWorld, type WitWorldItem, LocalIface, PkgIface,
-  ResolvedWit, WitAlias, WitBool, WitChar, WitDocument, WitEnum, WitF32, WitF64,
-  WitFlags, WitFunc, WitInterface, WitList, WitNamed, WitOption, WitPackageId,
-  WitRecord, WitResult, WitS16, WitS32, WitS64, WitS8, WitString, WitTuple,
-  WitU16, WitU32, WitU64, WitU8, WitUse, WitVariant, WitWorld, WorldExportFunc,
-  WorldExportIface, WorldImportFunc, WorldImportIface, WorldUse, iface_key,
-  resolve_iface_ref,
+  type WitInterface, type WitPackageId, type WitResourceMethod, type WitType,
+  type WitTypeDef, type WitUse, type WitWorld, type WitWorldItem, LocalIface,
+  PkgIface, ResolvedWit, ResourceConstructor, ResourceMethod, ResourceStatic,
+  WitAlias, WitBool, WitBorrow, WitChar, WitDocument, WitEnum, WitF32, WitF64,
+  WitFlags, WitFunc, WitInterface, WitList, WitNamed, WitOption, WitOwn,
+  WitPackageId, WitRecord, WitResource, WitResourceMethod, WitResult, WitS16,
+  WitS32, WitS64, WitS8, WitString, WitTuple, WitU16, WitU32, WitU64, WitU8,
+  WitUse, WitVariant, WitWorld, WorldExportFunc, WorldExportIface,
+  WorldImportFunc, WorldImportIface, WorldInclude, WorldUse, iface_key,
+  iface_versioned_key, lookup_interface, resolve_iface_key_in,
 }
 
 type WitToken {
@@ -107,19 +110,20 @@ pub fn load_wit_dir(
           use dep_blocks <- result.try(parse_files_blocks(dep_files))
 
           let all_blocks = list.append(filled_root_blocks, dep_blocks)
-          let interfaces =
-            list.fold(all_blocks, dict.new(), fn(acc, blk) {
-              list.fold(blk.interfaces, acc, fn(inner, iface) {
-                dict.insert(inner, iface_key(iface.pkg, iface.name), iface)
-              })
-            })
+          let interfaces = build_interface_index(all_blocks)
+          let all_worlds = list.flat_map(all_blocks, fn(b) { b.worlds })
 
           let root_worlds =
             list.flat_map(filled_root_blocks, fn(b) { b.worlds })
-          use selected_world <- result.try(select_world(
+          use raw_world <- result.try(select_world(
             root_worlds,
             world_name,
             wit_dir,
+          ))
+          use selected_world <- result.try(expand_world_includes(
+            raw_world,
+            all_worlds,
+            set.new(),
           ))
           use _ <- result.try(validate_resolved(
             root_pkg,
@@ -275,6 +279,132 @@ fn select_world(
   }
 }
 
+fn build_interface_index(
+  blocks: List(PackageBlock),
+) -> Dict(String, WitInterface) {
+  let all_ifaces = list.flat_map(blocks, fn(b) { b.interfaces })
+  let by_unversioned =
+    list.fold(all_ifaces, dict.new(), fn(acc, iface) {
+      let base = iface_key(iface.pkg, iface.name)
+      let prev = dict.get(acc, base) |> result.unwrap([])
+      dict.insert(acc, base, [iface, ..prev])
+    })
+  list.fold(all_ifaces, dict.new(), fn(acc, iface) {
+    let vkey = iface_versioned_key(iface.pkg, iface.name)
+    let base = iface_key(iface.pkg, iface.name)
+    let acc1 = dict.insert(acc, vkey, iface)
+    case dict.get(by_unversioned, base) {
+      Ok([_]) -> dict.insert(acc1, base, iface)
+      _ -> acc1
+    }
+  })
+}
+
+fn expand_world_includes(
+  world: WitWorld,
+  all_worlds: List(WitWorld),
+  visiting: Set(String),
+) -> Result(WitWorld, String) {
+  let wkey = iface_versioned_key(world.pkg, world.name)
+  case set.contains(visiting, wkey) {
+    True -> Error("Cyclic WIT world `include` involving '" <> wkey <> "'")
+    False -> {
+      let next_visiting = set.insert(visiting, wkey)
+      use expanded_items <- result.try(
+        list.try_fold(world.items, [], fn(acc, item) {
+          case item {
+            WorldInclude(target:, with_renames:) -> {
+              use inc_world <- result.try(find_world_for_ref(
+                world.pkg,
+                target,
+                all_worlds,
+              ))
+              use expanded_inc <- result.try(expand_world_includes(
+                inc_world,
+                all_worlds,
+                next_visiting,
+              ))
+              let rebased =
+                list.map(expanded_inc.items, fn(sub_item) {
+                  rebase_included_world_item(
+                    sub_item,
+                    expanded_inc.pkg,
+                    with_renames,
+                  )
+                })
+              Ok(list.append(list.reverse(rebased), acc))
+            }
+            _ -> Ok([item, ..acc])
+          }
+        }),
+      )
+      Ok(WitWorld(..world, items: list.reverse(expanded_items)))
+    }
+  }
+}
+
+fn find_world_for_ref(
+  default_pkg: WitPackageId,
+  ref: WitIfaceRef,
+  all_worlds: List(WitWorld),
+) -> Result(WitWorld, String) {
+  let matched = case ref {
+    LocalIface(name) ->
+      list.find(all_worlds, fn(w) {
+        w.pkg.namespace == default_pkg.namespace
+        && w.pkg.name == default_pkg.name
+        && w.name == name
+      })
+    PkgIface(pkg, name) ->
+      list.find(all_worlds, fn(w) {
+        w.pkg.namespace == pkg.namespace
+        && w.pkg.name == pkg.name
+        && w.name == name
+        && case pkg.version {
+          None -> True
+          Some(v) -> w.pkg.version == Some(v)
+        }
+      })
+  }
+  case matched {
+    Ok(w) -> Ok(w)
+    Error(_) ->
+      Error(
+        "Unknown WIT world '"
+        <> ast.resolve_iface_ref(default_pkg, ref)
+        <> "' referenced by `include`",
+      )
+  }
+}
+
+fn rebase_included_world_item(
+  item: WitWorldItem,
+  inc_pkg: WitPackageId,
+  with_renames: List(#(String, String)),
+) -> WitWorldItem {
+  let rebase_ref = fn(r: WitIfaceRef) {
+    case r {
+      LocalIface(n) -> PkgIface(inc_pkg, n)
+      PkgIface(_, _) -> r
+    }
+  }
+  let rename_fn = fn(f: WitFunc) {
+    case list.key_find(with_renames, f.name) {
+      Ok(new_name) -> WitFunc(..f, name: new_name)
+      Error(_) -> f
+    }
+  }
+  case item {
+    WorldImportIface(r) -> WorldImportIface(rebase_ref(r))
+    WorldExportIface(r) -> WorldExportIface(rebase_ref(r))
+    WorldImportFunc(f) -> WorldImportFunc(rename_fn(f))
+    WorldExportFunc(f) -> WorldExportFunc(rename_fn(f))
+    WorldUse(u) -> WorldUse(WitUse(..u, target: rebase_ref(u.target)))
+    WorldInclude(target:, with_renames:) ->
+      WorldInclude(target: rebase_ref(target), with_renames:)
+  }
+}
+
 fn validate_resolved(
   root_pkg: WitPackageId,
   world: WitWorld,
@@ -283,14 +413,43 @@ fn validate_resolved(
   use _ <- result.try(
     list.try_each(world.items, fn(item) {
       case item {
-        WorldImportIface(ref) | WorldExportIface(ref) -> {
-          let key = resolve_iface_ref(root_pkg, ref)
-          case dict.get(interfaces, key) {
+        WorldImportIface(ref) -> {
+          case lookup_interface(interfaces, root_pkg, ref) {
             Ok(_) -> Ok(Nil)
             Error(_) ->
               Error(
                 "Unknown WIT interface '"
-                <> key
+                <> resolve_iface_key_in(interfaces, root_pkg, ref)
+                <> "' referenced in world '"
+                <> world.name
+                <> "'",
+              )
+          }
+        }
+        WorldExportIface(ref) -> {
+          case lookup_interface(interfaces, root_pkg, ref) {
+            Ok(iface) -> {
+              let has_resource =
+                list.any(iface.types, fn(td) {
+                  case td {
+                    WitResource(..) -> True
+                    _ -> False
+                  }
+                })
+              case has_resource {
+                True ->
+                  Error(
+                    "Exported WIT resource in interface '"
+                    <> iface.name
+                    <> "' is not supported yet (imported resources are supported)",
+                  )
+                False -> Ok(Nil)
+              }
+            }
+            Error(_) ->
+              Error(
+                "Unknown WIT interface '"
+                <> resolve_iface_key_in(interfaces, root_pkg, ref)
                 <> "' referenced in world '"
                 <> world.name
                 <> "'",
@@ -298,20 +457,19 @@ fn validate_resolved(
           }
         }
         WorldUse(u) -> {
-          let key = resolve_iface_ref(root_pkg, u.target)
-          case dict.get(interfaces, key) {
+          case lookup_interface(interfaces, root_pkg, u.target) {
             Ok(_) -> Ok(Nil)
             Error(_) ->
               Error(
                 "Unknown WIT interface '"
-                <> key
+                <> resolve_iface_key_in(interfaces, root_pkg, u.target)
                 <> "' in world `use` of '"
                 <> world.name
                 <> "'",
               )
           }
         }
-        WorldImportFunc(_) | WorldExportFunc(_) -> Ok(Nil)
+        WorldImportFunc(_) | WorldExportFunc(_) | WorldInclude(_, _) -> Ok(Nil)
       }
     }),
   )
@@ -319,13 +477,12 @@ fn validate_resolved(
   |> list.try_each(fn(entry) {
     let #(_, iface) = entry
     list.try_each(iface.uses, fn(u) {
-      let key = resolve_iface_ref(iface.pkg, u.target)
-      case dict.get(interfaces, key) {
+      case lookup_interface(interfaces, iface.pkg, u.target) {
         Ok(_) -> Ok(Nil)
         Error(_) ->
           Error(
             "Unknown WIT interface '"
-            <> key
+            <> resolve_iface_key_in(interfaces, iface.pkg, u.target)
             <> "' referenced by `use` in interface '"
             <> iface.name
             <> "'",
@@ -792,14 +949,27 @@ fn parse_iface_items(
       }
     }
 
-    [Ident("resource"), Ident(name), ..] ->
-      Error(
-        "WIT resource '"
-        <> name
-        <> "' in interface '"
-        <> iface_name
-        <> "' is not supported yet",
+    [Ident("resource"), Ident(name), Semi, ..tail] ->
+      parse_iface_items(
+        tail,
+        pkg,
+        iface_name,
+        uses,
+        [WitResource(name:, methods: []), ..types],
+        funcs,
       )
+
+    [Ident("resource"), Ident(name), LBrace, ..rest] -> {
+      use #(methods, tail) <- result.try(parse_resource_methods(rest, name, []))
+      parse_iface_items(
+        tail,
+        pkg,
+        iface_name,
+        uses,
+        [WitResource(name:, methods:), ..types],
+        funcs,
+      )
+    }
 
     [Ident(fn_name), Colon, Ident("func"), LParen, ..rest] -> {
       use #(f, tail) <- result.try(parse_func_sig(fn_name, rest))
@@ -815,6 +985,67 @@ fn parse_iface_items(
       )
 
     [] -> Error("Unterminated interface '" <> iface_name <> "'")
+  }
+}
+
+fn parse_resource_methods(
+  tokens: List(WitToken),
+  resource_name: String,
+  rev_acc: List(WitResourceMethod),
+) -> Result(#(List(WitResourceMethod), List(WitToken)), String) {
+  case tokens {
+    [RBrace, ..rest] -> Ok(#(list.reverse(rev_acc), rest))
+    [Ident("constructor"), LParen, ..rest] -> {
+      use #(params, after_rparen) <- result.try(parse_func_params(rest, []))
+      case after_rparen {
+        [Semi, ..tail] -> {
+          let m =
+            WitResourceMethod(
+              name: "constructor",
+              kind: ResourceConstructor,
+              params:,
+              result: None,
+            )
+          parse_resource_methods(tail, resource_name, [m, ..rev_acc])
+        }
+        _ ->
+          Error(
+            "Expected `;` after constructor of resource '"
+            <> resource_name
+            <> "'",
+          )
+      }
+    }
+    [Ident(m_name), Colon, Ident("static"), Ident("func"), LParen, ..rest] -> {
+      use #(f, tail) <- result.try(parse_func_sig(m_name, rest))
+      let m =
+        WitResourceMethod(
+          name: f.name,
+          kind: ResourceStatic,
+          params: f.params,
+          result: f.result,
+        )
+      parse_resource_methods(tail, resource_name, [m, ..rev_acc])
+    }
+    [Ident(m_name), Colon, Ident("func"), LParen, ..rest] -> {
+      use #(f, tail) <- result.try(parse_func_sig(m_name, rest))
+      let m =
+        WitResourceMethod(
+          name: f.name,
+          kind: ResourceMethod,
+          params: f.params,
+          result: f.result,
+        )
+      parse_resource_methods(tail, resource_name, [m, ..rev_acc])
+    }
+    [tok, ..] ->
+      Error(
+        "Unexpected token in resource '"
+        <> resource_name
+        <> "': "
+        <> token_label(tok),
+      )
+    [] -> Error("Unterminated resource '" <> resource_name <> "'")
   }
 }
 
@@ -954,6 +1185,12 @@ fn parse_type(
       }
     }
 
+    [Ident("own"), LAngle, Ident(res_name), RAngle, ..tail] ->
+      Ok(#(WitOwn(res_name), tail))
+
+    [Ident("borrow"), LAngle, Ident(res_name), RAngle, ..tail] ->
+      Ok(#(WitBorrow(res_name), tail))
+
     [Ident("tuple"), LAngle, ..rest] -> {
       use #(els, tail) <- result.try(parse_tuple_types(rest, []))
       Ok(#(WitTuple(els), tail))
@@ -1033,12 +1270,49 @@ fn parse_world_items(
       parse_world_items(tail, pkg, world_name, [item, ..items])
     }
 
+    [Ident("include"), ..rest] -> {
+      use #(item, tail) <- result.try(parse_world_include(rest))
+      parse_world_items(tail, pkg, world_name, [item, ..items])
+    }
+
     [tok, ..] ->
       Error(
         "Unexpected token in world '" <> world_name <> "': " <> token_label(tok),
       )
 
     [] -> Error("Unterminated world '" <> world_name <> "'")
+  }
+}
+
+fn parse_world_include(
+  tokens: List(WitToken),
+) -> Result(#(WitWorldItem, List(WitToken)), String) {
+  use #(target, after_ref) <- result.try(parse_interface_ref(tokens))
+  case after_ref {
+    [Semi, ..tail] -> Ok(#(WorldInclude(target:, with_renames: []), tail))
+    [Ident("with"), LBrace, ..rest] -> {
+      use #(renames, after_renames) <- result.try(parse_include_with(rest, []))
+      case after_renames {
+        [Semi, ..tail] ->
+          Ok(#(WorldInclude(target:, with_renames: renames), tail))
+        _ -> Ok(#(WorldInclude(target:, with_renames: renames), after_renames))
+      }
+    }
+    _ -> Error("Expected `;` or `with { ... }` after `include` target")
+  }
+}
+
+fn parse_include_with(
+  tokens: List(WitToken),
+  rev_acc: List(#(String, String)),
+) -> Result(#(List(#(String, String)), List(WitToken)), String) {
+  case tokens {
+    [RBrace, ..rest] -> Ok(#(list.reverse(rev_acc), rest))
+    [Ident(from), Ident("as"), Ident(to), Comma, ..rest] ->
+      parse_include_with(rest, [#(from, to), ..rev_acc])
+    [Ident(from), Ident("as"), Ident(to), RBrace, ..rest] ->
+      Ok(#(list.reverse([#(from, to), ..rev_acc]), rest))
+    _ -> Error("Malformed `include ... with { ... }` clause")
   }
 }
 

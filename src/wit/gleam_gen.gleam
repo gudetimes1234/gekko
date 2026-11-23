@@ -9,14 +9,16 @@ import lower/mangle
 import simplifile
 import wit/ast.{
   type ResolvedWit, type WitFunc, type WitInterface, type WitPackageId,
-  type WitType, type WitTypeDef, type WitUse, WitAlias, WitBool, WitChar,
-  WitEnum, WitF32, WitF64, WitFlags, WitList, WitNamed, WitOption, WitRecord,
-  WitResult, WitS16, WitS32, WitS64, WitS8, WitString, WitTuple, WitU16, WitU32,
-  WitU64, WitU8, WitVariant, WorldExportFunc, WorldExportIface, WorldImportFunc,
-  WorldImportIface, WorldUse, gleam_export_module, gleam_import_module,
-  gleam_type_name, gleam_types_module, gleam_value_ident, gleam_variant_name,
-  gleam_world_export_module, gleam_world_import_module, moonbit_imp_adapter_pkg,
-  moonbit_world_imp_adapter_pkg, resolve_iface_ref,
+  type WitType, type WitTypeDef, type WitUse, ResourceConstructor,
+  ResourceMethod, ResourceStatic, WitAlias, WitBool, WitBorrow, WitChar, WitEnum,
+  WitF32, WitF64, WitFlags, WitList, WitNamed, WitOption, WitOwn, WitRecord,
+  WitResource, WitResult, WitS16, WitS32, WitS64, WitS8, WitString, WitTuple,
+  WitU16, WitU32, WitU64, WitU8, WitVariant, WorldExportFunc, WorldExportIface,
+  WorldImportFunc, WorldImportIface, WorldInclude, WorldUse, gleam_export_module,
+  gleam_import_module, gleam_type_name, gleam_types_module, gleam_value_ident,
+  gleam_variant_name, gleam_world_export_module, gleam_world_import_module,
+  kebab_to_snake, moonbit_imp_adapter_pkg, moonbit_world_imp_adapter_pkg,
+  resolve_iface_key_in,
 }
 
 /// Summary of files generated or skipped by `gekko wit gen`.
@@ -69,7 +71,8 @@ pub fn generate_project_bindings(
   let imported_iface_keys =
     list.filter_map(resolved.world.items, fn(item) {
       case item {
-        WorldImportIface(ref) -> Ok(resolve_iface_ref(resolved.root_pkg, ref))
+        WorldImportIface(ref) ->
+          Ok(resolve_iface_key_in(resolved.interfaces, resolved.root_pkg, ref))
         _ -> Error(Nil)
       }
     })
@@ -78,7 +81,8 @@ pub fn generate_project_bindings(
   let exported_iface_keys =
     list.filter_map(resolved.world.items, fn(item) {
       case item {
-        WorldExportIface(ref) -> Ok(resolve_iface_ref(resolved.root_pkg, ref))
+        WorldExportIface(ref) ->
+          Ok(resolve_iface_key_in(resolved.interfaces, resolved.root_pkg, ref))
         _ -> Error(Nil)
       }
     })
@@ -191,9 +195,15 @@ pub fn collect_reachable_iface_keys(resolved: ResolvedWit) -> List(String) {
     list.filter_map(resolved.world.items, fn(item) {
       case item {
         WorldImportIface(ref) | WorldExportIface(ref) ->
-          Ok(resolve_iface_ref(resolved.root_pkg, ref))
-        WorldUse(u) -> Ok(resolve_iface_ref(resolved.root_pkg, u.target))
-        WorldImportFunc(_) | WorldExportFunc(_) -> Error(Nil)
+          Ok(resolve_iface_key_in(resolved.interfaces, resolved.root_pkg, ref))
+        WorldUse(u) ->
+          Ok(resolve_iface_key_in(
+            resolved.interfaces,
+            resolved.root_pkg,
+            u.target,
+          ))
+        WorldImportFunc(_) | WorldExportFunc(_) | WorldInclude(_, _) ->
+          Error(Nil)
       }
     })
   let #(_, rev_order) =
@@ -216,7 +226,7 @@ fn visit_iface_dfs(
       let #(visited2, rev_order2) = case dict.get(interfaces, key) {
         Ok(iface) ->
           list.fold(iface.uses, #(visited1, rev_order), fn(acc, u) {
-            let dep_key = resolve_iface_ref(iface.pkg, u.target)
+            let dep_key = resolve_iface_key_in(interfaces, iface.pkg, u.target)
             visit_iface_dfs(dep_key, interfaces, acc.0, acc.1)
           })
         Error(_) -> #(visited1, rev_order)
@@ -233,7 +243,7 @@ pub fn build_use_map(
   uses: List(WitUse),
 ) -> Dict(String, #(String, String)) {
   list.fold(uses, dict.new(), fn(acc, u) {
-    let src_key = resolve_iface_ref(default_pkg, u.target)
+    let src_key = ast.resolve_iface_ref(default_pkg, u.target)
     list.fold(u.names, acc, fn(inner, entry) {
       let #(remote, alias_opt) = entry
       let local = option.unwrap(alias_opt, remote)
@@ -343,6 +353,20 @@ fn render_type_def(
         render_type_in_iface(target, Some(iface), use_map, resolved, coll)
       #("pub type " <> ty_name <> " =\n  " <> target_str, next_coll)
     }
+
+    WitResource(name:, ..) -> {
+      let ty_name = gleam_type_name(name)
+      let adapter_pkg = moonbit_imp_adapter_pkg(iface)
+      #(
+        "/// @external_type(moonbit, \""
+          <> adapter_pkg
+          <> "\", \""
+          <> ty_name
+          <> "\")\npub type "
+          <> ty_name,
+        coll,
+      )
+    }
   }
 }
 
@@ -354,7 +378,7 @@ fn render_import_module(
   let use_map = build_use_map(iface.pkg, iface.uses)
   let init_coll = ImportCollector(need_option: False, type_imports: dict.new())
 
-  let #(rev_fns, final_coll) =
+  let #(rev_fns, coll1) =
     list.fold(iface.funcs, #([], init_coll), fn(acc, f) {
       let #(fns_acc, coll) = acc
       let #(code, next_coll) =
@@ -362,9 +386,91 @@ fn render_import_module(
       #([code, ..fns_acc], next_coll)
     })
 
+  let #(rev_res_fns, final_coll) =
+    list.fold(iface.types, #(rev_fns, coll1), fn(acc, td) {
+      case td {
+        WitResource(name:, methods:) ->
+          render_resource_import_funcs(
+            name,
+            methods,
+            iface,
+            use_map,
+            resolved,
+            adapter_pkg,
+            acc.0,
+            acc.1,
+          )
+        _ -> acc
+      }
+    })
+
   let header = "// Generated by gekko wit gen — DO NOT EDIT.\n\n"
   let imports = render_imports(final_coll)
-  header <> imports <> string.join(list.reverse(rev_fns), "\n\n") <> "\n"
+  header <> imports <> string.join(list.reverse(rev_res_fns), "\n\n") <> "\n"
+}
+
+fn render_resource_import_funcs(
+  res_name: String,
+  methods: List(ast.WitResourceMethod),
+  iface: WitInterface,
+  use_map: Dict(String, #(String, String)),
+  resolved: ResolvedWit,
+  adapter_pkg: String,
+  rev_fns: List(String),
+  coll: ImportCollector,
+) -> #(List(String), ImportCollector) {
+  let res_snake = kebab_to_snake(res_name)
+  let res_type = WitNamed(res_name)
+  let #(rev_after_methods, coll1) =
+    list.fold(methods, #(rev_fns, coll), fn(acc, m) {
+      let #(fns_acc, c) = acc
+      let fake_func = case m.kind {
+        ResourceConstructor ->
+          ast.WitFunc(
+            name: "new-" <> res_name,
+            params: m.params,
+            result: Some(res_type),
+          )
+        ResourceMethod ->
+          ast.WitFunc(
+            name: res_snake <> "-" <> m.name,
+            params: [#("self", res_type), ..m.params],
+            result: m.result,
+          )
+        ResourceStatic ->
+          ast.WitFunc(
+            name: res_snake <> "-" <> m.name,
+            params: m.params,
+            result: m.result,
+          )
+      }
+      let #(code, next_c) =
+        render_import_func(
+          fake_func,
+          Some(iface),
+          use_map,
+          resolved,
+          adapter_pkg,
+          c,
+        )
+      #([code, ..fns_acc], next_c)
+    })
+  let drop_func =
+    ast.WitFunc(
+      name: "drop-" <> res_name,
+      params: [#("self", res_type)],
+      result: None,
+    )
+  let #(drop_code, coll2) =
+    render_import_func(
+      drop_func,
+      Some(iface),
+      use_map,
+      resolved,
+      adapter_pkg,
+      coll1,
+    )
+  #([drop_code, ..rev_after_methods], coll2)
 }
 
 fn render_world_import_module(
@@ -570,7 +676,7 @@ fn render_type_in_iface(
       }
       #("Result(" <> ok_s <> ", " <> err_s <> ")", c2)
     }
-    WitNamed(wit_name) ->
+    WitOwn(wit_name) | WitBorrow(wit_name) | WitNamed(wit_name) ->
       case dict.get(use_map, wit_name) {
         Ok(#(src_key, remote_name)) -> {
           let remote_type = gleam_type_name(remote_name)

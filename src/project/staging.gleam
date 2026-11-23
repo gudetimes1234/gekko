@@ -237,6 +237,24 @@ pub fn extract_project_interface_with_options(
     project_root,
     staging_dir,
     include_tests,
+    None,
+  )
+}
+
+/// Like `extract_project_interface_with_options`, reusing a precomputed hash
+/// of `build/packages` when provided.
+pub fn extract_project_interface_with_packages_hash(
+  project_root: String,
+  staging_dir: String,
+  include_tests: Bool,
+  packages_hash: Option(String),
+) -> Result(PackageInterface, String) {
+  extract_package_interface_impl(
+    project_root,
+    project_root,
+    staging_dir,
+    include_tests,
+    packages_hash,
   )
 }
 
@@ -248,8 +266,40 @@ pub fn extract_package_interface_with_deps(
   deps_root: String,
   staging_dir: String,
 ) -> Result(PackageInterface, String) {
+  extract_package_interface_with_packages_hash(
+    pkg_root,
+    deps_root,
+    staging_dir,
+    None,
+  )
+}
+
+/// Like `extract_package_interface_with_deps`, reusing a precomputed hash of
+/// `build/packages` when provided.
+pub fn extract_package_interface_with_packages_hash(
+  pkg_root: String,
+  deps_root: String,
+  staging_dir: String,
+  packages_hash: Option(String),
+) -> Result(PackageInterface, String) {
   let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
-  extract_package_interface_impl(pkg_root, deps_root, staging_dir, is_root_pkg)
+  extract_package_interface_impl(
+    pkg_root,
+    deps_root,
+    staging_dir,
+    is_root_pkg,
+    packages_hash,
+  )
+}
+
+/// Compute a deterministic SHA-256 hash of `<root_dir>/build/packages` (or `""`
+/// if the directory does not exist) so callers can share it across staging calls.
+pub fn compute_packages_dir_hash(root_dir: String) -> Result(String, String) {
+  let packages_dir = filepath.join(root_dir, filepath.join("build", "packages"))
+  case simplifile.is_directory(packages_dir) {
+    Ok(True) -> hash_packages_dir(packages_dir)
+    _ -> Ok("")
+  }
 }
 
 fn extract_package_interface_impl(
@@ -257,13 +307,19 @@ fn extract_package_interface_impl(
   deps_root: String,
   staging_dir: String,
   include_tests: Bool,
+  precomputed_packages_hash: Option(String),
 ) -> Result(PackageInterface, String) {
   let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
   let hash_path = filepath.join(staging_dir, ".gekko_iface_hash")
   let test_mods_path = filepath.join(staging_dir, ".gekko_test_mods")
   let json_path = filepath.join(staging_dir, "interface.json")
   let fingerprint_res =
-    compute_staging_fingerprint(pkg_root, deps_root, include_tests)
+    compute_staging_fingerprint(
+      pkg_root,
+      deps_root,
+      include_tests,
+      precomputed_packages_hash,
+    )
 
   let cached = case fingerprint_res {
     Ok(fingerprint) ->
@@ -353,6 +409,7 @@ fn compute_staging_fingerprint(
   pkg_root: String,
   deps_root: String,
   include_tests: Bool,
+  precomputed_packages_hash: Option(String),
 ) -> Result(String, String) {
   let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
   let inc_flag = case include_tests {
@@ -373,16 +430,21 @@ fn compute_staging_fingerprint(
     True -> hash_gleam_tree(filepath.join(pkg_root, "test"))
     False -> Ok("")
   })
-  let packages_dir =
-    first_existing_path(
-      deps_root,
-      pkg_root,
-      filepath.join("build", "packages"),
-      simplifile.is_directory,
-    )
-  use pkgs_hash <- result.try(case packages_dir {
-    Some(dir) -> hash_packages_dir(dir)
-    None -> Ok("")
+  use pkgs_hash <- result.try(case precomputed_packages_hash {
+    Some(h) -> Ok(h)
+    None -> {
+      let packages_dir =
+        first_existing_path(
+          deps_root,
+          pkg_root,
+          filepath.join("build", "packages"),
+          simplifile.is_directory,
+        )
+      case packages_dir {
+        Some(dir) -> hash_packages_dir(dir)
+        None -> Ok("")
+      }
+    }
   })
   let payload =
     string.join(

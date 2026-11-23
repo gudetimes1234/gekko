@@ -214,16 +214,11 @@ fn visit_package_dir(
               [#("gprelude", "gprelude")],
               False,
             )
-          simplifile.write(
-            to: filepath.join(dest_dir, "moon.pkg"),
-            contents: generated_pkg,
+          write_text_if_changed(
+            filepath.join(dest_dir, "moon.pkg"),
+            generated_pkg,
+            "Failed to write generated moon.pkg for " <> rel_pkg,
           )
-          |> result.map_error(fn(err) {
-            "Failed to write generated moon.pkg for "
-            <> rel_pkg
-            <> ": "
-            <> simplifile.describe_error(err)
-          })
         }
       })
       Ok([rel_pkg, ..acc])
@@ -264,13 +259,22 @@ fn rewrite_and_copy_moon_pkg(
       "\"" <> source_pkg_name <> "/",
       "\"" <> project_name <> "/",
     )
-  simplifile.write(to: dst, contents: updated)
-  |> result.map_error(fn(err) {
-    "Failed to write local moon.pkg "
-    <> dst
-    <> ": "
-    <> simplifile.describe_error(err)
-  })
+  write_text_if_changed(dst, updated, "Failed to write local moon.pkg " <> dst)
+}
+
+fn write_text_if_changed(
+  dst: String,
+  contents: String,
+  err_prefix: String,
+) -> Result(Nil, String) {
+  case simplifile.read(from: dst) {
+    Ok(existing) if existing == contents -> Ok(Nil)
+    _ ->
+      simplifile.write(to: dst, contents:)
+      |> result.map_error(fn(err) {
+        err_prefix <> ": " <> simplifile.describe_error(err)
+      })
+  }
 }
 
 fn copy_file(src: String, dst: String) -> Result(Nil, String) {
@@ -283,11 +287,15 @@ fn copy_file(src: String, dst: String) -> Result(Nil, String) {
       <> simplifile.describe_error(err)
     }),
   )
-  simplifile.write_bits(to: dst, bits: bytes)
-  |> result.map_error(fn(err) {
-    "Failed to write local MoonBit file "
-    <> dst
-    <> ": "
-    <> simplifile.describe_error(err)
-  })
+  case simplifile.read_bits(from: dst) {
+    Ok(existing) if existing == bytes -> Ok(Nil)
+    _ ->
+      simplifile.write_bits(to: dst, bits: bytes)
+      |> result.map_error(fn(err) {
+        "Failed to write local MoonBit file "
+        <> dst
+        <> ": "
+        <> simplifile.describe_error(err)
+      })
+  }
 }

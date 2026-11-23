@@ -1,4 +1,5 @@
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
@@ -11,6 +12,50 @@ pub fn module_to_pkg_dir(module_name: String) -> String {
   case base {
     "gprelude" | "prelude" -> "mod_" <> base
     _ -> base
+  }
+}
+
+/// Resolve a deterministic, collision-free mapping from Gleam module name to
+/// MoonBit package directory name. Non-colliding modules keep `module_to_pkg_dir`;
+/// flat module names (without `/`) take priority for their natural directory,
+/// and colliding names receive `<base>__2`, `<base>__3`, ...
+pub fn resolve_module_pkg_dirs(
+  module_names: List(String),
+) -> Dict(String, String) {
+  let unique =
+    module_names
+    |> set.from_list
+    |> set.to_list
+  let #(flat, nested) =
+    list.partition(unique, fn(m) { !string.contains(m, "/") })
+  let ordered =
+    list.append(
+      list.sort(flat, string.compare),
+      list.sort(nested, string.compare),
+    )
+  let initial_used = set.from_list(["gprelude"])
+  let #(_, mapping) =
+    list.fold(ordered, #(initial_used, dict.new()), fn(acc, mod_name) {
+      let #(used, map) = acc
+      let base = module_to_pkg_dir(mod_name)
+      let chosen = pick_free_pkg_dir(base, used)
+      #(set.insert(used, chosen), dict.insert(map, mod_name, chosen))
+    })
+  mapping
+}
+
+fn pick_free_pkg_dir(base: String, used: Set(String)) -> String {
+  case set.contains(used, base) {
+    False -> base
+    True -> pick_numbered_pkg_dir(base, 2, used)
+  }
+}
+
+fn pick_numbered_pkg_dir(base: String, idx: Int, used: Set(String)) -> String {
+  let candidate = base <> "__" <> int.to_string(idx)
+  case set.contains(used, candidate) {
+    True -> pick_numbered_pkg_dir(base, idx + 1, used)
+    False -> candidate
   }
 }
 
@@ -33,7 +78,12 @@ pub fn emit_moon_mod_with_deps(
     <> "version = \""
     <> version
     <> "\"\n"
-    <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else-unused_trait_bound-deprecated_syntax\"\n"
+    // Keep only suppressions inherent to Gleam->MoonBit lowering:
+    // - implicit_impl_as_method / unused_trait_bound: inferred generic trait bounds on FFI/wrapper fns
+    // - unused_rest_mark / guard_redundant_else: uniform enum & `let` pattern/guard lowering
+    // - unused_package / unused_value / unused_constructor / unused_loop_variable: valid Gleam patterns & TCO loops
+    // - unresolved_type_variable: unconstrained polymorphic expressions like `let _ = []`
+    <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else-unused_trait_bound\"\n"
 
   case deps {
     [] -> base

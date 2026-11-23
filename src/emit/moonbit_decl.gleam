@@ -41,9 +41,17 @@ pub type EmitCtx {
     table: Option(SymbolTable),
     ffi_metadata: FfiMetadata,
     project_bounds: ProjectTraitBounds,
+    module_pkg_dirs: Dict(String, String),
     pkg_to_alias: Dict(String, String),
     used_aliases: Set(String),
   )
+}
+
+pub fn resolve_pkg_dir(ctx: EmitCtx, target_module: String) -> String {
+  case dict.get(ctx.module_pkg_dirs, target_module) {
+    Ok(dir) -> dir
+    Error(_) -> pkg_config.module_to_pkg_dir(target_module)
+  }
 }
 
 pub fn add_gprelude_import(ctx: EmitCtx) -> EmitCtx {
@@ -61,7 +69,7 @@ pub fn add_module_import(
   case target_module {
     "gprelude" -> #("gprelude", add_gprelude_import(ctx))
     _ -> {
-      let pkg_dir = pkg_config.module_to_pkg_dir(target_module)
+      let pkg_dir = resolve_pkg_dir(ctx, target_module)
       let full_fallback = mangle.module_to_alias(target_module)
       let preferred = case alias_opt {
         Some(a) -> safe_alias(a)
@@ -122,7 +130,7 @@ pub fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
     Some(ExternalType(package:, type_name:)) -> {
       let vis = case td.publicity {
         glance.Public -> "pub "
-        glance.Private -> "priv "
+        glance.Private -> ""
       }
       case package == "" || package == "builtin", type_name == td.name {
         True, True -> #("", ctx)
@@ -445,7 +453,7 @@ fn emit_variant_field(f: IrVariantField, ctx: EmitCtx) -> #(String, EmitCtx) {
 pub fn emit_type_alias(ta: IrTypeAlias, ctx: EmitCtx) -> #(String, EmitCtx) {
   let vis = case ta.publicity {
     glance.Public -> "pub "
-    glance.Private -> "priv "
+    glance.Private -> ""
   }
   let generics = format_type_params(ta.type_params)
   let #(aliased_str, ctx1) = emit_type(ta.aliased, ctx)

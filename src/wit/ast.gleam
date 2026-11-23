@@ -27,7 +27,26 @@ pub type WitType {
   WitOption(WitType)
   WitResult(ok: Option(WitType), err: Option(WitType))
   WitTuple(List(WitType))
+  WitOwn(String)
+  WitBorrow(String)
   WitNamed(String)
+}
+
+/// Kind of method declared inside a WIT `resource` block.
+pub type WitResourceMethodKind {
+  ResourceConstructor
+  ResourceMethod
+  ResourceStatic
+}
+
+/// Method or constructor inside a WIT `resource` definition.
+pub type WitResourceMethod {
+  WitResourceMethod(
+    name: String,
+    kind: WitResourceMethodKind,
+    params: List(#(String, WitType)),
+    result: Option(WitType),
+  )
 }
 
 /// Type definitions declared inside a WIT interface.
@@ -37,6 +56,7 @@ pub type WitTypeDef {
   WitVariant(name: String, cases: List(#(String, Option(WitType))))
   WitFlags(name: String, flags: List(String))
   WitAlias(name: String, target: WitType)
+  WitResource(name: String, methods: List(WitResourceMethod))
 }
 
 /// Function signature inside a WIT interface or world.
@@ -78,6 +98,7 @@ pub type WitWorldItem {
   WorldImportFunc(WitFunc)
   WorldExportFunc(WitFunc)
   WorldUse(WitUse)
+  WorldInclude(target: WitIfaceRef, with_renames: List(#(String, String)))
 }
 
 /// A WIT `world` declaration specifying host imports and component exports.
@@ -109,7 +130,16 @@ pub fn iface_key(pkg: WitPackageId, name: String) -> String {
   pkg.namespace <> ":" <> pkg.name <> "/" <> name
 }
 
-/// Resolve an interface reference relative to `default_pkg`.
+/// Version-aware package-qualified interface key, including `@version` when present.
+pub fn iface_versioned_key(pkg: WitPackageId, name: String) -> String {
+  let base = iface_key(pkg, name)
+  case pkg.version {
+    option.Some(ver) -> base <> "@" <> ver
+    option.None -> base
+  }
+}
+
+/// Resolve an interface reference relative to `default_pkg` (without version).
 pub fn resolve_iface_ref(
   default_pkg: WitPackageId,
   ref: WitIfaceRef,
@@ -118,6 +148,44 @@ pub fn resolve_iface_ref(
     LocalIface(name) -> iface_key(default_pkg, name)
     PkgIface(pkg, name) -> iface_key(pkg, name)
   }
+}
+
+/// Resolve an interface reference in `interfaces`, preferring an exact versioned
+/// key when `@version` is specified on `ref` and falling back to unversioned `iface_key`.
+pub fn resolve_iface_key_in(
+  interfaces: Dict(String, WitInterface),
+  default_pkg: WitPackageId,
+  ref: WitIfaceRef,
+) -> String {
+  case ref {
+    LocalIface(name) -> {
+      let versioned = iface_versioned_key(default_pkg, name)
+      case dict.has_key(interfaces, versioned) {
+        True -> versioned
+        False -> iface_key(default_pkg, name)
+      }
+    }
+    PkgIface(pkg, name) -> {
+      let versioned = iface_versioned_key(pkg, name)
+      case pkg.version {
+        option.Some(_) ->
+          case dict.has_key(interfaces, versioned) {
+            True -> versioned
+            False -> iface_key(pkg, name)
+          }
+        option.None -> iface_key(pkg, name)
+      }
+    }
+  }
+}
+
+/// Look up an interface in `interfaces` using version-aware resolution.
+pub fn lookup_interface(
+  interfaces: Dict(String, WitInterface),
+  default_pkg: WitPackageId,
+  ref: WitIfaceRef,
+) -> Result(WitInterface, Nil) {
+  dict.get(interfaces, resolve_iface_key_in(interfaces, default_pkg, ref))
 }
 
 /// Compare two package IDs by namespace and name (ignoring version).

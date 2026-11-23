@@ -1,6 +1,6 @@
 import emit/trait_bounds.{type ProjectTraitBounds}
 import glance
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -41,7 +41,7 @@ import emit/moonbit_decl.{
 pub fn emit_module(module: IrModule) -> #(String, List(#(String, String))) {
   let meta = ffi_meta.base_metadata()
   let bounds = trait_bounds.analyze_project([module], None, meta)
-  emit_module_inner(module, None, meta, bounds)
+  emit_module_inner(module, None, meta, bounds, dict.new())
 }
 
 /// Render a lowered `IrModule` with full `SymbolTable` access (enabling
@@ -52,7 +52,7 @@ pub fn emit_module_with_table(
 ) -> #(String, List(#(String, String))) {
   let meta = ffi_meta.base_metadata()
   let bounds = trait_bounds.analyze_project([module], Some(table), meta)
-  emit_module_inner(module, Some(table), meta, bounds)
+  emit_module_inner(module, Some(table), meta, bounds, dict.new())
 }
 
 /// Render a lowered `IrModule` with pre-scanned FFI metadata and whole-project
@@ -63,7 +63,25 @@ pub fn emit_module_with_context(
   ffi_metadata: FfiMetadata,
   project_bounds: ProjectTraitBounds,
 ) -> #(String, List(#(String, String))) {
-  emit_module_inner(module, table, ffi_metadata, project_bounds)
+  emit_module_inner(module, table, ffi_metadata, project_bounds, dict.new())
+}
+
+/// Like `emit_module_with_context`, using an explicit `module_name -> pkg_dir`
+/// mapping so colliding module paths resolve to distinct MoonBit packages.
+pub fn emit_module_with_pkg_dirs(
+  module: IrModule,
+  table: Option(SymbolTable),
+  ffi_metadata: FfiMetadata,
+  project_bounds: ProjectTraitBounds,
+  module_pkg_dirs: Dict(String, String),
+) -> #(String, List(#(String, String))) {
+  emit_module_inner(
+    module,
+    table,
+    ffi_metadata,
+    project_bounds,
+    module_pkg_dirs,
+  )
 }
 
 /// Return True if this root module defines a 0-argument `main()` entrypoint.
@@ -79,6 +97,7 @@ fn emit_module_inner(
   table: Option(SymbolTable),
   ffi_metadata: FfiMetadata,
   project_bounds: ProjectTraitBounds,
+  module_pkg_dirs: Dict(String, String),
 ) -> #(String, List(#(String, String))) {
   let local_ctors =
     list.fold(module.types, dict.new(), fn(acc, td) {
@@ -109,6 +128,7 @@ fn emit_module_inner(
       table:,
       ffi_metadata:,
       project_bounds:,
+      module_pkg_dirs:,
       pkg_to_alias: dict.new(),
       used_aliases: set.from_list(["gprelude"]),
     )

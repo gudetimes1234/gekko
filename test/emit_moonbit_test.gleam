@@ -721,8 +721,9 @@ pub fn private_chained_type_aliases_and_string_escapes_test() {
     )
   let ir_mod = desugar.desugar_module(ast_mod, table, "app")
   let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
-  assert string.contains(mbt, "priv type Base = Int64")
-  assert string.contains(mbt, "priv type Alias = Base")
+  assert string.contains(mbt, "type Base = Int64")
+  assert string.contains(mbt, "type Alias = Base")
+  assert !string.contains(mbt, "priv type ")
   assert string.contains(mbt, "\"\\\\{escaped}\"")
   assert !string.contains(mbt, "\"\\\\\\{escaped}\"")
 }

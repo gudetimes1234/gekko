@@ -4,6 +4,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import project/cmd
+import project/scaffold
 import project/workspace
 import simplifile
 import test_helpers
@@ -624,6 +625,7 @@ pub fn cli_parse_args_help_and_version_test() {
     == Ok(gekko.BuildAction(
       root: "app",
       out: None,
+      work_dir: None,
       target: "native",
       release: False,
     ))
@@ -631,6 +633,7 @@ pub fn cli_parse_args_help_and_version_test() {
     == Ok(gekko.BuildAction(
       root: ".",
       out: None,
+      work_dir: None,
       target: "wasm-gc",
       release: True,
     ))
@@ -638,6 +641,7 @@ pub fn cli_parse_args_help_and_version_test() {
     == Ok(gekko.BuildAction(
       root: ".",
       out: None,
+      work_dir: None,
       target: "wasm-gc",
       release: False,
     ))
@@ -645,6 +649,7 @@ pub fn cli_parse_args_help_and_version_test() {
     == Ok(gekko.BuildAction(
       root: ".",
       out: Some("myfile.exe"),
+      work_dir: None,
       target: "native",
       release: False,
     ))
@@ -652,6 +657,7 @@ pub fn cli_parse_args_help_and_version_test() {
     == Ok(gekko.BuildAction(
       root: ".",
       out: Some("out.wasm"),
+      work_dir: None,
       target: "wasm-gc",
       release: False,
     ))
@@ -659,11 +665,13 @@ pub fn cli_parse_args_help_and_version_test() {
       "build",
       "--root=app",
       "--out=myfile.exe",
+      "--work-dir=tmp_mbt",
       "--target=native",
     ])
     == Ok(gekko.BuildAction(
       root: "app",
       out: Some("myfile.exe"),
+      work_dir: Some("tmp_mbt"),
       target: "native",
       release: False,
     ))
@@ -671,10 +679,37 @@ pub fn cli_parse_args_help_and_version_test() {
   // All subcommands default --root to "."
   assert gekko.parse_args(["check"])
     == Ok(gekko.CheckAction(root: ".", out: None, target: None))
+  assert gekko.parse_args(["check", "--work-dir", "mbt_out"])
+    == Ok(gekko.CheckAction(root: ".", out: Some("mbt_out"), target: None))
   assert gekko.parse_args(["test"])
     == Ok(gekko.TestAction(root: ".", out: None, target: None))
   assert gekko.parse_args(["run"])
-    == Ok(gekko.RunAction(root: ".", out: None, target: None))
+    == Ok(gekko.RunAction(root: ".", out: None, target: None, program_args: []))
+  assert gekko.parse_args([
+      "run",
+      "--target",
+      "native",
+      "--",
+      "--flag",
+      "val",
+    ])
+    == Ok(
+      gekko.RunAction(
+        root: ".",
+        out: None,
+        target: Some("native"),
+        program_args: ["--flag", "val"],
+      ),
+    )
+  assert gekko.parse_args(["new", "my_app"])
+    == Ok(gekko.NewAction(name: "my_app", with_wit: False))
+  assert gekko.parse_args(["new", "my_app", "--wit"])
+    == Ok(gekko.NewAction(name: "my_app", with_wit: True))
+  assert gekko.parse_args(["init", "--root", "proj", "--wit"])
+    == Ok(gekko.InitAction(root: "proj", with_wit: True))
+  assert gekko.parse_args(["clean", "--root", "proj"])
+    == Ok(gekko.CleanAction(root: "proj"))
+  assert gekko.parse_args(["doctor"]) == Ok(gekko.DoctorAction)
   assert gekko.parse_args(["wit", "gen"])
     == Ok(gekko.WitGenAction(root: ".", wit_dir: None, world: None))
   assert gekko.parse_args(["wit", "check"])
@@ -686,6 +721,16 @@ pub fn cli_parse_args_help_and_version_test() {
       world: None,
       out: None,
       output: None,
+      release: False,
+    ))
+  assert gekko.parse_args(["wit", "build", "--release", "-o", "out.wasm"])
+    == Ok(gekko.WitBuildAction(
+      root: ".",
+      wit_dir: None,
+      world: None,
+      out: None,
+      output: Some("out.wasm"),
+      release: True,
     ))
   assert gekko.parse_args(["moonbit", "bind", "pkg"])
     == Ok(gekko.MoonbitBindAction(
@@ -886,5 +931,39 @@ pub fn build_library_and_stale_test_cleanup_e2e_test() {
 
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_cwd)
+  Nil
+}
+
+pub fn scaffold_init_and_clean_e2e_test() {
+  let root = "build/test_fixtures/scaffold_demo"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(root) == Ok(Nil)
+
+  let assert Ok(files) = scaffold.init_project(root, True)
+  assert list.contains(files, "gleam.toml")
+  assert list.contains(files, "src/scaffold_demo.gleam")
+  assert list.contains(files, "wit/world.wit")
+  assert list.contains(files, "src/app.gleam")
+  assert simplifile.is_file(filepath.join(root, "gleam.toml")) == Ok(True)
+
+  // Refuses to overwrite existing gleam.toml
+  let assert Error(overwrite_err) = scaffold.init_project(root, False)
+  assert string.contains(overwrite_err, "Refusing to overwrite")
+
+  // Rejects invalid project names including `*_test`
+  let assert Error(_) = scaffold.new_project("bad_test", False)
+
+  // `gekko clean` removes generated build/moonbit and staging dirs
+  let mbt_dir = filepath.join(root, "build/moonbit")
+  let stage_dir = filepath.join(root, "build/.gekko_staging")
+  assert simplifile.create_directory_all(mbt_dir) == Ok(Nil)
+  assert simplifile.create_directory_all(stage_dir) == Ok(Nil)
+  let assert Ok(removed) = gekko.clean_project(root)
+  assert list.contains(removed, mbt_dir)
+  assert list.contains(removed, stage_dir)
+  assert simplifile.is_directory(mbt_dir) == Ok(False)
+  assert simplifile.is_directory(stage_dir) == Ok(False)
+
+  let _ = simplifile.delete(file_or_dir_at: root)
   Nil
 }

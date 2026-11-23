@@ -2,7 +2,7 @@ import emit/wit_bridge
 import filepath
 import gleam/dict
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import gleam/string
 import project/cmd
 import simplifile
@@ -424,5 +424,131 @@ pub fn wit_g2w_record_and_flags_roundtrip_test() {
   assert string.contains(imp_adapter, "g.write()")
 
   let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn wit_include_multiversion_and_imported_resource_test() {
+  let root = "build/test_fixtures/wit_res_inc"
+  let wit_dir = filepath.join(root, "wit")
+  let deps_dir = filepath.join(wit_dir, "deps")
+  let out_dir = filepath.join(root, "build/moonbit")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(deps_dir, "v1"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(deps_dir, "v2"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"wit_res_inc\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  // Two versions of the same dependency interface in wit/deps must not collide
+  assert simplifile.write(
+      to: filepath.join(deps_dir, "v1/clock.wit"),
+      contents: "package ext:clock@0.1.0;\ninterface wall {\n  now: func() -> u32;\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(deps_dir, "v2/clock.wit"),
+      contents: "package ext:clock@0.2.0;\ninterface wall {\n  now: func() -> u64;\n}\n",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(wit_dir, "world.wit"),
+      contents: "package demo:resinc@0.1.0;\n\n"
+        <> "interface host {\n"
+        <> "  resource counter {\n"
+        <> "    constructor(init: u32);\n"
+        <> "    inc: func(delta: u32) -> u32;\n"
+        <> "    make-zero: static func() -> counter;\n"
+        <> "  }\n"
+        <> "  read-borrowed: func(c: borrow<counter>) -> u32;\n"
+        <> "  consume-owned: func(c: own<counter>) -> u32;\n"
+        <> "}\n\n"
+        <> "world base {\n"
+        <> "  import host;\n"
+        <> "}\n\n"
+        <> "world app {\n"
+        <> "  include base;\n"
+        <> "  import ext:clock/wall@0.2.0;\n"
+        <> "  export run: func(step: u32) -> u64;\n"
+        <> "}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(resolved) = wit_parser.load_wit_dir(wit_dir, Some("app"))
+  assert dict.has_key(resolved.interfaces, "ext:clock/wall@0.1.0")
+  assert dict.has_key(resolved.interfaces, "ext:clock/wall@0.2.0")
+
+  let assert Ok(_) = gleam_gen.generate_project_bindings(resolved, root)
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/app.gleam"),
+      contents: "import wit/ext/clock/wall\n"
+        <> "import wit/host\n\n"
+        <> "pub fn run(step: Int) -> Int {\n"
+        <> "  let c = host.new_counter(10)\n"
+        <> "  let _ = host.counter_inc(c, step)\n"
+        <> "  let b = host.read_borrowed(c)\n"
+        <> "  let z = host.counter_make_zero()\n"
+        <> "  let _ = host.consume_owned(z)\n"
+        <> "  host.drop_counter(c)\n"
+        <> "  b + wall.now()\n"
+        <> "}\n",
+    )
+    == Ok(Nil)
+
+  let check_gleam = cmd.run(command: "gleam", args: ["check"], cwd: root)
+  assert check_gleam.exit_code == 0
+
+  let assert Ok(summary) =
+    wit_bridge.bridge_wit_workspace(root, out_dir, wit_dir, Some("app"))
+  let check_res =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_res.exit_code == 0
+
+  let comp_path = filepath.join(out_dir, "dist/app-rel.wasm")
+  case
+    wit_bridge.bundle_component_with_profile(
+      summary,
+      Some("app"),
+      comp_path,
+      True,
+    )
+  {
+    Ok(built) -> {
+      assert built == comp_path
+      assert simplifile.is_file(comp_path) == Ok(True)
+    }
+    Error(msg) -> {
+      assert string.contains(msg, "wasm-tools")
+    }
+  }
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn wit_exported_resource_reports_clear_error_test() {
+  let wit_dir = "build/test_fixtures/wit_exp_res"
+  let _ = simplifile.delete(file_or_dir_at: wit_dir)
+  assert simplifile.create_directory_all(wit_dir) == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(wit_dir, "world.wit"),
+      contents: "package demo:exp@0.1.0;\ninterface g {\n  resource box { constructor(v: s32); }\n}\nworld app { export g; }\n",
+    )
+    == Ok(Nil)
+
+  let assert Error(err) = wit_parser.load_wit_dir(wit_dir, None)
+  assert string.contains(err, "Exported WIT resource")
+  let _ = simplifile.delete(file_or_dir_at: wit_dir)
   Nil
 }

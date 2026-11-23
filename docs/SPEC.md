@@ -52,15 +52,15 @@
           │
           ▼  (Step 4: Modern MoonBit Workspace & Code Emission)
   • Emit `build/moonbit/moon.mod`
-  • Map each Gleam module `a/b.gleam` -> `build/moonbit/a_b/` (validating no directory collisions)
-    with declarative `moon.pkg` and `///|` block separators
+  • Map each Gleam module `a/b.gleam` -> `build/moonbit/<pkg_dir>/` (with deterministic collision disambiguation)
+    with declarative `moon.pkg`, `///|` block separators, write-if-changed incremental writes, and `.gekko_sourcemap`
   • Bundle `gprelude/` (`@gprelude`) and copy local `moonbit/` FFI packages
-  • Run `wit-bindgen moonbit` if `wit/` exists and wire `stub.mbt` exports to Gleam entrypoints
+  • Run `wit-bindgen moonbit` if `wit/` exists and wire `stub.mbt` exports and resource/import adapters
           │
           ▼  (Step 5: Verification, Multi-Target Build & Component Packaging)
-  • Run `moon check [--target <target>]` / `moon test [--target <target>]`
-  • Run `moon build [--target wasm-gc | wasm | js | native]`
-  • If `--component`: run `wasm-tools component embed` + `wasm-tools component new` -> `dist/app.wasm`
+  • Run `moon check [--target <target>]` / `moon test [--target <target>]` (with `.gekko_sourcemap` error annotations)
+  • Run `moon build [--release] [--target wasm-gc | wasm | js | native]`
+  • For WIT components: `gekko wit build [--release]` runs `wasm-tools component embed` + `wasm-tools component new` -> `dist/<world>.wasm`
 ```
 
 ---
@@ -133,17 +133,16 @@ gekko/
 Gleam downloads all resolved Hex dependencies into `build/packages/<package_name>/` with their own `gleam.toml` and `src/` trees.
 
 1. **Package Discovery & Topological Order:**
-   - Parse `manifest.toml` (and `build/packages/*/gleam.toml` using `tom`) to determine the exact dependency graph and active package versions.
+   - Parse `manifest.toml` (and `build/packages/*/gleam.toml` using `tom`) to determine the exact dependency graph and active package versions, automatically running `gleam deps download` when remote dependencies are declared and `build/packages/` is absent.
 2. **Deterministic Namespace Mapping:**
    - MoonBit enforces one package per directory and imports packages via `@alias.symbol` declared in `moon.pkg`.
-   - Gleam module `a/b.gleam` (whether root or dependency) maps to `<out_dir>/a_b/` via `pkg_config.module_to_pkg_dir`, keeping FFI `moon.pkg` package references uniform (e.g. `"<project>/gleam_order" @gleam_order`).
-   - `workspace.validate_module_pkg_dirs` fails fast at compile time if two distinct modules in the workspace map to the same MoonBit package directory (e.g. `foo/bar.gleam` and `foo_bar.gleam`).
+   - Gleam module `a/b.gleam` (whether root or dependency) maps to `<out_dir>/a_b/` via `pkg_config.resolve_module_pkg_dirs`, keeping FFI `moon.pkg` package references uniform (e.g. `"<project>/gleam_order" @gleam_order`), while disambiguating collisions (e.g. `foo/bar.gleam` vs `foo_bar.gleam` → `foo_bar__2`).
 3. **FFI-Backed `gleam_stdlib` and `gleam_json` Strategy:**
    - Most of `gleam_stdlib` and `gleam_json` is pure Gleam (or includes pure-Gleam fallback bodies below `@external(erlang, ...)`). Only a small set of leaf primitives actually invoke host FFI (`gleam/string`, `gleam/dict`, `gleam/bit_array`, `gleam/int`, `gleam/float`, `gleam/dynamic/decode`, `gleam/io`, and ~12 primitives in `gleam/json`).
-   - Rather than re-implementing every stdlib module from scratch in MoonBit, `gekko` **transpiles the real `.gleam` files** of `gleam_stdlib` and `gleam_json` from `build/packages/` so APIs and edge-case semantics match standard Gleam 100%.
-   - Bundled runtime packages (`runtime/gleam_stdlib_ffi/` and `runtime/gleam_json_ffi/`) implement only the leaf `@external` primitives using MoonBit `core` types (`Map`, `@json.Json`, `Bytes`, `String`, `Int64`, `Double`, and `@prelude.Dynamic`).
-   - **Pure-Gleam Fallback Rule:** If a function in a dependency declares `@external(erlang, ...)` / `@external(javascript, ...)` and also provides a pure-Gleam body, emit the pure-Gleam body unless overridden in the FFI shim registry or `gekko.toml` (allowing selective MoonBit fast-path overrides for hot functions like `list.reverse` or `string.join`).
-   - **Hard External Error Reporting:** If a reachable function has Erlang/JS externals, no pure-Gleam fallback body, and no entry in the FFI registry or `gekko.toml`, fail fast at compile time with the exact `package:module.function` path.
+   - Rather than re-implementing every stdlib module from scratch in MoonBit, `gekko` **transpiles the real `.gleam` files** of the MoonBit-enabled [`gekko_gleam_stdlib`](https://github.com/spiral-nights/gekko_gleam_stdlib) and [`gekko_gleam_json`](https://github.com/spiral-nights/gekko_gleam_json) forks from `build/packages/` so APIs and edge-case semantics match standard Gleam 100%.
+   - Bundled `moonbit/` FFI packages inside those repositories implement only the leaf `@external(moonbit, ...)` primitives using MoonBit `core` types (`Map`, `@json.Json`, `Bytes`, `String`, `Int64`, `Double`, and `@gprelude.Dynamic`).
+   - **Pure-Gleam Fallback Rule:** If a function in a dependency declares `@external(erlang, ...)` / `@external(javascript, ...)` and also provides a pure-Gleam body, emit the pure-Gleam body unless overridden in the FFI shim registry or `gekko.toml` / `[tools.gekko.overrides]` (allowing selective MoonBit fast-path overrides for hot functions like `list.reverse` or `string.join`).
+   - **Hard External Error Reporting:** If a reachable function has Erlang/JS externals, no pure-Gleam fallback body, and no entry in the FFI registry or overrides, fail fast at compile time with the exact `package:module.function` path and `file:line:col` location.
 
 ---
 
@@ -365,8 +364,8 @@ Because `gekko` emits pure MoonBit backed by `moonbitlang/core`, transpiled Glea
    wit-bindgen moonbit <wit_dir> --out-dir build/moonbit --derive-debug --derive-eq
    ```
 2. `wit-bindgen moonbit` generates import interfaces under `build/moonbit/interface/...` and export stubs under `build/moonbit/gen/world/<world_name>/stub.mbt`.
-3. `emit/wit_bridge.gleam` inspects the generated `stub.mbt` signatures and populates each export body by converting boundary types (`Array[T]` $\leftrightarrow$ `@prelude.GList[T]`, `Option[T]` $\leftrightarrow$ `Option[T]`, `Result[T, E]` $\leftrightarrow$ `Result[T, E]`) and delegating to the transpiled Gleam module function.
-4. `gekko build --wit ./wit --component dist/app.wasm` runs:
-   - `moon build --target wasm`
-   - `wasm-tools component embed ./wit <core.wasm> -o build/moonbit/embedded.wasm`
-   - `wasm-tools component new build/moonbit/embedded.wasm -o dist/app.wasm`
+3. `emit/wit_bridge.gleam` inspects the generated `stub.mbt` signatures and populates each export body by converting boundary types (`Array[T]` $\leftrightarrow$ `@gprelude.GList[T]`, `Option[T]` $\leftrightarrow$ `Option[T]`, `Result[T, E]` $\leftrightarrow$ `Result[T, E]`, imported `resource` handles via `@external_type`) and delegating to the transpiled Gleam module function.
+4. `gekko wit build [--release]` runs:
+   - `moon build [--release] --target wasm`
+   - `wasm-tools component embed --encoding utf16 <wit_dir> <core.wasm> -o build/moonbit/embedded.wasm`
+   - `wasm-tools component new build/moonbit/embedded.wasm -o dist/<world>.wasm`

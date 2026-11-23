@@ -1,15 +1,18 @@
 import filepath
 import glance
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import index/symbol_table
+import project/cmd
 import project/interface.{type PackageInterface}
 import project/prepass.{type FfiKind, type PrepassResult}
 import project/staging
+import project/text_edit
 import simplifile
 import tom
 
@@ -114,6 +117,22 @@ pub fn load_dependencies_with_options(
   ffi_overrides: Dict(String, FfiKind),
   include_tests: Bool,
 ) -> Result(List(LoadedDependency), String) {
+  load_dependencies_with_packages_hash(
+    project_root,
+    ffi_overrides,
+    include_tests,
+    None,
+  )
+}
+
+/// Like `load_dependencies_with_options`, reusing a precomputed `build/packages`
+/// hash and extracting per-dependency compiler interfaces in parallel.
+pub fn load_dependencies_with_packages_hash(
+  project_root: String,
+  ffi_overrides: Dict(String, FfiKind),
+  include_tests: Bool,
+  packages_hash: Option(String),
+) -> Result(List(LoadedDependency), String) {
   use #(root_name, _) <- result.try(read_project_meta(project_root))
   let packages_dir =
     project_root
@@ -143,8 +162,8 @@ pub fn load_dependencies_with_options(
     |> list.map(fn(pair) { pair.1 })
 
   let ordered = topo_sort_packages(discovered)
-  list.try_map(ordered, fn(pkg) {
-    load_single_dependency(project_root, pkg, ffi_overrides)
+  cmd.parallel_try_map(ordered, fn(pkg) {
+    load_single_dependency(project_root, pkg, ffi_overrides, packages_hash)
   })
 }
 
@@ -510,6 +529,7 @@ fn load_single_dependency(
   project_root: String,
   pkg: DiscoveredPkg,
   ffi_overrides: Dict(String, FfiKind),
+  packages_hash: Option(String),
 ) -> Result(LoadedDependency, String) {
   let src_dir = filepath.join(pkg.package_root, "src")
   use modules <- result.try(discover_and_parse(src_dir, None))
@@ -524,10 +544,11 @@ fn load_single_dependency(
     |> filepath.join("build")
     |> filepath.join(".gekko_staging_deps")
     |> filepath.join(pkg.package_name)
-  use iface <- result.try(staging.extract_package_interface_with_deps(
+  use iface <- result.try(staging.extract_package_interface_with_packages_hash(
     pkg.package_root,
     project_root,
     dep_staging,
+    packages_hash,
   ))
 
   Ok(LoadedDependency(
@@ -594,7 +615,12 @@ fn validate_dependency_externals(
             != None
           let has_fallback_body = fn_def.definition.body != []
           case has_erl_or_js && !has_ffi_mapping && !has_fallback_body {
-            True ->
+            True -> {
+              let #(line, col) =
+                text_edit.byte_offset_to_line_col(
+                  prepass_res.cleaned_source,
+                  fn_def.definition.location.start,
+                )
               Error(
                 "Unmapped external function "
                 <> pkg_name
@@ -602,8 +628,17 @@ fn validate_dependency_externals(
                 <> mod_name
                 <> "."
                 <> fn_name
-                <> " (add an override in gekko.toml)",
+                <> " at "
+                <> pkg_name
+                <> ":src/"
+                <> mod_name
+                <> ".gleam:"
+                <> int.to_string(line)
+                <> ":"
+                <> int.to_string(col)
+                <> " (add an override in [tools.gekko.overrides] in gleam.toml or in gekko.toml)",
               )
+            }
             False -> Ok(Nil)
           }
         }
