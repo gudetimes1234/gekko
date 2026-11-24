@@ -427,3 +427,41 @@ prefer = \"javascript\"
 
   let _ = simplifile.delete(file_or_dir_at: root)
 }
+
+pub fn local_closure_trait_bound_propagation_test() {
+  let root = "/tmp/gekko_local_closure_bounds_proj"
+  let out_dir = filepath.join(root, "build/moonbit")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"closure_bounds\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/closure_bounds.gleam"),
+      contents: "fn apply_all(items: List(k), init: acc, f: fn(acc, k) -> acc) -> acc {\n  case items {\n    [] -> init\n    [x, ..xs] -> apply_all(xs, f(init, x), f)\n  }\n}\n\npub fn count_equal(items: List(k), target: k) -> Int {\n  let step = fn(acc, item) {\n    case item == target {\n      True -> acc + 1\n      False -> acc\n    }\n  }\n  apply_all(items, 0, step)\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/closure_bounds_suite.gleam"),
+      contents: "import closure_bounds\npub fn count_equal_test() {\n  assert closure_bounds.count_equal([1, 2, 1, 3, 1], 1) == 3\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  let chk =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert chk.exit_code == 0
+  let tst =
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
+  assert tst.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+}

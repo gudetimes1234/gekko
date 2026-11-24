@@ -9,10 +9,10 @@ import lower/ir.{
   type IrType, IrAbort, IrBinOp, IrBitString, IrBlock, IrBool, IrBreak, IrCall,
   IrConstructor, IrContinue, IrEcho, IrEq, IrFloat, IrFn, IrForLoop,
   IrGetterCall, IrInt, IrList, IrMatch, IrModuleRef, IrNegateBool, IrNegateInt,
-  IrNotEq, IrParam, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet, IrString,
-  IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool, IrTypeDouble, IrTypeFn,
-  IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString, IrTypeTuple,
-  IrTypeUnit, IrTypeVar, IrUnit, IrVar,
+  IrNotEq, IrParam, IrPatVar, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet,
+  IrString, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool, IrTypeDouble,
+  IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString,
+  IrTypeTuple, IrTypeUnit, IrTypeVar, IrUnit, IrVar,
 }
 
 import moonbit/ffi_meta.{type FfiMetadata, type MbtType}
@@ -496,6 +496,7 @@ fn propagate_fixpoint(
                   walk_stmts(
                     f.body,
                     env0,
+                    dict.new(),
                     mod.module_name,
                     f,
                     Some(f.return_type),
@@ -543,6 +544,7 @@ fn build_module_const_env(mod: IrModule) -> Dict(String, IrType) {
 fn walk_stmts(
   stmts: List(IrStmt),
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   expected_ret: Option(IrType),
@@ -568,6 +570,7 @@ fn walk_stmts(
             walk_expr(
               value,
               env,
+              local_fns,
               cur_mod,
               cur_fn,
               val_expected,
@@ -584,9 +587,16 @@ fn walk_stmts(
             Some(ty) -> bind_pattern_types(pattern, ty, cur_mod, ctx, env)
             None -> env
           }
+          let local_fns1 = case pattern, value {
+            IrPatVar(name), IrFn(..) ->
+              dict.insert(local_fns, name, #(value, env))
+            IrPatVar(name), _ -> dict.delete(local_fns, name)
+            _, _ -> local_fns
+          }
           walk_stmts(
             rest,
             env1,
+            local_fns1,
             cur_mod,
             cur_fn,
             expected_ret,
@@ -608,6 +618,7 @@ fn walk_stmts(
             walk_expr(
               value,
               env,
+              local_fns,
               cur_mod,
               cur_fn,
               None,
@@ -632,6 +643,7 @@ fn walk_stmts(
               walk_expr(
                 g,
                 env2,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 Some(IrTypeBool),
@@ -647,6 +659,7 @@ fn walk_stmts(
               walk_expr(
                 m,
                 env2,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 Some(IrTypeString),
@@ -659,11 +672,23 @@ fn walk_stmts(
           }
           let acc4 =
             list.fold(post_bindings, acc3, fn(a, b) {
-              walk_expr(b.1, env1, cur_mod, cur_fn, None, ctx, bmap, allowed, a)
+              walk_expr(
+                b.1,
+                env1,
+                local_fns,
+                cur_mod,
+                cur_fn,
+                None,
+                ctx,
+                bmap,
+                allowed,
+                a,
+              )
             })
           walk_stmts(
             rest,
             env2,
+            local_fns,
             cur_mod,
             cur_fn,
             expected_ret,
@@ -679,6 +704,7 @@ fn walk_stmts(
             walk_expr(
               condition,
               env,
+              local_fns,
               cur_mod,
               cur_fn,
               Some(IrTypeBool),
@@ -692,6 +718,7 @@ fn walk_stmts(
               walk_expr(
                 m,
                 env,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 Some(IrTypeString),
@@ -705,6 +732,7 @@ fn walk_stmts(
           walk_stmts(
             rest,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             expected_ret,
@@ -720,6 +748,7 @@ fn walk_stmts(
             walk_expr(
               expr,
               env,
+              local_fns,
               cur_mod,
               cur_fn,
               stmt_expected,
@@ -731,6 +760,7 @@ fn walk_stmts(
           walk_stmts(
             rest,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             expected_ret,
@@ -748,6 +778,7 @@ fn walk_stmts(
 fn walk_expr(
   expr: IrExpr,
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   expected_ret: Option(IrType),
@@ -759,8 +790,30 @@ fn walk_expr(
   case expr {
     IrBinOp(op: IrEq, left:, right:) | IrBinOp(op: IrNotEq, left:, right:) -> {
       let acc_children =
-        walk_expr(left, env, cur_mod, cur_fn, None, ctx, bmap, allowed, acc)
-        |> walk_expr(right, env, cur_mod, cur_fn, None, ctx, bmap, allowed, _)
+        walk_expr(
+          left,
+          env,
+          local_fns,
+          cur_mod,
+          cur_fn,
+          None,
+          ctx,
+          bmap,
+          allowed,
+          acc,
+        )
+        |> walk_expr(
+          right,
+          env,
+          local_fns,
+          cur_mod,
+          cur_fn,
+          None,
+          ctx,
+          bmap,
+          allowed,
+          _,
+        )
       case
         is_nullary_multi_variant_ctor(left, cur_mod, ctx),
         is_nullary_multi_variant_ctor(right, cur_mod, ctx)
@@ -781,17 +834,51 @@ fn walk_expr(
     }
 
     IrBinOp(left:, right:, ..) ->
-      walk_expr(left, env, cur_mod, cur_fn, None, ctx, bmap, allowed, acc)
-      |> walk_expr(right, env, cur_mod, cur_fn, None, ctx, bmap, allowed, _)
+      walk_expr(
+        left,
+        env,
+        local_fns,
+        cur_mod,
+        cur_fn,
+        None,
+        ctx,
+        bmap,
+        allowed,
+        acc,
+      )
+      |> walk_expr(
+        right,
+        env,
+        local_fns,
+        cur_mod,
+        cur_fn,
+        None,
+        ctx,
+        bmap,
+        allowed,
+        _,
+      )
 
     IrEcho(expr: inner, message:, ..) -> {
       let acc1 =
-        walk_expr(inner, env, cur_mod, cur_fn, None, ctx, bmap, allowed, acc)
+        walk_expr(
+          inner,
+          env,
+          local_fns,
+          cur_mod,
+          cur_fn,
+          None,
+          ctx,
+          bmap,
+          allowed,
+          acc,
+        )
       let acc2 = case message {
         Some(m) ->
           walk_expr(
             m,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             Some(IrTypeString),
@@ -823,6 +910,7 @@ fn walk_expr(
         function,
         args,
         env,
+        local_fns,
         cur_mod,
         cur_fn,
         expected_ret,
@@ -838,6 +926,7 @@ fn walk_expr(
         args,
         paired_params,
         env,
+        local_fns,
         cur_mod,
         cur_fn,
         ctx,
@@ -848,9 +937,26 @@ fn walk_expr(
     }
 
     IrVar(name) ->
-      case dict.has_key(env, name), expected_ret {
-        False, Some(IrTypeFn(exp_ps, exp_r)) ->
-          walk_bare_fn_ref(cur_mod, name, exp_ps, exp_r, bmap, ctx, acc)
+      case dict.get(local_fns, name), expected_ret {
+        Ok(#(fn_expr, def_env)), Some(IrTypeFn(..)) ->
+          walk_expr(
+            fn_expr,
+            def_env,
+            dict.delete(local_fns, name),
+            cur_mod,
+            cur_fn,
+            expected_ret,
+            ctx,
+            bmap,
+            allowed,
+            acc,
+          )
+        _, Some(IrTypeFn(exp_ps, exp_r)) ->
+          case dict.has_key(env, name) {
+            False ->
+              walk_bare_fn_ref(cur_mod, name, exp_ps, exp_r, bmap, ctx, acc)
+            True -> acc
+          }
         _, _ -> acc
       }
 
@@ -867,13 +973,25 @@ fn walk_expr(
         _ -> #([], None)
       }
       let fn_env = bind_fn_param_types_opt(params, exp_ps, env)
-      walk_stmts(body, fn_env, cur_mod, cur_fn, exp_r, ctx, bmap, allowed, acc)
+      walk_stmts(
+        body,
+        fn_env,
+        local_fns,
+        cur_mod,
+        cur_fn,
+        exp_r,
+        ctx,
+        bmap,
+        allowed,
+        acc,
+      )
     }
 
     IrBlock(stmts) ->
       walk_stmts(
         stmts,
         env,
+        local_fns,
         cur_mod,
         cur_fn,
         expected_ret,
@@ -888,7 +1006,18 @@ fn walk_expr(
         list.fold(bindings, #(acc, env), fn(st, b) {
           let #(a, e) = st
           let a1 =
-            walk_expr(b.1, env, cur_mod, cur_fn, None, ctx, bmap, allowed, a)
+            walk_expr(
+              b.1,
+              env,
+              local_fns,
+              cur_mod,
+              cur_fn,
+              None,
+              ctx,
+              bmap,
+              allowed,
+              a,
+            )
           let e1 = case infer_expr_type(b.1, env, cur_mod, ctx) {
             Some(ty) -> dict.insert(e, b.0, ty)
             None -> e
@@ -898,6 +1027,7 @@ fn walk_expr(
       walk_stmts(
         body,
         env1,
+        local_fns,
         cur_mod,
         cur_fn,
         expected_ret,
@@ -911,7 +1041,18 @@ fn walk_expr(
     IrMatch(subjects:, clauses:) -> {
       let acc1 =
         list.fold(subjects, acc, fn(a, s) {
-          walk_expr(s, env, cur_mod, cur_fn, None, ctx, bmap, allowed, a)
+          walk_expr(
+            s,
+            env,
+            local_fns,
+            cur_mod,
+            cur_fn,
+            None,
+            ctx,
+            bmap,
+            allowed,
+            a,
+          )
         })
       let subj_tys =
         list.map(subjects, fn(s) { infer_expr_type(s, env, cur_mod, ctx) })
@@ -938,6 +1079,7 @@ fn walk_expr(
             walk_expr(
               g,
               c_env2,
+              local_fns,
               cur_mod,
               cur_fn,
               Some(IrTypeBool),
@@ -950,11 +1092,23 @@ fn walk_expr(
         }
         let a2 =
           list.fold(c.prefix_bindings, a1, fn(x, b) {
-            walk_expr(b.1, c_env, cur_mod, cur_fn, None, ctx, bmap, allowed, x)
+            walk_expr(
+              b.1,
+              c_env,
+              local_fns,
+              cur_mod,
+              cur_fn,
+              None,
+              ctx,
+              bmap,
+              allowed,
+              x,
+            )
           })
         walk_expr(
           c.body,
           c_env2,
+          local_fns,
           cur_mod,
           cur_fn,
           expected_ret,
@@ -970,12 +1124,24 @@ fn walk_expr(
     | IrNegateBool(inner)
     | IrGetterCall(receiver: inner, ..)
     | IrTupleIndex(tuple: inner, ..) ->
-      walk_expr(inner, env, cur_mod, cur_fn, None, ctx, bmap, allowed, acc)
+      walk_expr(
+        inner,
+        env,
+        local_fns,
+        cur_mod,
+        cur_fn,
+        None,
+        ctx,
+        bmap,
+        allowed,
+        acc,
+      )
 
     IrBreak(inner) ->
       walk_expr(
         inner,
         env,
+        local_fns,
         cur_mod,
         cur_fn,
         expected_ret,
@@ -987,7 +1153,18 @@ fn walk_expr(
 
     IrTuple(els) ->
       list.fold(els, acc, fn(a, e) {
-        walk_expr(e, env, cur_mod, cur_fn, None, ctx, bmap, allowed, a)
+        walk_expr(
+          e,
+          env,
+          local_fns,
+          cur_mod,
+          cur_fn,
+          None,
+          ctx,
+          bmap,
+          allowed,
+          a,
+        )
       })
 
     IrList(elements:, tail:) -> {
@@ -1000,6 +1177,7 @@ fn walk_expr(
           walk_expr(
             e,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             elem_expected,
@@ -1014,6 +1192,7 @@ fn walk_expr(
           walk_expr(
             t,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             expected_ret,
@@ -1029,13 +1208,25 @@ fn walk_expr(
     IrBitString(segments:) ->
       list.fold(segments, acc, fn(a, seg) {
         let a1 =
-          walk_expr(seg.0, env, cur_mod, cur_fn, None, ctx, bmap, allowed, a)
+          walk_expr(
+            seg.0,
+            env,
+            local_fns,
+            cur_mod,
+            cur_fn,
+            None,
+            ctx,
+            bmap,
+            allowed,
+            a,
+          )
         list.fold(seg.1, a1, fn(inner_a, opt) {
           case opt {
             glance.SizeValueOption(size_expr) ->
               walk_expr(
                 size_expr,
                 env,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 Some(IrTypeInt64),
@@ -1053,6 +1244,7 @@ fn walk_expr(
       walk_expr(
         m,
         env,
+        local_fns,
         cur_mod,
         cur_fn,
         Some(IrTypeString),
@@ -1076,6 +1268,7 @@ fn walk_call(
   function: IrExpr,
   args: List(IrCallArg),
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   expected_ret: Option(IrType),
@@ -1095,6 +1288,7 @@ fn walk_call(
                 arg_vals,
                 list.map(exp_ps, Some),
                 env,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 ctx,
@@ -1107,6 +1301,7 @@ fn walk_call(
               walk_untyped_call_args(
                 args,
                 env,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 ctx,
@@ -1123,6 +1318,7 @@ fn walk_call(
                 callee,
                 args,
                 env,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 expected_ret,
@@ -1135,6 +1331,7 @@ fn walk_call(
               walk_untyped_call_args(
                 args,
                 env,
+                local_fns,
                 cur_mod,
                 cur_fn,
                 ctx,
@@ -1153,6 +1350,7 @@ fn walk_call(
             callee,
             args,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             expected_ret,
@@ -1165,6 +1363,7 @@ fn walk_call(
           walk_untyped_call_args(
             args,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             ctx,
@@ -1210,6 +1409,7 @@ fn walk_call(
             ordered_args,
             exp_types,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             ctx,
@@ -1222,6 +1422,7 @@ fn walk_call(
           walk_untyped_call_args(
             args,
             env,
+            local_fns,
             cur_mod,
             cur_fn,
             ctx,
@@ -1234,10 +1435,22 @@ fn walk_call(
 
     _ -> {
       let acc1 =
-        walk_expr(function, env, cur_mod, cur_fn, None, ctx, bmap, allowed, acc)
+        walk_expr(
+          function,
+          env,
+          local_fns,
+          cur_mod,
+          cur_fn,
+          None,
+          ctx,
+          bmap,
+          allowed,
+          acc,
+        )
       walk_untyped_call_args(
         args,
         env,
+        local_fns,
         cur_mod,
         cur_fn,
         ctx,
@@ -1254,6 +1467,7 @@ fn walk_known_fn_call(
   callee: IrFunction,
   args: List(IrCallArg),
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   expected_ret: Option(IrType),
@@ -1284,6 +1498,7 @@ fn walk_known_fn_call(
     ordered_args,
     exp_param_tys,
     env,
+    local_fns,
     cur_mod,
     cur_fn,
     ctx,
@@ -1366,6 +1581,7 @@ fn walk_aligned_opt_args(
   ordered_args: List(Option(IrExpr)),
   expected_types: List(Option(IrType)),
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   ctx: AnalyzeCtx,
@@ -1376,7 +1592,18 @@ fn walk_aligned_opt_args(
   list.fold(list.zip(ordered_args, expected_types), acc, fn(a, pair) {
     case pair.0 {
       Some(arg_val) ->
-        walk_expr(arg_val, env, cur_mod, cur_fn, pair.1, ctx, bmap, allowed, a)
+        walk_expr(
+          arg_val,
+          env,
+          local_fns,
+          cur_mod,
+          cur_fn,
+          pair.1,
+          ctx,
+          bmap,
+          allowed,
+          a,
+        )
       None -> a
     }
   })
@@ -1386,6 +1613,7 @@ fn walk_positional_args(
   args: List(IrExpr),
   expected_types: List(Option(IrType)),
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   ctx: AnalyzeCtx,
@@ -1397,6 +1625,7 @@ fn walk_positional_args(
     args,
     expected_types,
     env,
+    local_fns,
     cur_mod,
     cur_fn,
     ctx,
@@ -1410,6 +1639,7 @@ fn walk_positional_loop(
   args: List(IrExpr),
   expected_types: List(Option(IrType)),
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   ctx: AnalyzeCtx,
@@ -1425,11 +1655,23 @@ fn walk_positional_loop(
         [] -> #(None, [])
       }
       let next_acc =
-        walk_expr(arg, env, cur_mod, cur_fn, exp_ty, ctx, bmap, allowed, acc)
+        walk_expr(
+          arg,
+          env,
+          local_fns,
+          cur_mod,
+          cur_fn,
+          exp_ty,
+          ctx,
+          bmap,
+          allowed,
+          acc,
+        )
       walk_positional_loop(
         rest_args,
         rest_exps,
         env,
+        local_fns,
         cur_mod,
         cur_fn,
         ctx,
@@ -1444,6 +1686,7 @@ fn walk_positional_loop(
 fn walk_untyped_call_args(
   args: List(IrCallArg),
   env: Dict(String, IrType),
+  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
   cur_mod: String,
   cur_fn: IrFunction,
   ctx: AnalyzeCtx,
@@ -1452,7 +1695,18 @@ fn walk_untyped_call_args(
   acc: FnTraitBounds,
 ) -> FnTraitBounds {
   list.fold(args, acc, fn(a, arg) {
-    walk_expr(arg.value, env, cur_mod, cur_fn, None, ctx, bmap, allowed, a)
+    walk_expr(
+      arg.value,
+      env,
+      local_fns,
+      cur_mod,
+      cur_fn,
+      None,
+      ctx,
+      bmap,
+      allowed,
+      a,
+    )
   })
 }
 // -----------------------------------------------------------------------------
