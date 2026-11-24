@@ -96,6 +96,7 @@ Gleam `panic`, `todo`, `assert`, and failing `let assert` patterns lower to Moon
 
 - **Self vs. mutual tail recursion:** Self-tail-recursive functions rewrite to MoonBit functional `for` loops (`src/lower/tco.gleam`), guaranteeing $O(1)$ stack usage on all targets. Mutually recursive tail calls remain ordinary calls (`wasm-gc` supports native tail calls via `return_call`, while linear `wasm` / `js` / `native` are not yet loop-rewritten by `gekko`).
 - **`gleam test` vs. `gekko test`:** Standard `gleam test` runs on Erlang or Node/JS and cannot invoke `@external(moonbit, ...)` functions unless an Erlang/JS external or pure-Gleam fallback is provided. Use `gekko test` to transpile and run tests via `moon test`.
+- **`gleeunit`:** `gekko test` drops the `gleeunit` runner (and `gleeunit.main()`), since `moon test` runs each `*_test` function itself. `gleeunit/should` is pure Gleam and is transpiled when a test module imports it.
 
 ---
 

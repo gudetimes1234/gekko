@@ -37,8 +37,12 @@ pub type DiscoveredPkg {
   )
 }
 
+/// The `gleeunit` assertions module. It is pure Gleam, unlike the test runners.
+const gleeunit_should_module = "gleeunit/should"
+
 /// Return True if `pkg_name` is a target-specific test/runtime package that
-/// must not be transpiled from Erlang/JS sources.
+/// must not be transpiled from Erlang/JS sources. The one exception is the
+/// `gleeunit/should` module, see `discover_gleeunit_should`.
 pub fn is_intercepted_package(pkg_name: String) -> Bool {
   case pkg_name {
     "gleeunit" | "gleam_erlang" | "gleam_javascript" -> True
@@ -147,8 +151,13 @@ pub fn discover_all_dependencies(
     include_tests,
   ))
 
+  use gleeunit_pkgs <- result.try(case include_tests {
+    True -> discover_gleeunit_should(project_root, packages_dir, root_name)
+    False -> Ok([])
+  })
+
   let combined_map =
-    list.append(build_pkgs, local_pkgs)
+    list.flatten([build_pkgs, local_pkgs, gleeunit_pkgs])
     |> list.fold(dict.new(), fn(acc, pkg) {
       dict.insert(acc, pkg.package_name, pkg)
     })
@@ -201,6 +210,74 @@ pub fn load_discovered_dependencies(
       packages_hash,
     )
   })
+}
+
+/// Discover `gleeunit` when a test module of `project_root` imports
+/// `gleeunit/should`. `select_modules` then drops every other `gleeunit` module.
+fn discover_gleeunit_should(
+  project_root: String,
+  packages_dir: String,
+  root_name: String,
+) -> Result(List(DiscoveredPkg), String) {
+  let pkg_root = filepath.join(packages_dir, "gleeunit")
+  let toml_path = filepath.join(pkg_root, "gleam.toml")
+  let should_path =
+    filepath.join(pkg_root, "src/" <> gleeunit_should_module <> ".gleam")
+  case
+    root_name != "gleeunit",
+    simplifile.is_file(toml_path),
+    simplifile.is_file(should_path)
+  {
+    True, Ok(True), Ok(True) ->
+      case tests_import_gleeunit_should(project_root) {
+        True -> {
+          use #(name, version, deps) <- result.map(read_package_manifest(
+            toml_path,
+            "gleeunit",
+          ))
+          [
+            DiscoveredPkg(
+              package_name: name,
+              version:,
+              package_root: pkg_root,
+              deps:,
+            ),
+          ]
+        }
+        False -> Ok([])
+      }
+    _, _, _ -> Ok([])
+  }
+}
+
+/// Test modules that fail to parse are reported later, when they are loaded.
+fn tests_import_gleeunit_should(project_root: String) -> Bool {
+  let test_dir = filepath.join(project_root, "test")
+  case simplifile.is_directory(test_dir) {
+    Ok(True) ->
+      discover_and_parse(test_dir, Some("test"))
+      |> result.unwrap([])
+      |> list.any(fn(entry) {
+        let #(_, module, _) = entry
+        list.any(module.imports, fn(def) {
+          def.definition.module == gleeunit_should_module
+        })
+      })
+    _ -> False
+  }
+}
+
+/// Keep only `gleeunit/should` from `gleeunit`, whose other modules are
+/// Erlang/JS test runners. Other packages keep all of their modules.
+fn select_modules(
+  pkg_name: String,
+  modules: List(#(String, glance.Module, PrepassResult)),
+) -> List(#(String, glance.Module, PrepassResult)) {
+  case pkg_name {
+    "gleeunit" ->
+      list.filter(modules, fn(entry) { entry.0 == gleeunit_should_module })
+    _ -> modules
+  }
 }
 
 fn discover_local_path_packages(
@@ -573,6 +650,7 @@ fn load_single_dependency(
     Ok(True) -> discover_and_parse(src_dir, None)
     _ -> Ok([])
   })
+  let modules = select_modules(pkg.package_name, modules)
   case modules {
     [] ->
       Ok(LoadedDependency(

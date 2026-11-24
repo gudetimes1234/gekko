@@ -945,6 +945,102 @@ pub fn build_library_and_stale_test_cleanup_e2e_test() {
   Nil
 }
 
+pub fn gleeunit_should_e2e_test() {
+  let root = "build/test_fixtures/gleeunit_should_pkg"
+  let out_dir = "build/test_fixtures/gleeunit_should_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  let gleeunit_dir = filepath.join(root, "build/packages/gleeunit")
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      gleeunit_dir,
+      "src/gleeunit",
+    ))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"gleeunit_should_pkg\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ngleeunit = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "manifest.toml"),
+      contents: "packages = [\n"
+        <> "  { name = \"gleeunit\", version = \"1.11.0\", build_tools = [\"gleam\"], requirements = [], otp_app = \"gleeunit\", source = \"hex\", outer_checksum = \"00\" },\n"
+        <> "]\n\n[requirements]\ngleeunit = { version = \">= 1.0.0 and < 2.0.0\" }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "build/packages/packages.toml"),
+      contents: "[packages]\ngleeunit = \"1.11.0\"\n\n[git]\n",
+    )
+    == Ok(Nil)
+
+  // Like the real package: `gleeunit` has unmapped Erlang externals, while
+  // `gleeunit/should` is pure Gleam.
+  assert simplifile.write(
+      to: filepath.join(gleeunit_dir, "gleam.toml"),
+      contents: "name = \"gleeunit\"\nversion = \"1.11.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(gleeunit_dir, "src/gleeunit.gleam"),
+      contents: "pub fn main() -> Nil {\n  run()\n}\n\n@external(erlang, \"gleeunit_ffi\", \"run\")\nfn run() -> Nil\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(gleeunit_dir, "src/gleeunit/should.gleam"),
+      contents: "pub fn equal(a: t, b: t) -> Nil {\n  assert a == b\n  Nil\n}\n\npub fn be_ok(a: Result(a, e)) -> a {\n  case a {\n    Ok(value) -> value\n    _ -> panic as \"should be ok\"\n  }\n}\n",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/gleeunit_should_pkg.gleam"),
+      contents: "pub fn double(x: Int) -> Int {\n  x * 2\n}\n",
+    )
+    == Ok(Nil)
+  let test_path = filepath.join(root, "test/should_sample_test.gleam")
+  assert simplifile.write(
+      to: test_path,
+      contents: "import gleeunit\nimport gleeunit/should\nimport gleeunit_should_pkg\n\npub fn main() -> Nil {\n  gleeunit.main()\n}\n\npub fn double_test() {\n  gleeunit_should_pkg.double(2) |> should.equal(4)\n  Ok(1) |> should.be_ok |> should.equal(1)\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(summary) = workspace.transpile_project(root, out_dir)
+  assert list.contains(summary.emitted_modules, "gleeunit/should")
+  assert !list.contains(summary.emitted_modules, "gleeunit")
+  test_helpers.assert_all_moonbit_targets_ok(out_dir, "passed: 1, failed: 0")
+
+  // A failing `should` assertion fails the MoonBit test run
+  assert simplifile.write(
+      to: test_path,
+      contents: "import gleeunit/should\n\npub fn wrong_test() {\n  1 |> should.equal(2)\n}\n",
+    )
+    == Ok(Nil)
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  let failing =
+    cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
+  assert failing.exit_code != 0
+
+  // Neither non-test builds nor tests without `gleeunit/should` pull it in
+  let assert Ok(build_summary) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+  assert !list.contains(build_summary.emitted_modules, "gleeunit/should")
+  assert simplifile.write(
+      to: test_path,
+      contents: "pub fn plain_test() -> Nil {\n  assert 1 == 1\n}\n",
+    )
+    == Ok(Nil)
+  let assert Ok(plain_summary) = workspace.transpile_project(root, out_dir)
+  assert !list.contains(plain_summary.emitted_modules, "gleeunit/should")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}
+
 pub fn scaffold_init_and_clean_e2e_test() {
   let root = "build/test_fixtures/scaffold_demo"
   let _ = simplifile.delete(file_or_dir_at: root)
