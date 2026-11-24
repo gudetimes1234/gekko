@@ -325,7 +325,7 @@ version = \">= 1.0.0 and < 2.0.0\"
 
 [patch.\"upstream_lib:upstream_lib\"]
 file = \"patches/upstream_lib.mbt\"
-imports = [\"upstream_helper\"]
+imports = [\"upstream_helper\", \"moonbitlang/core/math\"]
 types = [\"Handle\"]
 functions = [\"make_handle\", \"read_handle\"]
 
@@ -336,7 +336,7 @@ prefer = \"javascript\"
     == Ok(Nil)
   assert simplifile.write(
       to: filepath.join(shim_dir, "patches/upstream_lib.mbt"),
-      contents: "///|\npub struct Handle {\n  value : Int64\n}\n\n///|\npub fn make_handle(n : Int64) -> Result[Handle, LibError] {\n  if n == 0L {\n    Err(Empty)\n  } else if n < 0L {\n    Err(BadCode(n))\n  } else {\n    let _ = @upstream_helper.helper_tag()\n    Ok({ value: n })\n  }\n}\n\n///|\npub fn read_handle(h : Handle) -> Int64 {\n  h.value\n}\n",
+      contents: "///|\npub struct Handle {\n  value : Int64\n}\n\n///|\npub fn make_handle(n : Int64) -> Result[Handle, LibError] {\n  if n == 0L {\n    Err(Empty)\n  } else if n < 0L {\n    Err(BadCode(n))\n  } else {\n    let _ = @upstream_helper.helper_tag()\n    let _ = @math.floor(1.5)\n    Ok({ value: n })\n  }\n}\n\n///|\npub fn read_handle(h : Handle) -> Int64 {\n  h.value\n}\n",
     )
     == Ok(Nil)
 

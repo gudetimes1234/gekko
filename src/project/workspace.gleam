@@ -689,20 +689,20 @@ fn merge_patch_imports(
               Ok(mapped) -> mapped
               Error(_) -> imp.package
             }
-            #(pkg_or_dir, imp.alias)
+            #(pkg_or_dir, imp.alias, default_patch_import_alias(imp.package))
           })
         })
       let with_prelude = case dict.has_key(pkg_to_alias, "gprelude") {
         True -> raw_extra
-        False -> [#("gprelude", Some("gprelude")), ..raw_extra]
+        False -> [#("gprelude", Some("gprelude"), "gprelude"), ..raw_extra]
       }
       use #(_, _, rev_added) <- result.try(
         list.try_fold(
           with_prelude,
           #(alias_to_pkg, pkg_to_alias, []),
-          fn(state, pair) {
+          fn(state, triple) {
             let #(a_to_p, p_to_a, added) = state
-            let #(pkg, alias_opt) = pair
+            let #(pkg, alias_opt, default_alias) = triple
             case dict.get(p_to_a, pkg) {
               Ok(existing_alias) ->
                 case alias_opt {
@@ -723,7 +723,7 @@ fn merge_patch_imports(
               Error(_) -> {
                 let alias = case alias_opt {
                   Some(a) -> a
-                  None -> mangle.module_to_alias(pkg)
+                  None -> default_alias
                 }
                 case dict.get(a_to_p, alias) {
                   Ok(existing_pkg) if existing_pkg != pkg ->
@@ -757,6 +757,16 @@ fn merge_patch_imports(
       Ok(list.append(base_imports, list.reverse(rev_added)))
     }
   }
+}
+
+fn default_patch_import_alias(raw_package: String) -> String {
+  let segment =
+    raw_package
+    |> string.split("/")
+    |> list.filter(fn(s) { s != "" })
+    |> list.last
+    |> result.unwrap(raw_package)
+  mangle.mangle_ident(segment)
 }
 
 fn sync_patched_files(
