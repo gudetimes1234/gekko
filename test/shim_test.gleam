@@ -7,8 +7,7 @@ import project/cmd
 import project/ffi_config
 import project/loader
 import project/prepass.{
-  ExternalType, InPackageCall, PackageCall, PreferErlang, PreferJavascript,
-  WasmImport,
+  ExternalType, PackageCall, Patched, PreferErlang, PreferJavascript, WasmImport,
 }
 import project/shim_cli
 import project/workspace
@@ -29,16 +28,15 @@ type = \"FileInfo\"
 package = \"simplifile_ffi\"
 function = \"read_bits\"
 
-[overrides.\"simplifile:simplifile.parse_info\"]
-in_package = \"__shim_parse_info\"
-
 [overrides.\"simplifile:simplifile.raw_op\"]
 wasm_module = \"wasi\"
 import_name = \"op\"
 
-[module_inject.\"simplifile:simplifile\"]
-files = [\"overlays/simplifile_patch.mbt\"]
-imports = [\"simplifile_ffi\", \"gleam/string_tree as st\"]
+[patch.\"simplifile:simplifile\"]
+file = \"patches/simplifile.mbt\"
+imports = [\"gleam/string_tree as st\"]
+types = [\"FileInfo\"]
+functions = [\"parse_info\"]
 
 [target_branch.\"simplifile:simplifile\"]
 prefer = \"javascript\"
@@ -55,29 +53,28 @@ prefer = \"javascript\"
   let assert Ok(ovrs) = ffi_config.parse_gekko_toml(gekko_toml)
   assert dict.get(ovrs, "simplifile:simplifile.read_bits")
     == Ok(PackageCall(package: "simplifile_ffi", function: "read_bits"))
-  assert dict.get(ovrs, "simplifile:simplifile.parse_info")
-    == Ok(InPackageCall(function: "__shim_parse_info"))
   assert dict.get(ovrs, "simplifile:simplifile.raw_op")
     == Ok(WasmImport(wasm_module: "wasi", import_name: "op"))
 
-  let assert Ok(injs) = ffi_config.parse_module_inject_gekko_toml(gekko_toml)
-  let assert Ok(inj) = dict.get(injs, "simplifile:simplifile")
-  assert inj.files
+  let assert Ok(patches) = ffi_config.parse_module_patch_gekko_toml(gekko_toml)
+  let assert Ok(patch) = dict.get(patches, "simplifile:simplifile")
+  assert patch.files
     == [
-      ffi_config.ModuleInjectFile(
-        source_path: "overlays/simplifile_patch.mbt",
-        dest_filename: "simplifile_patch.mbt",
+      ffi_config.ModulePatchFile(
+        source_path: "patches/simplifile.mbt",
+        dest_filename: "simplifile.mbt",
         source_pkg: "",
       ),
     ]
-  assert inj.imports
+  assert patch.imports
     == [
-      ffi_config.ModuleInjectImport(package: "simplifile_ffi", alias: None),
-      ffi_config.ModuleInjectImport(
+      ffi_config.ModulePatchImport(
         package: "gleam/string_tree",
         alias: Some("st"),
       ),
     ]
+  assert patch.types == ["FileInfo"]
+  assert patch.functions == ["parse_info"]
 
   let assert Ok(branches) =
     ffi_config.parse_target_branch_gekko_toml(gekko_toml)
@@ -97,12 +94,14 @@ version = \"~> 2.1\"
 package = \"simplifile_ffi\"
 type = \"FileInfo\"
 
-[tools.gekko.overrides.\"simplifile:simplifile.parse_info\"]
-in_package = \"__shim_parse_info\"
+[tools.gekko.overrides.\"simplifile:simplifile.read_bits\"]
+package = \"simplifile_ffi\"
+function = \"read_bits\"
 
-[tools.gekko.module_inject.\"simplifile:simplifile\"]
-files = [\"overlays/a.mbt\"]
+[tools.gekko.patch.\"simplifile:simplifile\"]
+files = [\"patches/a.mbt\"]
 imports = [\"simplifile_ffi @sffi\"]
+functions = [\"parse_info\"]
 
 [tools.gekko.target_branch.\"simplifile:simplifile\"]
 prefer = \"erlang\"
@@ -114,23 +113,25 @@ prefer = \"erlang\"
   assert dict.get(g_tys, "simplifile:simplifile.FileInfo")
     == Ok(ExternalType(package: "simplifile_ffi", type_name: "FileInfo"))
   let assert Ok(g_ovrs) = ffi_config.parse_gleam_toml_overrides(gleam_toml)
-  assert dict.get(g_ovrs, "simplifile:simplifile.parse_info")
-    == Ok(InPackageCall(function: "__shim_parse_info"))
-  let assert Ok(g_injs) = ffi_config.parse_module_inject_gleam_toml(gleam_toml)
-  let assert Ok(g_inj) = dict.get(g_injs, "simplifile:simplifile")
-  assert g_inj.imports
+  assert dict.get(g_ovrs, "simplifile:simplifile.read_bits")
+    == Ok(PackageCall(package: "simplifile_ffi", function: "read_bits"))
+  let assert Ok(g_patches) =
+    ffi_config.parse_module_patch_gleam_toml(gleam_toml)
+  let assert Ok(g_patch) = dict.get(g_patches, "simplifile:simplifile")
+  assert g_patch.imports
     == [
-      ffi_config.ModuleInjectImport(
+      ffi_config.ModulePatchImport(
         package: "simplifile_ffi",
         alias: Some("sffi"),
       ),
     ]
+  assert g_patch.functions == ["parse_info"]
   let assert Ok(g_br) = ffi_config.parse_target_branch_gleam_toml(gleam_toml)
   assert dict.get(g_br, "simplifile:simplifile") == Ok(PreferErlang)
 
-  // Invalid mutual-exclusion & branch checks
-  let bad_in_pkg = "[overrides.\"m.f\"]\nin_package = \"x\"\npackage = \"p\"\n"
-  let assert Error(_) = ffi_config.parse_gekko_toml(bad_in_pkg)
+  // Invalid patch (both file & files) & branch checks
+  let bad_patch = "[patch.\"m\"]\nfile = \"a.mbt\"\nfiles = [\"b.mbt\"]\n"
+  let assert Error(_) = ffi_config.parse_module_patch_gekko_toml(bad_patch)
 
   let bad_branch = "[target_branch.\"m\"]\nprefer = \"python\"\n"
   let assert Error(_) = ffi_config.parse_target_branch_gekko_toml(bad_branch)
@@ -163,7 +164,7 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
       shim: None,
       overrides: dict.new(),
       type_overrides: dict.new(),
-      module_injects: dict.new(),
+      module_patches: dict.new(),
       target_branches: dict.new(),
     )
   }
@@ -209,14 +210,11 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
   let root_resolves =
     ffi_config.PackageOverlay(
       ..empty_ov("app"),
-      overrides: dict.from_list([
-        #("lib:lib.foo", InPackageCall("__app_foo")),
-      ]),
+      overrides: dict.from_list([#("lib:lib.foo", Patched)]),
     )
   let assert Ok(resolved) =
     ffi_config.merge_overlays([shim_a, shim_b], root_resolves)
-  assert dict.get(resolved.overrides, "lib:lib.foo")
-    == Ok(InPackageCall("__app_foo"))
+  assert dict.get(resolved.overrides, "lib:lib.foo") == Ok(Patched)
 }
 
 pub fn multi_error_unmapped_externals_and_shim_cli_test() {
@@ -259,24 +257,19 @@ pub fn multi_error_unmapped_externals_and_shim_cli_test() {
   assert string.contains(report, "raw_lib.OpaqueHandle")
   assert string.contains(report, "raw_lib.first")
   assert string.contains(report, "raw_lib.second")
-  assert string.contains(
-    report,
-    "[type_overrides.\"raw_lib:raw_lib.OpaqueHandle\"]",
-  )
-  assert string.contains(report, "[overrides.\"raw_lib:raw_lib.first\"]")
+  assert string.contains(report, "[patch.\"raw_lib:raw_lib\"]")
 
-  // `gekko shim init raw_lib` scaffolds a valid companion shim directory
+  // `gekko shim init raw_lib` scaffolds a valid co-located [patch] companion shim
   let shim_out = filepath.join(root, "gekko_raw_lib")
   let assert Ok(_) = shim_cli.init_shim(root, "raw_lib", Some(shim_out))
   let assert Ok(shim_toml) =
     simplifile.read(filepath.join(shim_out, "gekko.toml"))
   assert string.contains(shim_toml, "target = \"raw_lib\"")
   assert string.contains(shim_toml, ">= 1.0.0 and < 2.0.0")
+  assert string.contains(shim_toml, "[patch.\"raw_lib:raw_lib\"]")
+  assert string.contains(shim_toml, "file = \"patches/raw_lib.mbt\"")
   let assert Ok(stub_mbt) =
-    simplifile.read(filepath.join(
-      shim_out,
-      "moonbit/raw_lib_ffi/raw_lib_ffi.mbt",
-    ))
+    simplifile.read(filepath.join(shim_out, "patches/raw_lib.mbt"))
   assert string.contains(stub_mbt, "pub type OpaqueHandle")
   assert string.contains(stub_mbt, "pub fn first(")
   assert string.contains(stub_mbt, "pub fn second(")
@@ -297,12 +290,7 @@ pub fn companion_shim_end_to_end_moon_test() {
     == Ok(Nil)
   assert simplifile.create_directory_all(filepath.join(shim_dir, "src"))
     == Ok(Nil)
-  assert simplifile.create_directory_all(filepath.join(
-      shim_dir,
-      "moonbit/upstream_ffi",
-    ))
-    == Ok(Nil)
-  assert simplifile.create_directory_all(filepath.join(shim_dir, "overlays"))
+  assert simplifile.create_directory_all(filepath.join(shim_dir, "patches"))
     == Ok(Nil)
 
   // 1. Completely unmodified upstream library (zero @external(moonbit) pragmas)
@@ -312,12 +300,17 @@ pub fn companion_shim_end_to_end_moon_test() {
     )
     == Ok(Nil)
   assert simplifile.write(
+      to: filepath.join(upstream_dir, "src/upstream_helper.gleam"),
+      contents: "pub fn helper_tag() -> String { \"ok\" }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
       to: filepath.join(upstream_dir, "src/upstream_lib.gleam"),
-      contents: "pub type Handle\n\npub type LibError {\n  Empty\n  BadCode(Int)\n}\n\n@external(erlang, \"erl_mod\", \"make_handle\")\npub fn make_handle(n: Int) -> Result(Handle, LibError)\n\n@external(erlang, \"erl_mod\", \"read_handle\")\npub fn read_handle(h: Handle) -> Int\n\n@target(erlang)\n@external(erlang, \"erl_mod\", \"platform_double\")\npub fn platform_double(x: Int) -> Int\n\n@target(javascript)\npub fn platform_double(x: Int) -> Int {\n  x * 2\n}\n",
+      contents: "import upstream_helper\n\npub type Handle\n\npub type LibError {\n  Empty\n  BadCode(Int)\n}\n\n@external(erlang, \"erl_mod\", \"make_handle\")\npub fn make_handle(n: Int) -> Result(Handle, LibError)\n\n@external(erlang, \"erl_mod\", \"read_handle\")\npub fn read_handle(h: Handle) -> Int\n\n@target(erlang)\n@external(erlang, \"erl_mod\", \"platform_double\")\npub fn platform_double(x: Int) -> Int\n\n@target(javascript)\npub fn platform_double(x: Int) -> Int {\n  let _ = upstream_helper.helper_tag()\n  x * 2\n}\n",
     )
     == Ok(Nil)
 
-  // 2. Companion shim package (empty src/, gekko.toml, moonbit/, overlays/)
+  // 2. Companion shim package using unified co-located [patch] (no separate FFI pkg!)
   assert simplifile.write(
       to: filepath.join(shim_dir, "gleam.toml"),
       contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n",
@@ -330,20 +323,11 @@ pub fn companion_shim_end_to_end_moon_test() {
 target = \"upstream_lib\"
 version = \">= 1.0.0 and < 2.0.0\"
 
-[type_overrides.\"upstream_lib:upstream_lib.Handle\"]
-package = \"upstream_ffi\"
-type = \"Handle\"
-
-[overrides.\"upstream_lib:upstream_lib.make_handle\"]
-in_package = \"__shim_make_handle\"
-
-[overrides.\"upstream_lib:upstream_lib.read_handle\"]
-package = \"upstream_ffi\"
-function = \"read_handle\"
-
-[module_inject.\"upstream_lib:upstream_lib\"]
-files = [\"overlays/upstream_patch.mbt\"]
-imports = [\"upstream_ffi\"]
+[patch.\"upstream_lib:upstream_lib\"]
+file = \"patches/upstream_lib.mbt\"
+imports = [\"upstream_helper\"]
+types = [\"Handle\"]
+functions = [\"make_handle\", \"read_handle\"]
 
 [target_branch.\"upstream_lib:upstream_lib\"]
 prefer = \"javascript\"
@@ -351,13 +335,8 @@ prefer = \"javascript\"
     )
     == Ok(Nil)
   assert simplifile.write(
-      to: filepath.join(shim_dir, "moonbit/upstream_ffi/upstream_ffi.mbt"),
-      contents: "///|\npub struct Handle {\n  value : Int64\n}\n\n///|\npub fn make_raw(n : Int64) -> Handle {\n  { value: n }\n}\n\n///|\npub fn read_handle(h : Handle) -> Int64 {\n  h.value\n}\n",
-    )
-    == Ok(Nil)
-  assert simplifile.write(
-      to: filepath.join(shim_dir, "overlays/upstream_patch.mbt"),
-      contents: "///|\nfn __shim_make_handle(n : Int64) -> Result[Handle, LibError] {\n  if n == 0L {\n    Err(Empty)\n  } else if n < 0L {\n    Err(BadCode(n))\n  } else {\n    Ok(@upstream_ffi.make_raw(n))\n  }\n}\n",
+      to: filepath.join(shim_dir, "patches/upstream_lib.mbt"),
+      contents: "///|\npub struct Handle {\n  value : Int64\n}\n\n///|\npub fn make_handle(n : Int64) -> Result[Handle, LibError] {\n  if n == 0L {\n    Err(Empty)\n  } else if n < 0L {\n    Err(BadCode(n))\n  } else {\n    let _ = @upstream_helper.helper_tag()\n    Ok({ value: n })\n  }\n}\n\n///|\npub fn read_handle(h : Handle) -> Int64 {\n  h.value\n}\n",
     )
     == Ok(Nil)
 
@@ -381,11 +360,19 @@ prefer = \"javascript\"
   let assert Ok(summary) = workspace.transpile_project(root, out_dir)
   assert summary.warnings == []
 
+  let chk =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert chk.exit_code == 0
+
   let test_run =
     cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
   assert test_run.exit_code == 0
 
-  // 4. Verify stale injected file cleanup + version mismatch & stale override warnings
+  // 4. Verify stale patch file cleanup + version mismatch & stale override warnings
   assert simplifile.write(
       to: filepath.join(shim_dir, "gekko.toml"),
       contents: "
@@ -393,17 +380,10 @@ prefer = \"javascript\"
 target = \"upstream_lib\"
 version = \">= 2.0.0\"
 
-[type_overrides.\"upstream_lib:upstream_lib.Handle\"]
-package = \"upstream_ffi\"
-type = \"Handle\"
-
-[overrides.\"upstream_lib:upstream_lib.make_handle\"]
-package = \"upstream_ffi\"
-function = \"make_raw\"
-
-[overrides.\"upstream_lib:upstream_lib.read_handle\"]
-package = \"upstream_ffi\"
-function = \"read_handle\"
+[patch.\"upstream_lib:upstream_lib\"]
+file = \"patches/upstream_lib.mbt\"
+types = [\"Handle\"]
+functions = [\"make_handle\", \"read_handle\"]
 
 [overrides.\"upstream_lib:upstream_lib.nonexistent_fn\"]
 package = \"upstream_ffi\"
@@ -421,9 +401,36 @@ prefer = \"javascript\"
   assert list.any(summary2.warnings, fn(w) {
     string.contains(w, "upstream_lib:upstream_lib.nonexistent_fn")
   })
-  let stale_inject =
-    filepath.join(out_dir, "upstream_lib/__gekko_inject_1_upstream_patch.mbt")
-  assert simplifile.is_file(stale_inject) != Ok(True)
+
+  // Remove [patch] and verify stale __gekko_patch_*.mbt is deleted
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "gekko.toml"),
+      contents: "
+[shim]
+target = \"upstream_lib\"
+version = \">= 2.0.0\"
+
+[type_overrides.\"upstream_lib:upstream_lib.Handle\"]
+package = \"gprelude\"
+type = \"Dynamic\"
+
+[overrides.\"upstream_lib:upstream_lib.make_handle\"]
+package = \"gprelude\"
+function = \"ignore\"
+
+[overrides.\"upstream_lib:upstream_lib.read_handle\"]
+package = \"gprelude\"
+function = \"ignore\"
+
+[target_branch.\"upstream_lib:upstream_lib\"]
+prefer = \"javascript\"
+",
+    )
+    == Ok(Nil)
+  let _ = workspace.transpile_project(root, out_dir)
+  let stale_patch =
+    filepath.join(out_dir, "upstream_lib/__gekko_patch_1_upstream_lib.mbt")
+  assert simplifile.is_file(stale_patch) != Ok(True)
 
   let _ = simplifile.delete(file_or_dir_at: root)
 }

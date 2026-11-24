@@ -165,12 +165,12 @@ pub fn transpile_project_with_tests(
   let base_ffi_metadata =
     ffi_meta.scan_package_roots_excluding(
       ffi_roots,
-      overlays.injected_source_files,
+      overlays.patched_source_files,
     )
-  use ffi_metadata <- result.try(scan_injected_metadata(
+  use ffi_metadata <- result.try(scan_patched_metadata(
     base_ffi_metadata,
     all_modules,
-    overlays.module_injects,
+    overlays.module_patches,
   ))
 
   let table =
@@ -242,7 +242,7 @@ pub fn transpile_project_with_tests(
           project_name,
           out_dir,
           cur_reserved,
-          overlays.injected_source_files,
+          overlays.patched_source_files,
         ),
       )
       let next_reserved = list.fold(dep_pkgs, cur_reserved, set.insert)
@@ -257,7 +257,7 @@ pub fn transpile_project_with_tests(
       project_name,
       out_dir,
       reserved_after_deps,
-      overlays.injected_source_files,
+      overlays.patched_source_files,
     ),
   )
   let local_moonbit_packages =
@@ -304,12 +304,12 @@ pub fn transpile_project_with_tests(
         Ok(#(pn, _, _)) -> pn
         Error(_) -> project_name
       }
-      let mod_injects =
-        lookup_module_injects(mod_pkg_name, mod_name, overlays.module_injects)
-      use merged_imports <- result.try(merge_injected_imports(
+      let mod_patches =
+        lookup_module_patches(mod_pkg_name, mod_name, overlays.module_patches)
+      use merged_imports <- result.try(merge_patch_imports(
         mod_name,
         imports,
-        mod_injects,
+        mod_patches,
         resolved_pkg_dirs,
       ))
 
@@ -326,7 +326,7 @@ pub fn transpile_project_with_tests(
         filepath.join(target_dir, pkg_dir <> ".mbt"),
         mbt_src,
       ))
-      use _ <- result.try(sync_injected_files(target_dir, mod_injects))
+      use _ <- result.try(sync_patched_files(target_dir, mod_patches))
       let mod_origins = case dict.get(module_meta_by_name, mod_name) {
         Ok(#(pkg_name, ast_mod, gleam_src)) ->
           diagnostics.collect_module_origins(
@@ -627,20 +627,20 @@ fn write_text_file(path: String, contents: String) -> Result(Nil, String) {
   }
 }
 
-fn scan_injected_metadata(
+fn scan_patched_metadata(
   base_meta: ffi_meta.FfiMetadata,
   all_modules: List(#(String, String, glance.Module, PrepassResult)),
-  module_injects: Dict(String, ffi_config.ModuleInject),
+  module_patches: Dict(String, ffi_config.ModulePatch),
 ) -> Result(ffi_meta.FfiMetadata, String) {
   list.try_fold(all_modules, base_meta, fn(meta_acc, entry) {
     let #(pkg_name, mod_name, _, _) = entry
-    let injects = lookup_module_injects(pkg_name, mod_name, module_injects)
-    list.try_fold(injects, meta_acc, fn(inner_acc, inj) {
-      list.try_fold(inj.files, inner_acc, fn(file_acc, f) {
+    let patches = lookup_module_patches(pkg_name, mod_name, module_patches)
+    list.try_fold(patches, meta_acc, fn(inner_acc, patch) {
+      list.try_fold(patch.files, inner_acc, fn(file_acc, f) {
         use content <- result.try(
           simplifile.read(from: f.source_path)
           |> result.map_error(fn(err) {
-            "Failed to read injected MoonBit file "
+            "Failed to read patch MoonBit file "
             <> f.source_path
             <> ": "
             <> simplifile.describe_error(err)
@@ -652,83 +652,128 @@ fn scan_injected_metadata(
   })
 }
 
-fn lookup_module_injects(
+fn lookup_module_patches(
   pkg_name: String,
   mod_name: String,
-  module_injects: Dict(String, ffi_config.ModuleInject),
-) -> List(ffi_config.ModuleInject) {
+  module_patches: Dict(String, ffi_config.ModulePatch),
+) -> List(ffi_config.ModulePatch) {
   let keys = [
     pkg_name <> ":" <> mod_name,
     pkg_name <> "." <> mod_name,
     mod_name,
   ]
-  list.filter_map(keys, fn(k) { dict.get(module_injects, k) })
+  list.filter_map(keys, fn(k) { dict.get(module_patches, k) })
 }
 
-fn merge_injected_imports(
+fn merge_patch_imports(
   mod_name: String,
   base_imports: List(#(String, String)),
-  injects: List(ffi_config.ModuleInject),
+  patches: List(ffi_config.ModulePatch),
   resolved_pkg_dirs: Dict(String, String),
 ) -> Result(List(#(String, String)), String) {
-  let alias_to_pkg =
-    list.fold(base_imports, dict.new(), fn(acc, entry) {
-      dict.insert(acc, entry.1, entry.0)
-    })
-  let extra =
-    list.flat_map(injects, fn(inj) {
-      list.map(inj.imports, fn(imp) {
-        let pkg_or_dir = case dict.get(resolved_pkg_dirs, imp.package) {
-          Ok(mapped) -> mapped
-          Error(_) -> imp.package
-        }
-        let alias = case imp.alias {
-          Some(a) -> a
-          None -> mangle.module_to_alias(pkg_or_dir)
-        }
-        #(pkg_or_dir, alias)
-      })
-    })
-  use _ <- result.try(
-    list.try_fold(extra, alias_to_pkg, fn(seen, pair) {
-      let #(pkg, alias) = pair
-      case dict.get(seen, alias) {
-        Ok(existing_pkg) if existing_pkg != pkg ->
-          Error(
-            "Import alias conflict for @"
-            <> alias
-            <> " in module '"
-            <> mod_name
-            <> "': '"
-            <> existing_pkg
-            <> "' vs '"
-            <> pkg
-            <> "' (disambiguate with \""
-            <> pkg
-            <> " as <custom_alias>\")",
-          )
-        _ -> Ok(dict.insert(seen, alias, pkg))
+  case patches {
+    [] -> Ok(base_imports)
+    _ -> {
+      let alias_to_pkg =
+        list.fold(base_imports, dict.new(), fn(acc, entry) {
+          dict.insert(acc, entry.1, entry.0)
+        })
+      let pkg_to_alias =
+        list.fold(base_imports, dict.new(), fn(acc, entry) {
+          dict.insert(acc, entry.0, entry.1)
+        })
+      let raw_extra =
+        list.flat_map(patches, fn(patch) {
+          list.map(patch.imports, fn(imp) {
+            let pkg_or_dir = case dict.get(resolved_pkg_dirs, imp.package) {
+              Ok(mapped) -> mapped
+              Error(_) -> imp.package
+            }
+            #(pkg_or_dir, imp.alias)
+          })
+        })
+      let with_prelude = case dict.has_key(pkg_to_alias, "gprelude") {
+        True -> raw_extra
+        False -> [#("gprelude", Some("gprelude")), ..raw_extra]
       }
-    }),
-  )
-  Ok(list.append(base_imports, extra))
+      use #(_, _, rev_added) <- result.try(
+        list.try_fold(
+          with_prelude,
+          #(alias_to_pkg, pkg_to_alias, []),
+          fn(state, pair) {
+            let #(a_to_p, p_to_a, added) = state
+            let #(pkg, alias_opt) = pair
+            case dict.get(p_to_a, pkg) {
+              Ok(existing_alias) ->
+                case alias_opt {
+                  None -> Ok(state)
+                  Some(requested) if requested == existing_alias -> Ok(state)
+                  Some(requested) ->
+                    Error(
+                      "Patch import alias conflict for package '"
+                      <> pkg
+                      <> "' in module '"
+                      <> mod_name
+                      <> "': module already imports it as @"
+                      <> existing_alias
+                      <> ", cannot also alias as @"
+                      <> requested,
+                    )
+                }
+              Error(_) -> {
+                let alias = case alias_opt {
+                  Some(a) -> a
+                  None -> mangle.module_to_alias(pkg)
+                }
+                case dict.get(a_to_p, alias) {
+                  Ok(existing_pkg) if existing_pkg != pkg ->
+                    Error(
+                      "Import alias conflict for @"
+                      <> alias
+                      <> " in module '"
+                      <> mod_name
+                      <> "': '"
+                      <> existing_pkg
+                      <> "' vs '"
+                      <> pkg
+                      <> "' (disambiguate with \""
+                      <> pkg
+                      <> " as <custom_alias>\")",
+                    )
+                  _ ->
+                    Ok(
+                      #(
+                        dict.insert(a_to_p, alias, pkg),
+                        dict.insert(p_to_a, pkg, alias),
+                        [#(pkg, alias), ..added],
+                      ),
+                    )
+                }
+              }
+            }
+          },
+        ),
+      )
+      Ok(list.append(base_imports, list.reverse(rev_added)))
+    }
+  }
 }
 
-fn sync_injected_files(
+fn sync_patched_files(
   target_dir: String,
-  injects: List(ffi_config.ModuleInject),
+  patches: List(ffi_config.ModulePatch),
 ) -> Result(Nil, String) {
-  let files = list.flat_map(injects, fn(inj) { inj.files })
+  let files = list.flat_map(patches, fn(patch) { patch.files })
   use written_names <- result.try(
     list.index_fold(files, Ok(set.new()), fn(acc_res, f, idx) {
       use acc <- result.try(acc_res)
       let dest_name =
-        "__gekko_inject_" <> int.to_string(idx + 1) <> "_" <> f.dest_filename
+        "__gekko_patch_" <> int.to_string(idx + 1) <> "_" <> f.dest_filename
       let dest_path = filepath.join(target_dir, dest_name)
       use content <- result.try(
         simplifile.read(from: f.source_path)
         |> result.map_error(fn(err) {
-          "Failed to read injected MoonBit file "
+          "Failed to read patch MoonBit file "
           <> f.source_path
           <> ": "
           <> simplifile.describe_error(err)
@@ -741,15 +786,17 @@ fn sync_injected_files(
   case simplifile.read_directory(at: target_dir) {
     Ok(entries) ->
       list.try_each(entries, fn(entry) {
-        case
-          string.starts_with(entry, "__gekko_inject_")
+        let is_managed_patch =
+          {
+            string.starts_with(entry, "__gekko_patch_")
+            || string.starts_with(entry, "__gekko_inject_")
+          }
           && string.ends_with(entry, ".mbt")
-          && !set.contains(written_names, entry)
-        {
+        case is_managed_patch && !set.contains(written_names, entry) {
           True ->
             simplifile.delete(file_or_dir_at: filepath.join(target_dir, entry))
             |> result.map_error(fn(err) {
-              "Failed to remove stale injected file "
+              "Failed to remove stale patch file "
               <> entry
               <> ": "
               <> simplifile.describe_error(err)
@@ -863,10 +910,10 @@ fn detect_stale_overlay_warnings(
     )
   let w_mods =
     check_keys(
-      dict.keys(overlays.module_injects),
-      overlays.module_inject_sources,
+      dict.keys(overlays.module_patches),
+      overlays.module_patch_sources,
       mod_keys,
-      "module_inject",
+      "patch",
       "module",
     )
   list.flatten([w_fns, w_tys, w_mods])

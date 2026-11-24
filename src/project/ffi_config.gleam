@@ -8,8 +8,8 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import project/prepass.{
-  type ExternalType, type FfiKind, type TargetBranch, ExternalType,
-  InPackageCall, PackageCall, PreferErlang, PreferJavascript, WasmImport,
+  type ExternalType, type FfiKind, type TargetBranch, ExternalType, PackageCall,
+  Patched, PreferErlang, PreferJavascript, WasmImport,
 }
 import simplifile
 import tom.{type Toml}
@@ -19,23 +19,28 @@ pub type ShimMeta {
   ShimMeta(target: String, version: Option(String))
 }
 
-/// A MoonBit source file to inject directly into a transpiled module's package.
-pub type ModuleInjectFile {
-  ModuleInjectFile(
+/// A MoonBit source file patched directly into a transpiled module's package.
+pub type ModulePatchFile {
+  ModulePatchFile(
     source_path: String,
     dest_filename: String,
     source_pkg: String,
   )
 }
 
-/// An extra MoonBit package import required by injected files in a module.
-pub type ModuleInjectImport {
-  ModuleInjectImport(package: String, alias: Option(String))
+/// An extra MoonBit package import required by a module's patch files.
+pub type ModulePatchImport {
+  ModulePatchImport(package: String, alias: Option(String))
 }
 
-/// Injected MoonBit files and extra imports for a single target Gleam module.
-pub type ModuleInject {
-  ModuleInject(files: List(ModuleInjectFile), imports: List(ModuleInjectImport))
+/// Co-located MoonBit patch configuration for a single target Gleam module.
+pub type ModulePatch {
+  ModulePatch(
+    files: List(ModulePatchFile),
+    imports: List(ModulePatchImport),
+    types: List(String),
+    functions: List(String),
+  )
 }
 
 /// Complete overlay configuration loaded from a single package (`gleam.toml` + `gekko.toml`).
@@ -45,7 +50,7 @@ pub type PackageOverlay {
     shim: Option(ShimMeta),
     overrides: Dict(String, FfiKind),
     type_overrides: Dict(String, ExternalType),
-    module_injects: Dict(String, ModuleInject),
+    module_patches: Dict(String, ModulePatch),
     target_branches: Dict(String, TargetBranch),
   )
 }
@@ -58,10 +63,10 @@ pub type MergedOverlays {
     override_sources: Dict(String, String),
     type_overrides: Dict(String, ExternalType),
     type_override_sources: Dict(String, String),
-    module_injects: Dict(String, ModuleInject),
-    module_inject_sources: Dict(String, String),
+    module_patches: Dict(String, ModulePatch),
+    module_patch_sources: Dict(String, String),
     target_branches: Dict(String, TargetBranch),
-    injected_source_files: Set(String),
+    patched_source_files: Set(String),
   )
 }
 
@@ -73,10 +78,10 @@ pub fn empty_merged_overlays() -> MergedOverlays {
     override_sources: dict.new(),
     type_overrides: dict.new(),
     type_override_sources: dict.new(),
-    module_injects: dict.new(),
-    module_inject_sources: dict.new(),
+    module_patches: dict.new(),
+    module_patch_sources: dict.new(),
     target_branches: dict.new(),
-    injected_source_files: set.new(),
+    patched_source_files: set.new(),
   )
 }
 
@@ -708,12 +713,8 @@ fn extract_ffi_kind(
     |> list.reverse
     |> string.join(".")
 
-  case
-    dict.get(table, "package"),
-    dict.get(table, "wasm_module"),
-    dict.get(table, "in_package")
-  {
-    Ok(tom.String(pkg)), Error(_), Error(_) ->
+  case dict.get(table, "package"), dict.get(table, "wasm_module") {
+    Ok(tom.String(pkg)), Error(_) ->
       case dict.get(table, "function") {
         Ok(tom.String(func)) ->
           Ok(Some(PackageCall(package: pkg, function: func)))
@@ -727,7 +728,7 @@ fn extract_ffi_kind(
           )
       }
 
-    Error(_), Ok(tom.String(wasm_mod)), Error(_) ->
+    Error(_), Ok(tom.String(wasm_mod)) ->
       case dict.get(table, "import_name") {
         Ok(tom.String(imp)) ->
           Ok(Some(WasmImport(wasm_module: wasm_mod, import_name: imp)))
@@ -743,55 +744,20 @@ fn extract_ffi_kind(
           )
       }
 
-    Error(_), Error(_), Ok(tom.String(func)) ->
-      case
-        dict.get(table, "function"),
-        dict.get(table, "import_name"),
-        string.trim(func)
-      {
-        Ok(_), _, _ ->
-          Error(
-            "Override '"
-            <> key_name
-            <> "' cannot specify both 'in_package' and 'function'",
-          )
-        _, Ok(_), _ ->
-          Error(
-            "Override '"
-            <> key_name
-            <> "' cannot specify both 'in_package' and 'import_name'",
-          )
-        _, _, "" ->
-          Error(
-            "Override '" <> key_name <> "' field 'in_package' must not be empty",
-          )
-        _, _, _ -> Ok(Some(InPackageCall(function: func)))
-      }
-
-    Error(_), Error(_), Ok(_) ->
-      Error("Override '" <> key_name <> "' field 'in_package' must be String")
-
-    Ok(_), Ok(_), _ ->
+    Ok(_), Ok(_) ->
       Error(
         "Override '"
         <> key_name
         <> "' cannot specify both 'package' and 'wasm_module'",
       )
 
-    Ok(_), _, Ok(_) | _, Ok(_), Ok(_) ->
-      Error(
-        "Override '"
-        <> key_name
-        <> "' cannot combine 'in_package' with 'package' or 'wasm_module'",
-      )
-
-    Ok(_), Error(_), Error(_) ->
+    Ok(_), Error(_) ->
       Error("Override '" <> key_name <> "' field 'package' must be String")
 
-    Error(_), Ok(_), Error(_) ->
+    Error(_), Ok(_) ->
       Error("Override '" <> key_name <> "' field 'wasm_module' must be String")
 
-    Error(_), Error(_), Error(_) ->
+    Error(_), Error(_) ->
       case dict.get(table, "function"), dict.get(table, "import_name") {
         Ok(_), _ ->
           Error(
@@ -950,145 +916,215 @@ fn extract_type_override(
   }
 }
 
-/// Parse `[module_inject."..."]` from a `gekko.toml` string.
-pub fn parse_module_inject_gekko_toml(
+/// Parse `[patch."..."]` from a `gekko.toml` string.
+pub fn parse_module_patch_gekko_toml(
   content: String,
-) -> Result(Dict(String, ModuleInject), String) {
+) -> Result(Dict(String, ModulePatch), String) {
   use parsed <- result.try(
     tom.parse(content)
     |> result.map_error(format_parse_error),
   )
-  case tom.get_table(parsed, ["module_inject"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_module_inject)
+  case tom.get_table(parsed, ["patch"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_module_patch)
     Error(tom.NotFound(_)) -> Ok(dict.new())
     Error(err) -> Error(format_get_error(err))
   }
 }
 
-/// Parse `[tools.gekko.module_inject."..."]` from a `gleam.toml` string.
-pub fn parse_module_inject_gleam_toml(
+/// Parse `[tools.gekko.patch."..."]` from a `gleam.toml` string.
+pub fn parse_module_patch_gleam_toml(
   content: String,
-) -> Result(Dict(String, ModuleInject), String) {
+) -> Result(Dict(String, ModulePatch), String) {
   use parsed <- result.try(
     tom.parse(content)
     |> result.map_error(format_parse_error),
   )
-  case tom.get_table(parsed, ["tools", "gekko", "module_inject"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_module_inject)
+  case tom.get_table(parsed, ["tools", "gekko", "patch"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_module_patch)
     Error(tom.NotFound(_)) -> Ok(dict.new())
     Error(err) -> Error(format_get_error(err))
   }
 }
 
-fn extract_module_inject(
+fn extract_module_patch(
   table: Dict(String, Toml),
   rev_key_parts: List(String),
-) -> Result(Option(ModuleInject), String) {
+) -> Result(Option(ModulePatch), String) {
   let key_name = rev_key_parts |> list.reverse |> string.join(".")
+  let has_file = dict.has_key(table, "file")
   let has_files = dict.has_key(table, "files")
   let has_imports = dict.has_key(table, "imports")
-  case has_files || has_imports {
+  let has_types = dict.has_key(table, "types")
+  let has_fns = dict.has_key(table, "functions")
+  case has_file || has_files || has_imports || has_types || has_fns {
     False -> Ok(None)
     True -> {
-      use files <- result.try(case dict.get(table, "files") {
-        Error(_) -> Ok([])
-        Ok(tom.Array(items)) ->
-          list.try_map(items, fn(item) {
-            case item {
-              tom.String(path) ->
-                case string.trim(path) {
-                  "" ->
+      use files <- result.try(
+        case dict.get(table, "file"), dict.get(table, "files") {
+          Ok(_), Ok(_) ->
+            Error(
+              "Patch '"
+              <> key_name
+              <> "' cannot specify both 'file' and 'files'",
+            )
+          Ok(tom.String(path)), Error(_) ->
+            case string.trim(path) {
+              "" -> Error("Patch '" <> key_name <> "' 'file' must not be empty")
+              p ->
+                Ok([
+                  ModulePatchFile(
+                    source_path: p,
+                    dest_filename: filepath.base_name(p),
+                    source_pkg: "",
+                  ),
+                ])
+            }
+          Ok(_), Error(_) ->
+            Error("Patch '" <> key_name <> "' field 'file' must be String")
+          Error(_), Ok(tom.Array(items)) ->
+            list.try_map(items, fn(item) {
+              case item {
+                tom.String(path) ->
+                  case string.trim(path) {
+                    "" ->
+                      Error(
+                        "Patch '"
+                        <> key_name
+                        <> "' 'files' entries must not be empty",
+                      )
+                    p ->
+                      Ok(ModulePatchFile(
+                        source_path: p,
+                        dest_filename: filepath.base_name(p),
+                        source_pkg: "",
+                      ))
+                  }
+                _ ->
+                  Error(
+                    "Patch '"
+                    <> key_name
+                    <> "' field 'files' must be an array of Strings",
+                  )
+              }
+            })
+          Error(_), Ok(_) ->
+            Error(
+              "Patch '"
+              <> key_name
+              <> "' field 'files' must be an array of Strings",
+            )
+          Error(_), Error(_) ->
+            Error("Patch '" <> key_name <> "' must specify 'file' or 'files'")
+        },
+      )
+      case files {
+        [] -> Error("Patch '" <> key_name <> "' must specify at least one file")
+        _ -> {
+          use imports <- result.try(case dict.get(table, "imports") {
+            Error(_) -> Ok([])
+            Ok(tom.Array(items)) ->
+              list.try_map(items, fn(item) {
+                case item {
+                  tom.String(spec) -> parse_patch_import_spec(spec, key_name)
+                  _ ->
                     Error(
-                      "Module inject '"
+                      "Patch '"
                       <> key_name
-                      <> "' 'files' entries must not be empty",
+                      <> "' field 'imports' must be an array of Strings",
                     )
-                  p ->
-                    Ok(ModuleInjectFile(
-                      source_path: p,
-                      dest_filename: filepath.base_name(p),
-                      source_pkg: "",
-                    ))
                 }
-              _ ->
-                Error(
-                  "Module inject '"
-                  <> key_name
-                  <> "' field 'files' must be an array of Strings",
-                )
-            }
+              })
+            Ok(_) ->
+              Error(
+                "Patch '"
+                <> key_name
+                <> "' field 'imports' must be an array of Strings",
+              )
           })
-        Ok(_) ->
-          Error(
-            "Module inject '"
-            <> key_name
-            <> "' field 'files' must be an array of Strings",
-          )
-      })
-      use imports <- result.try(case dict.get(table, "imports") {
-        Error(_) -> Ok([])
-        Ok(tom.Array(items)) ->
-          list.try_map(items, fn(item) {
-            case item {
-              tom.String(spec) -> parse_inject_import_spec(spec, key_name)
-              _ ->
-                Error(
-                  "Module inject '"
-                  <> key_name
-                  <> "' field 'imports' must be an array of Strings",
-                )
-            }
-          })
-        Ok(_) ->
-          Error(
-            "Module inject '"
-            <> key_name
-            <> "' field 'imports' must be an array of Strings",
-          )
-      })
-      case files == [] && imports == [] {
-        True ->
-          Error(
-            "Module inject '"
-            <> key_name
-            <> "' must specify at least one file or import",
-          )
-        False -> Ok(Some(ModuleInject(files:, imports:)))
+          use types <- result.try(extract_string_array(table, "types", key_name))
+          use functions <- result.try(extract_string_array(
+            table,
+            "functions",
+            key_name,
+          ))
+          Ok(Some(ModulePatch(files:, imports:, types:, functions:)))
+        }
       }
     }
   }
 }
 
-fn parse_inject_import_spec(
+fn extract_string_array(
+  table: Dict(String, Toml),
+  field: String,
+  key_name: String,
+) -> Result(List(String), String) {
+  case dict.get(table, field) {
+    Error(_) -> Ok([])
+    Ok(tom.Array(items)) ->
+      list.try_map(items, fn(item) {
+        case item {
+          tom.String(s) ->
+            case string.trim(s) {
+              "" ->
+                Error(
+                  "Patch '"
+                  <> key_name
+                  <> "' '"
+                  <> field
+                  <> "' entries must not be empty",
+                )
+              trimmed -> Ok(trimmed)
+            }
+          _ ->
+            Error(
+              "Patch '"
+              <> key_name
+              <> "' field '"
+              <> field
+              <> "' must be an array of Strings",
+            )
+        }
+      })
+    Ok(_) ->
+      Error(
+        "Patch '"
+        <> key_name
+        <> "' field '"
+        <> field
+        <> "' must be an array of Strings",
+      )
+  }
+}
+
+fn parse_patch_import_spec(
   raw: String,
   key_name: String,
-) -> Result(ModuleInjectImport, String) {
+) -> Result(ModulePatchImport, String) {
   let trimmed = string.trim(raw)
   case trimmed {
     "" ->
-      Error(
-        "Module inject '" <> key_name <> "' 'imports' entries must not be empty",
-      )
+      Error("Patch '" <> key_name <> "' 'imports' entries must not be empty")
     _ ->
       case string.split_once(trimmed, " @") {
         Ok(#(pkg, alias)) ->
-          validate_inject_import(pkg, Some(alias), key_name, raw)
+          validate_patch_import(pkg, Some(alias), key_name, raw)
         Error(_) ->
           case string.split_once(trimmed, " as ") {
             Ok(#(pkg, alias)) ->
-              validate_inject_import(pkg, Some(alias), key_name, raw)
-            Error(_) -> Ok(ModuleInjectImport(package: trimmed, alias: None))
+              validate_patch_import(pkg, Some(alias), key_name, raw)
+            Error(_) -> Ok(ModulePatchImport(package: trimmed, alias: None))
           }
       }
   }
 }
 
-fn validate_inject_import(
+fn validate_patch_import(
   pkg: String,
   alias: Option(String),
   key_name: String,
   raw: String,
-) -> Result(ModuleInjectImport, String) {
+) -> Result(ModulePatchImport, String) {
   let p = string.trim(pkg)
   let a = option.map(alias, string.trim)
   case p, a {
@@ -1096,11 +1132,11 @@ fn validate_inject_import(
       Error(
         "Invalid import specification '"
         <> raw
-        <> "' in module_inject '"
+        <> "' in patch '"
         <> key_name
         <> "'",
       )
-    _, _ -> Ok(ModuleInjectImport(package: p, alias: a))
+    _, _ -> Ok(ModulePatchImport(package: p, alias: a))
   }
 }
 
@@ -1190,7 +1226,7 @@ fn collect_nested_entries(
 }
 
 /// Load and merge all overlay sections (`shim`, `overrides`, `type_overrides`,
-/// `module_inject`, `target_branch`) from a package's `gleam.toml` and `gekko.toml`.
+/// `patch`, `target_branch`) from a package's `gleam.toml` and `gekko.toml`.
 pub fn load_package_overlay(
   pkg_root: String,
   pkg_name: String,
@@ -1213,11 +1249,11 @@ pub fn load_package_overlay(
     parse_type_overrides_gleam_toml,
     parse_type_overrides_gekko_toml,
   ))
-  use #(inj_g, inj_k) <- result.try(load_toml_pair(
+  use #(pat_g, pat_k) <- result.try(load_toml_pair(
     pkg_root,
     dict.new(),
-    parse_module_inject_gleam_toml,
-    parse_module_inject_gekko_toml,
+    parse_module_patch_gleam_toml,
+    parse_module_patch_gekko_toml,
   ))
   use #(br_g, br_k) <- result.try(load_toml_pair(
     pkg_root,
@@ -1230,37 +1266,67 @@ pub fn load_package_overlay(
     Some(_) -> shim_k
     None -> shim_g
   }
-  let overrides = dict.merge(ovr_g, ovr_k)
-  let type_overrides = dict.merge(ty_g, ty_k)
+  let explicit_overrides = dict.merge(ovr_g, ovr_k)
+  let explicit_type_overrides = dict.merge(ty_g, ty_k)
   let target_branches = dict.merge(br_g, br_k)
-  let raw_injects = merge_module_inject_dicts(inj_g, inj_k)
-  use resolved_injects <- result.try(resolve_module_inject_files(
+  let raw_patches = merge_module_patch_dicts(pat_g, pat_k)
+  use resolved_patches <- result.try(resolve_module_patch_files(
     pkg_root,
     pkg_name,
-    raw_injects,
+    raw_patches,
   ))
+
+  let #(patch_fn_overrides, patch_type_overrides) =
+    expand_patch_entries(resolved_patches)
+  let overrides = dict.merge(patch_fn_overrides, explicit_overrides)
+  let type_overrides = dict.merge(patch_type_overrides, explicit_type_overrides)
 
   Ok(PackageOverlay(
     source_pkg: pkg_name,
     shim:,
     overrides:,
     type_overrides:,
-    module_injects: resolved_injects,
+    module_patches: resolved_patches,
     target_branches:,
   ))
 }
 
-fn resolve_module_inject_files(
+fn expand_patch_entries(
+  patches: Dict(String, ModulePatch),
+) -> #(Dict(String, FfiKind), Dict(String, ExternalType)) {
+  dict.fold(patches, #(dict.new(), dict.new()), fn(acc, mod_key, patch) {
+    let #(fn_acc, ty_acc) = acc
+    let target_mod = case string.split_once(mod_key, ":") {
+      Ok(#(_, m)) -> m
+      Error(_) -> mod_key
+    }
+    let next_fns =
+      list.fold(patch.functions, fn_acc, fn(m, fn_name) {
+        dict.insert(m, mod_key <> "." <> fn_name, Patched)
+      })
+    let next_tys =
+      list.fold(patch.types, ty_acc, fn(m, ty_name) {
+        dict.insert(
+          m,
+          mod_key <> "." <> ty_name,
+          ExternalType(package: target_mod, type_name: ty_name),
+        )
+      })
+    #(next_fns, next_tys)
+  })
+}
+
+fn resolve_module_patch_files(
   pkg_root: String,
   pkg_name: String,
-  injects: Dict(String, ModuleInject),
-) -> Result(Dict(String, ModuleInject), String) {
+  patches: Dict(String, ModulePatch),
+) -> Result(Dict(String, ModulePatch), String) {
   let abs_root = simplifile.resolve(pkg_root) |> result.unwrap(pkg_root)
-  dict.to_list(injects)
+  dict.to_list(patches)
   |> list.try_fold(dict.new(), fn(acc, entry) {
-    let #(mod_key, inj) = entry
+    let #(mod_key, patch) = entry
     use resolved_files <- result.try(
-      list.try_map(inj.files, fn(f) {
+      list.try_map(patch.files, fn(f) {
         let joined = case filepath.is_absolute(f.source_path) {
           True -> f.source_path
           False -> filepath.join(abs_root, f.source_path)
@@ -1270,18 +1336,18 @@ fn resolve_module_inject_files(
           |> result.unwrap(filepath.expand(joined) |> result.unwrap(joined))
         case simplifile.is_file(normalized) {
           Ok(True) ->
-            Ok(ModuleInjectFile(
+            Ok(ModulePatchFile(
               source_path: normalized,
               dest_filename: f.dest_filename,
               source_pkg: pkg_name,
             ))
           _ ->
             Error(
-              "Injected MoonBit file '"
+              "Patch MoonBit file '"
               <> f.source_path
               <> "' declared in package '"
               <> pkg_name
-              <> "' for module_inject '"
+              <> "' for patch '"
               <> mod_key
               <> "' was not found at "
               <> normalized,
@@ -1289,30 +1355,36 @@ fn resolve_module_inject_files(
         }
       }),
     )
-    Ok(dict.insert(acc, mod_key, ModuleInject(..inj, files: resolved_files)))
+    Ok(dict.insert(acc, mod_key, ModulePatch(..patch, files: resolved_files)))
   })
 }
 
-fn merge_module_inject_dicts(
-  base: Dict(String, ModuleInject),
-  extra: Dict(String, ModuleInject),
-) -> Dict(String, ModuleInject) {
-  dict.fold(extra, base, fn(acc, key, inj) {
+fn merge_module_patch_dicts(
+  base: Dict(String, ModulePatch),
+  extra: Dict(String, ModulePatch),
+) -> Dict(String, ModulePatch) {
+  dict.fold(extra, base, fn(acc, key, patch) {
     case dict.get(acc, key) {
-      Error(_) -> dict.insert(acc, key, inj)
-      Ok(existing) -> dict.insert(acc, key, merge_two_injects(existing, inj))
+      Error(_) -> dict.insert(acc, key, patch)
+      Ok(existing) -> dict.insert(acc, key, merge_two_patches(existing, patch))
     }
   })
 }
 
-fn merge_two_injects(a: ModuleInject, b: ModuleInject) -> ModuleInject {
+fn merge_two_patches(a: ModulePatch, b: ModulePatch) -> ModulePatch {
   let files =
     list.append(a.files, b.files)
     |> dedup_by(fn(f) { #(f.source_path, f.dest_filename) })
   let imports =
     list.append(a.imports, b.imports)
     |> dedup_by(fn(i) { #(i.package, i.alias) })
-  ModuleInject(files:, imports:)
+  let types =
+    list.append(a.types, b.types)
+    |> dedup_by(fn(t) { t })
+  let functions =
+    list.append(a.functions, b.functions)
+    |> dedup_by(fn(f) { f })
+  ModulePatch(files:, imports:, types:, functions:)
 }
 
 fn dedup_by(items: List(a), key_fn: fn(a) -> k) -> List(a) {
@@ -1366,24 +1438,24 @@ pub fn merge_overlays(
     "target_branch",
   ))
 
-  let #(inj_map, inj_src) =
+  let #(patch_map, patch_src) =
     list.fold(
       list.append(dep_overlays, [root_overlay]),
       #(dict.new(), dict.new()),
       fn(acc, ov) {
         let #(m, s) = acc
-        let next_m = merge_module_inject_dicts(m, ov.module_injects)
+        let next_m = merge_module_patch_dicts(m, ov.module_patches)
         let next_s =
-          dict.fold(ov.module_injects, s, fn(s_acc, k, _v) {
+          dict.fold(ov.module_patches, s, fn(s_acc, k, _v) {
             dict.insert(s_acc, k, ov.source_pkg)
           })
         #(next_m, next_s)
       },
     )
 
-  let injected_source_files =
-    dict.fold(inj_map, set.new(), fn(acc, _k, inj) {
-      list.fold(inj.files, acc, fn(s, f) { set.insert(s, f.source_path) })
+  let patched_source_files =
+    dict.fold(patch_map, set.new(), fn(acc, _k, patch) {
+      list.fold(patch.files, acc, fn(s, f) { set.insert(s, f.source_path) })
     })
 
   Ok(MergedOverlays(
@@ -1392,10 +1464,10 @@ pub fn merge_overlays(
     override_sources: ovr_src,
     type_overrides: ty_map,
     type_override_sources: ty_src,
-    module_injects: inj_map,
-    module_inject_sources: inj_src,
+    module_patches: patch_map,
+    module_patch_sources: patch_src,
     target_branches: br_map,
-    injected_source_files:,
+    patched_source_files:,
   ))
 }
 

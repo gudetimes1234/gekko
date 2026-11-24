@@ -23,7 +23,7 @@ import lower/ir.{
 import lower/ir_util
 import lower/mangle
 import moonbit/ffi_meta.{type FfiMetadata}
-import project/prepass.{InPackageCall, PackageCall, WasmImport}
+import project/prepass.{PackageCall, Patched, WasmImport}
 
 import emit/moonbit_decl.{
   type EmitCtx, EmitCtx, add_gprelude_import, add_module_import,
@@ -270,12 +270,28 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
       #("///|\n" <> header <> " {\n" <> body <> "\n}", ctx_imp)
     }
 
-    Some(InPackageCall(target_fn)) -> {
-      let call_args =
-        list.map(f.params, fn(p) { p.name })
+    Some(Patched) -> {
+      let #(sig_params_rev, _) =
+        list.index_fold(f.params, #([], ctx2), fn(acc, p, idx) {
+          let #(ps, c) = acc
+          let #(ty_str, next_c) = emit_type(p.param_type, c)
+          let p_name = "__p" <> int.to_string(idx)
+          #([p_name <> " : " <> ty_str, ..ps], next_c)
+        })
+      let sig_args =
+        list.index_map(f.params, fn(_, idx) { "__p" <> int.to_string(idx) })
         |> string.join(", ")
-      let body = "  " <> target_fn <> "(" <> call_args <> ")"
-      #("///|\n" <> header <> " {\n" <> body <> "\n}", ctx2)
+      let sig_header =
+        "fn"
+        <> generics
+        <> " __gekko_sigcheck_"
+        <> f.name
+        <> "("
+        <> string.join(list.reverse(sig_params_rev), ", ")
+        <> ") -> "
+        <> ret_str
+      let body = "  " <> f.name <> "(" <> sig_args <> ")"
+      #("///|\n" <> sig_header <> " {\n" <> body <> "\n}", ctx2)
     }
 
     Some(WasmImport(wasm_mod, imp_name)) -> {

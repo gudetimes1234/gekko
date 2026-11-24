@@ -56,7 +56,6 @@ pub fn inspect_package(
   target_pkg: String,
 ) -> Result(String, String) {
   use data <- result.try(collect_inspect_data(project_root, target_pkg))
-  let ffi_pkg = target_pkg <> "_ffi"
   let header =
     "Shim inspection for " <> data.pkg_name <> " (" <> data.version <> "):"
 
@@ -119,7 +118,7 @@ pub fn inspect_package(
       "\nAll reachable externals in '"
       <> data.pkg_name
       <> "' are already mapped."
-    _, _ -> "\nSuggested gekko.toml:\n" <> render_gekko_toml(data, ffi_pkg)
+    _, _ -> "\nSuggested gekko.toml:\n" <> render_gekko_toml(data)
   }
 
   Ok(header <> types_section <> fns_section <> toml_section)
@@ -141,7 +140,6 @@ pub fn init_shim(
   }
 
   use _ <- result.try(ensure_empty_or_new_dir(shim_dir))
-  let ffi_pkg = target_pkg <> "_ffi"
 
   let gleam_toml =
     "name = \""
@@ -150,18 +148,19 @@ pub fn init_shim(
     <> target_pkg
     <> "\"\n"
   let placeholder_gleam =
-    "//// Companion MoonBit shim overlay for `" <> target_pkg <> "`.\n"
-  let gekko_toml = render_gekko_toml(data, ffi_pkg)
-  let moon_pkg =
-    pkg_config.emit_moon_pkg(shim_name, [#("gprelude", "gprelude")], False)
-  let mbt_stubs = render_mbt_stubs(data)
+    "//// Companion MoonBit shim overlay for `"
+    <> target_pkg
+    <> "`.\n\npub const target = \""
+    <> target_pkg
+    <> "\"\n"
+  let gekko_toml = render_gekko_toml(data)
+  let patch_files = render_patch_files(data)
 
   let files = [
     #("gleam.toml", gleam_toml),
     #("src/" <> shim_name <> ".gleam", placeholder_gleam),
     #("gekko.toml", gekko_toml),
-    #("moonbit/" <> ffi_pkg <> "/moon.pkg", moon_pkg),
-    #("moonbit/" <> ffi_pkg <> "/" <> ffi_pkg <> ".mbt", mbt_stubs),
+    ..patch_files
   ]
 
   use _ <- result.try(
@@ -298,7 +297,7 @@ fn collect_inspect_data(
   let ffi_metadata =
     ffi_meta.scan_package_roots_excluding(
       ffi_roots,
-      overlays.injected_source_files,
+      overlays.patched_source_files,
     )
   let table =
     symbol_table.index_project_with_overlays(
@@ -469,7 +468,16 @@ fn has_erl_or_js_attr(attributes: List(glance.Attribute)) -> Bool {
   })
 }
 
-fn render_gekko_toml(data: InspectData, ffi_pkg: String) -> String {
+fn collect_patched_modules(data: InspectData) -> List(String) {
+  let from_tys = list.map(data.unmapped_types, fn(t) { t.mod_name })
+  let from_fns = list.map(data.unmapped_fns, fn(f) { f.mod_name })
+  list.append(from_tys, from_fns)
+  |> set.from_list
+  |> set.to_list
+  |> list.sort(string.compare)
+}
+
+fn render_gekko_toml(data: InspectData) -> String {
   let ver_constraint = suggest_semver_constraint(data.version)
   let shim_sec =
     "[shim]\ntarget = \""
@@ -478,73 +486,88 @@ fn render_gekko_toml(data: InspectData, ffi_pkg: String) -> String {
     <> ver_constraint
     <> "\"\n"
 
-  let type_secs =
-    list.map(data.unmapped_types, fn(t) {
-      "\n[type_overrides.\""
+  let mods = collect_patched_modules(data)
+  let patch_secs =
+    list.map(mods, fn(mod_name) {
+      let mod_tys =
+        list.filter_map(data.unmapped_types, fn(t) {
+          case t.mod_name == mod_name {
+            True -> Ok("  \"" <> t.type_name <> "\",")
+            False -> Error(Nil)
+          }
+        })
+      let mod_fns =
+        list.filter_map(data.unmapped_fns, fn(f) {
+          case f.mod_name == mod_name {
+            True -> Ok("  \"" <> f.fn_name <> "\",")
+            False -> Error(Nil)
+          }
+        })
+      let types_block = case mod_tys {
+        [] -> ""
+        lines -> "\ntypes = [\n" <> string.join(lines, "\n") <> "\n]"
+      }
+      let fns_block = case mod_fns {
+        [] -> ""
+        lines -> "\nfunctions = [\n" <> string.join(lines, "\n") <> "\n]"
+      }
+      "\n[patch.\""
       <> data.pkg_name
       <> ":"
-      <> t.mod_name
-      <> "."
-      <> t.type_name
-      <> "\"]\npackage = \""
-      <> ffi_pkg
-      <> "\"\ntype = \""
-      <> t.type_name
-      <> "\"\n"
+      <> mod_name
+      <> "\"]\nfile = \"patches/"
+      <> mod_name
+      <> ".mbt\""
+      <> types_block
+      <> fns_block
+      <> "\n"
     })
     |> string.concat
 
-  let fn_secs =
-    list.map(data.unmapped_fns, fn(f) {
-      "\n[overrides.\""
-      <> data.pkg_name
-      <> ":"
-      <> f.mod_name
-      <> "."
-      <> f.fn_name
-      <> "\"]\npackage = \""
-      <> ffi_pkg
-      <> "\"\nfunction = \""
-      <> f.fn_name
-      <> "\"\n"
-    })
-    |> string.concat
-
-  let inject_comment =
-    "\n# For functions returning same-module error enums or calling private helpers,\n"
-    <> "# inject a co-located MoonBit file instead of creating a circular package import:\n"
-    <> "# [module_inject.\""
-    <> data.pkg_name
-    <> ":some/module\"]\n"
-    <> "# files = [\"overlays/some_module.mbt\"]\n"
-    <> "# imports = [\""
-    <> ffi_pkg
-    <> "\"]\n"
-
-  shim_sec <> type_secs <> fn_secs <> inject_comment
+  shim_sec <> patch_secs
 }
 
-fn render_mbt_stubs(data: InspectData) -> String {
-  let type_decls =
-    list.map(data.unmapped_types, fn(t) {
-      let params = case t.type_params {
-        [] -> ""
-        ps -> "[" <> string.join(list.map(ps, string.capitalise), ", ") <> "]"
-      }
-      "///|\npub type " <> t.type_name <> params <> "\n"
-    })
-  let fn_decls =
-    list.map(data.unmapped_fns, fn(f) {
-      "///|\n"
-      <> f.mbt_stub
-      <> " {\n  abort(\"todo: "
-      <> f.fn_name
-      <> "\")\n}\n"
-    })
-  case list.append(type_decls, fn_decls) {
-    [] -> "///|\n// Add MoonBit FFI implementations here.\n"
-    blocks -> string.join(blocks, "\n")
-  }
+fn render_patch_files(data: InspectData) -> List(#(String, String)) {
+  let mods = collect_patched_modules(data)
+  list.map(mods, fn(mod_name) {
+    let type_decls =
+      list.filter_map(data.unmapped_types, fn(t) {
+        case t.mod_name == mod_name {
+          False -> Error(Nil)
+          True -> {
+            let params = case t.type_params {
+              [] -> ""
+              ps ->
+                "[" <> string.join(list.map(ps, string.capitalise), ", ") <> "]"
+            }
+            let vis = case t.publicity {
+              glance.Public -> "pub "
+              _ -> ""
+            }
+            Ok("///|\n" <> vis <> "type " <> t.type_name <> params <> "\n")
+          }
+        }
+      })
+    let fn_decls =
+      list.filter_map(data.unmapped_fns, fn(f) {
+        case f.mod_name == mod_name {
+          False -> Error(Nil)
+          True ->
+            Ok(
+              "///|\n"
+              <> f.mbt_stub
+              <> " {\n  abort(\"todo: "
+              <> f.fn_name
+              <> "\")\n}\n",
+            )
+        }
+      })
+    let body = case list.append(type_decls, fn_decls) {
+      [] -> "///|\n// Add co-located MoonBit patch implementations here.\n"
+      blocks -> string.join(blocks, "\n")
+    }
+    #("patches/" <> mod_name <> ".mbt", body)
+  })
 }
 
 fn suggest_semver_constraint(version: String) -> String {

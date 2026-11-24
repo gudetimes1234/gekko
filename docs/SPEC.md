@@ -168,14 +168,14 @@ Standard `gleam check` and `glance` restrict `@external(...)` targets to `erlang
 3. **Sidecar `gekko.toml`, `[tools.gekko.*]`, and Companion Shim Packages:**
    Allows both root projects and standalone companion shim dependencies to bind unmodified third-party Hex dependency types and functions to MoonBit implementations without modifying `build/packages/` (see [`docs/SHIMS.md`](./SHIMS.md) for the full schema):
    - `[shim]` (`target`, SemVer `version` constraint check)
+   - `[patch."pkg:mod"]` (`file`/`files`, `imports`, `types`, `functions` co-located directly inside the transpiled module's MoonBit package to avoid circular imports)
    - `[type_overrides."pkg:mod.Type"]` (`package`, `type`)
-   - `[overrides."pkg:mod.fn"]` (`package` + `function`, `wasm_module` + `import_name`, or `in_package`)
-   - `[module_inject."pkg:mod"]` (`files`, `imports` injected directly into the transpiled MoonBit package to avoid circular imports)
+   - `[overrides."pkg:mod.fn"]` (`package` + `function`, `wasm_module` + `import_name`)
    - `[target_branch."pkg:mod"]` (`prefer = "erlang" | "javascript"`)
 
 **FFI Emission Modes:**
 - **Package Call Mode (`"pkg/path"`, `"fn_name"`):** Adds `"pkg/path"` to the package's `moon.pkg` `import { ... }` block and emits a wrapper function calling `@alias.fn_name(args...)`.
-- **In-Package Call Mode (`in_package = "fn_name"`):** Calls a co-located function defined in a `[module_inject]` `.mbt` file within the same MoonBit package.
+- **Co-Located Patch Mode (`[patch]`):** Places the `.mbt` patch directly in the module's MoonBit package and emits a private `__gekko_sigcheck_<fn>` compile-time signature check.
 - **Raw Wasm Import Mode (`"wasm:module_name"`, `"import_name"`):** Emits a MoonBit Wasm import declaration:
   ```moonbit
   ///|

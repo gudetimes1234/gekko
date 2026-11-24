@@ -132,7 +132,10 @@ pub fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
         glance.Public -> "pub "
         glance.Private -> ""
       }
-      case package == "" || package == "builtin", type_name == td.name {
+      case
+        package == "" || package == "builtin" || package == ctx.current_module,
+        type_name == td.name
+      {
         True, True -> #("", ctx)
         _, _ -> {
           let #(target_str, ctx1) = case package {

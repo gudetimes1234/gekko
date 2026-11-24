@@ -295,9 +295,8 @@ pub fn fast_sqrt(x: Float) -> Float
 To use **unmodified third-party Hex packages** that contain Erlang/JS externals without forking them, `gekko` supports **companion shim / overlay packages** (`gekko.toml` or `[tools.gekko.*]` in `gleam.toml`) across both dependencies and root projects:
 
 - **`[shim]`**: Declares the target package and SemVer range (`target`, `version`).
-- **`[type_overrides."pkg:mod.Type"]`**: Maps opaque external types (`package`, `type`).
-- **`[overrides."pkg:mod.fn"]`**: Maps functions to a MoonBit `package` + `function`, a `wasm_module` + `import_name`, or a co-located `in_package` function.
-- **`[module_inject."pkg:mod"]`**: Injects `.mbt` files and extra `imports` directly into a transpiled module's MoonBit package (solving circular imports for same-module error enums).
+- **`[patch."pkg:mod"]`**: Co-locates `.mbt` patch files directly inside the transpiled module's MoonBit package (`file`/`files`, `imports`, `types`, `functions`)—eliminating circular package dependencies.
+- **`[type_overrides."pkg:mod.Type"]`** & **`[overrides."pkg:mod.fn"]`**: Direct one-line aliases to MoonBit `builtin` / `gprelude` / external packages or `wasm_module` imports.
 - **`[target_branch."pkg:mod"]`**: Selects `prefer = "javascript"` or `"erlang"` for `@target(...)` blocks.
 
 Use `gekko shim inspect <pkg>` and `gekko shim init <pkg>` to audit a dependency and scaffold a typed shim skeleton. See **[`docs/SHIMS.md`](./docs/SHIMS.md)** for the full guide and configuration reference.

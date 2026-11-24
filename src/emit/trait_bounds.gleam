@@ -16,7 +16,7 @@ import lower/ir.{
 }
 
 import moonbit/ffi_meta.{type FfiMetadata, type MbtType}
-import project/prepass.{ExternalType, InPackageCall, PackageCall}
+import project/prepass.{ExternalType, PackageCall, Patched}
 
 import emit/trait_infer.{
   type AnalyzeCtx, AnalyzeCtx, GetterSig, align_ir_call_args,
@@ -352,18 +352,24 @@ fn seed_all_fn_bounds(
               extract_ffi_bounds(f, mod.module_name, ext_meta, ctx)
             None -> empty_fn_bounds()
           }
-        Some(InPackageCall(target_fn)), [_, ..] ->
-          case
-            ffi_meta.lookup_function(
-              ctx.ffi_metadata,
-              mod.module_name,
-              target_fn,
-            )
+        Some(Patched), [_, ..] -> {
+          let meta_opt = case
+            ffi_meta.lookup_function(ctx.ffi_metadata, mod.module_name, f.name)
           {
+            Some(m) -> Some(m)
+            None ->
+              ffi_meta.lookup_function(
+                ctx.ffi_metadata,
+                mod.module_name,
+                f.unmangled_name,
+              )
+          }
+          case meta_opt {
             Some(ext_meta) ->
               extract_ffi_bounds(f, mod.module_name, ext_meta, ctx)
             None -> empty_fn_bounds()
           }
+        }
         _, _ -> empty_fn_bounds()
       }
       dict.insert(inner, key, seeded)

@@ -102,7 +102,7 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 - [x] **Source-Mapped Diagnostics:** Emit `.gekko_sourcemap` and annotate `moon` compiler errors with originating `.gleam` file/line hints, plus `file:line:col` range and unmapped-external diagnostics.
 - [x] **Collision-Free Package Mapping & Incremental Builds:** Deterministic `resolve_module_pkg_dirs` disambiguation, write-if-changed emission, and parallel dependency interface extraction.
 - [ ] **Mutual Tail Recursion & Exported WIT Resources:** Lower mutually recursive tail calls on linear `wasm` / `js` / `native` and support exporting WIT `resource` handles.
-- [x] **Upstream Hex FFI Overlay Packs:** Companion shim packages (`[shim]`, `[type_overrides]`, `[overrides]`, `[module_inject]`, `[target_branch]`, `gekko shim inspect|init` — see [`docs/SHIMS.md`](./SHIMS.md)) allowing unmodified upstream Hex packages to be transpiled without forking.
+- [x] **Upstream Hex FFI Overlay Packs:** Companion shim packages (`[shim]`, `[patch]`, `[type_overrides]`, `[overrides]`, `[target_branch]`, `gekko shim inspect|init` — see [`docs/SHIMS.md`](./SHIMS.md)) allowing unmodified upstream Hex packages to be transpiled without forking.
 
 ### Verification Gate
 - Comprehensive golden test suite passes cleanly across `wasm-gc`, `wasm`, `js`, `native`, and Wasm Component targets with zero `moon check` warnings.
