@@ -20,18 +20,6 @@ jobs:
         with:
           path: gekko
 
-      - name: Checkout gleam_stdlib fork
-        uses: actions/checkout@v4
-        with:
-          repository: spiral-nights/gekko_gleam_stdlib
-          path: gleam_stdlib
-
-      - name: Checkout gleam_json fork
-        uses: actions/checkout@v4
-        with:
-          repository: spiral-nights/gekko_gleam_json
-          path: gleam_json
-
       - name: Setup Erlang and Gleam
         uses: erlef/setup-beam@v1
         with:
@@ -77,17 +65,17 @@ jobs:
         with:
           path: gekko
 
-      - name: Checkout gleam_stdlib fork
+      - name: Checkout gekko_stdlib
         uses: actions/checkout@v4
         with:
-          repository: spiral-nights/gekko_gleam_stdlib
-          path: gleam_stdlib
+          repository: spiral-nights/gekko_stdlib
+          path: gekko_stdlib
 
-      - name: Checkout gleam_json fork
+      - name: Checkout gekko_json
         uses: actions/checkout@v4
         with:
-          repository: spiral-nights/gekko_gleam_json
-          path: gleam_json
+          repository: spiral-nights/gekko_json
+          path: gekko_json
 
       - name: Setup Erlang and Gleam
         uses: erlef/setup-beam@v1
@@ -108,6 +96,6 @@ jobs:
 
       - name: Run full ecosystem regression suite
         run: |
-          GEKKO_STDLIB_DIR="$PWD/../gleam_stdlib" \
-          GEKKO_JSON_DIR="$PWD/../gleam_json" \
+          GEKKO_STDLIB_DIR="$PWD/../gekko_stdlib" \
+          GEKKO_JSON_DIR="$PWD/../gekko_json" \
           ./scripts/test_ecosystem.sh
