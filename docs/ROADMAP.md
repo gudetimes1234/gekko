@@ -71,8 +71,8 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 
 ### Deliverables
 - [x] **`src/project/loader.gleam`**: Parse `manifest.toml` and `build/packages/*/gleam.toml` in topological order, transpile pure-Gleam Hex dependencies, and fail fast with `package:module.function` + `file:line:col` errors when externals are unmapped.
-- [x] **MoonBit-enabled `gleam_stdlib` (`gekko_gleam_stdlib`):** Transpiled directly from Gleam sources with bundled `moonbit/` leaf FFI packages (`gleam/string`, `gleam/int`, `gleam/float`, `gleam/dict`, `gleam/bit_array`, `gleam/dynamic/decode`, `gleam/io`, `gleam/list`, etc.).
-- [x] **MoonBit-enabled `gleam_json` (`gekko_gleam_json`):** Transpiled directly from Gleam sources with bundled `moonbit/` leaf FFI backed by `moonbitlang/core/json`.
+- [x] **Companion `gleam_stdlib` shim (`gekko_stdlib`):** Transpiles unmodified upstream Hex `gleam_stdlib` with co-located `[patch]` MoonBit implementations (`gleam/string`, `gleam/int`, `gleam/float`, `gleam/dict`, `gleam/bit_array`, `gleam/dynamic/decode`, `gleam/io`, `gleam/string_tree`, `gleam/uri`, etc.).
+- [x] **Companion `gleam_json` shim (`gekko_json`):** Transpiles unmodified upstream Hex `gleam_json` with a co-located `[patch]` MoonBit implementation backed by `moonbitlang/core/json`.
 
 ### Verification Gate
 - Transpile non-trivial Gleam projects importing `gleam_stdlib`, `gleam_json`, and pure-Gleam third-party Hex packages.

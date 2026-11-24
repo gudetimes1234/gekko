@@ -14,7 +14,7 @@
 - **Keep standard Gleam tooling:** Target projects stay 100% valid Gleam. `gleam check`, `gleam test`, and `gleam format` continue to work without modification.
 - **Target WebAssembly & native via MoonBit:** Leverage MoonBit's compact, fast codegen across `wasm-gc`, linear `wasm`, JavaScript, and native binaries without maintaining a custom code generator or GC runtime.
 - **Zero-boilerplate Wasm Component Model:** Generate WIT bindings via `wit-bindgen moonbit` and bundle WASI Preview 2 components with `wasm-tools`.
-- **Standard library & JSON support:** Transpile MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gekko_gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gekko_gleam_json) forks (`/// @external(moonbit, ...)` + `moonbit/` FFI packages backed by `Map`, `@json.Json`, `Bytes`) with faithful Gleam semantics (see [`docs/SEMANTICS.md`](./docs/SEMANTICS.md) for documented differences).
+- **Standard library & JSON support:** Transpile unmodified upstream Hex [`gleam_stdlib`](https://hex.pm/packages/gleam_stdlib) and [`gleam_json`](https://hex.pm/packages/gleam_json) paired with companion shim overlays [`gekko_stdlib`](https://github.com/spiral-nights/gekko_stdlib) and [`gekko_json`](https://github.com/spiral-nights/gekko_json) (`patches/` backed by `Map`, `@json.Json`, `Bytes`) with faithful Gleam semantics (see [`docs/SEMANTICS.md`](./docs/SEMANTICS.md) for documented differences).
 
 ---
 
@@ -27,7 +27,7 @@ flowchart TD
     index --> lower["3. AST Lowering (Desugar, for-TCO, Uniform Enums)"]
     lower --> emit["4. MoonBit Workspace Emitter (.mbt, moon.mod, moon.pkg)"]
     runtime["Bundled Runtime (gprelude)"] --> emit
-    pkgs["MoonBit-Enabled Packages (gleam_stdlib, gleam_json, local moonbit/)"] --> emit
+    pkgs["Companion Shims & FFI (gekko_stdlib, gekko_json, local moonbit/)"] --> emit
     emit --> moon["5. moon check / build / test (wasm-gc, wasm, js, native)"]
     wit["Optional wit/*.wit"] -->|"wit-bindgen moonbit"| emit
     moon -->|"wasm-tools component"| comp["dist/app.wasm (Wasm Component)"]
@@ -39,7 +39,7 @@ flowchart TD
 2. **Uniform Enums & Uniform Getters:** Every Gleam custom type—single-variant or multi-variant—compiles to a MoonBit `pub(all) enum` with synthesized `.field()` getter methods, eliminating constructor/pattern syntax splits and receiver-type ambiguity at dot-access sites.
 3. **Functional `for` Loop TCO:** Self-tail-recursive Gleam functions lower to MoonBit functional `for` state loops (`for a = a, b = b { ... => continue ... }`), guaranteeing $O(1)$ stack space across all MoonBit targets (`wasm-gc`, `wasm`, `js`, `native`).
 4. **Persistent Lists (`GList[T]`):** Gleam `List(a)` maps to a persistent singly-linked `@prelude.GList[T]` (`Nil` / `Cons`) instead of MoonBit's mutable `Array[T]`, preserving $O(1)$ prepends and pattern deconstruction.
-5. **Self-Contained MoonBit Packages (`gleam_stdlib` & `gleam_json`):** Instead of hardcoding standard-library or JSON shims inside the compiler, `gekko` transpiles the MoonBit-enabled [`gleam_stdlib`](https://github.com/spiral-nights/gekko_gleam_stdlib) and [`gleam_json`](https://github.com/spiral-nights/gekko_gleam_json) forks directly, copying their bundled `moonbit/` FFI packages only for leaf `@external(moonbit, ...)` primitives.
+5. **Companion Shim Overlays (`gekko_stdlib` & `gekko_json`):** Instead of hardcoding standard-library or JSON shims inside the compiler or maintaining forks, `gekko` transpiles unmodified upstream [`gleam_stdlib`](https://hex.pm/packages/gleam_stdlib) and [`gleam_json`](https://hex.pm/packages/gleam_json) from `build/packages/`, applying co-located `[patch]` MoonBit implementations from [`gekko_stdlib`](https://github.com/spiral-nights/gekko_stdlib) and [`gekko_json`](https://github.com/spiral-nights/gekko_json).
 
 ---
 
@@ -84,15 +84,17 @@ gekko wit build --release  # outputs dist/app.wasm
 
 ## Project Setup (`gleam.toml`)
 
-Target projects should point `gleam_stdlib` (and `gleam_json`, if used) at the MoonBit-enabled forks in `gleam.toml`:
+Target projects depend on unmodified upstream Hex `gleam_stdlib` (and `gleam_json`, if used) alongside their companion shim packages in `gleam.toml`:
 
 ```toml
 [dependencies]
-gleam_stdlib = { git = "https://github.com/spiral-nights/gekko_gleam_stdlib.git", ref = "main" }
-gleam_json = { git = "https://github.com/spiral-nights/gekko_gleam_json.git", ref = "main" }
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_json = ">= 3.0.0 and < 4.0.0"
+gekko_stdlib = { git = "https://github.com/spiral-nights/gekko_stdlib.git", ref = "main" }
+gekko_json = { git = "https://github.com/spiral-nights/gekko_json.git", ref = "main" }
 ```
 
-Because the package names remain `gleam_stdlib` and `gleam_json`, any transitive Hex dependencies resolve automatically against these forks without version or module conflicts (as long as the fork version satisfies their SemVer constraint).
+Your application and transitive Hex dependencies resolve against standard upstream `gleam_stdlib` and `gleam_json`, while `gekko` automatically applies the companion shims' `[patch]` and `[overrides]` entries during MoonBit transpilation.
 
 ---
 
@@ -326,7 +328,7 @@ Standalone example projects are hosted in [`gekko_examples`](https://github.com/
 ## Project Documentation
 
 - **[`docs/SPEC.md`](./docs/SPEC.md)** — Full architectural specification, lowering rules, runtime design, and WIT bridge details.
-- **[`docs/SHIMS.md`](./docs/SHIMS.md)** — Companion shim & overlay packages guide (`[shim]`, `[type_overrides]`, `[module_inject]`, `[target_branch]`, `gekko shim`).
+- **[`docs/SHIMS.md`](./docs/SHIMS.md)** — Companion shim & overlay packages guide (`[shim]`, `[patch]`, `[type_overrides]`, `[overrides]`, `[target_branch]`, `gekko shim`).
 - **[`docs/SEMANTICS.md`](./docs/SEMANTICS.md)** — Runtime semantics, target behavior, and documented differences from Erlang/JS Gleam.
 - **[`docs/ROADMAP.md`](./docs/ROADMAP.md)** — Phased implementation plan, deliverables, and verification gates.
 - **[`docs/GLEAM_SYNTAX_MAP.md`](./docs/GLEAM_SYNTAX_MAP.md)** — Complete mapping from `glance` AST nodes to MoonBit lowering rules.
@@ -363,7 +365,7 @@ gleam test
 ```
 
 - If you edit `runtime/prelude/gprelude.mbt` or `runtime/prelude/moon.pkg`, run `./scripts/sync_prelude.sh` so `src/emit/prelude_runtime.gleam` stays byte-identical.
-- To run the full downstream regression suite across `gekko_gleam_stdlib`, `gekko_gleam_json`, and `gekko_examples`, run `./scripts/test_ecosystem.sh`.
+- To run the full downstream regression suite across `gekko_stdlib`, `gekko_json`, and `gekko_examples`, run `./scripts/test_ecosystem.sh`.
 
 ## AI Usage
 

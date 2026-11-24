@@ -29,17 +29,17 @@ resolve_repo() {
   fi
 }
 
-STDLIB_DIR="$(resolve_repo "${GEKKO_STDLIB_DIR:-}" "https://github.com/spiral-nights/gekko_gleam_stdlib.git" "${GEKKO_STDLIB_REF:-main}" "$TMP_DIR/repos/gekko_gleam_stdlib")"
-JSON_DIR="$(resolve_repo "${GEKKO_JSON_DIR:-}" "https://github.com/spiral-nights/gekko_gleam_json.git" "${GEKKO_JSON_REF:-main}" "$TMP_DIR/repos/gekko_gleam_json")"
+STDLIB_DIR="$(resolve_repo "${GEKKO_STDLIB_DIR:-}" "https://github.com/spiral-nights/gekko_stdlib.git" "${GEKKO_STDLIB_REF:-main}" "$TMP_DIR/repos/gekko_stdlib")"
+JSON_DIR="$(resolve_repo "${GEKKO_JSON_DIR:-}" "https://github.com/spiral-nights/gekko_json.git" "${GEKKO_JSON_REF:-main}" "$TMP_DIR/repos/gekko_json")"
 EXAMPLES_DIR="$(resolve_repo "${GEKKO_EXAMPLES_DIR:-}" "https://github.com/spiral-nights/gekko_examples.git" "${GEKKO_EXAMPLES_REF:-main}" "$TMP_DIR/repos/gekko_examples")"
 
-echo "=== Running gekko_gleam_stdlib tests ==="
-GEKKO="$GEKKO_BIN" "$STDLIB_DIR/scripts/test_moonbit.sh"
+echo "=== Running gekko_stdlib upstream parity tests ==="
+GEKKO="$GEKKO_BIN" "$STDLIB_DIR/scripts/test_upstream.sh"
 
-echo "=== Running gekko_gleam_json tests ==="
-GEKKO="$GEKKO_BIN" GEKKO_STDLIB_DIR="$STDLIB_DIR" "$JSON_DIR/scripts/test_moonbit.sh"
+echo "=== Running gekko_json upstream parity tests ==="
+GEKKO="$GEKKO_BIN" GEKKO_STDLIB_DIR="$STDLIB_DIR" "$JSON_DIR/scripts/test_upstream.sh"
 
 echo "=== Running gekko_examples tests ==="
-GEKKO="$GEKKO_BIN" "$EXAMPLES_DIR/scripts/test_all.sh"
+GEKKO="$GEKKO_BIN" GEKKO_STDLIB_DIR="$STDLIB_DIR" GEKKO_JSON_DIR="$JSON_DIR" "$EXAMPLES_DIR/scripts/test_all.sh"
 
 echo "All gekko ecosystem checks passed."

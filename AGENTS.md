@@ -13,7 +13,7 @@ gleam format --check src test
 gleam test
 ```
 
-For optional full-ecosystem regression verification across `gekko_gleam_stdlib`, `gekko_gleam_json`, and `gekko_examples`:
+For optional full-ecosystem regression verification across `gekko_stdlib`, `gekko_json`, and `gekko_examples`:
 
 ```sh
 ./scripts/test_ecosystem.sh

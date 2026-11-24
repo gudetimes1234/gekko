@@ -956,6 +956,12 @@ pub fn scaffold_init_and_clean_e2e_test() {
   assert list.contains(files, "wit/world.wit")
   assert list.contains(files, "src/app.gleam")
   assert simplifile.is_file(filepath.join(root, "gleam.toml")) == Ok(True)
+  let assert Ok(toml) = simplifile.read(filepath.join(root, "gleam.toml"))
+  assert string.contains(toml, "gleam_stdlib = \">= 1.0.0 and < 2.0.0\"")
+  assert string.contains(
+    toml,
+    "gekko_stdlib = { git = \"https://github.com/spiral-nights/gekko_stdlib.git\", ref = \"main\" }",
+  )
 
   // Refuses to overwrite existing gleam.toml
   let assert Error(overwrite_err) = scaffold.init_project(root, False)
