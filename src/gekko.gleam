@@ -934,7 +934,7 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
             root:,
             out:,
             work_dir:,
-            target: option.unwrap(target, "wasm-gc"),
+            target: option.unwrap(target, "wasm"),
             release:,
           ))
         }
@@ -1197,10 +1197,10 @@ fn print_usage() -> Nil {
     "  gekko init      [--root <dir>] [--wit]",
     "  gekko clean     [--root <dir>]",
     "  gekko doctor",
-    "  gekko check     [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>]",
-    "  gekko build     [--release] [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]",
-    "  gekko test      [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>]",
-    "  gekko run       [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>] [-- <args>...]",
+    "  gekko check     [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
+    "  gekko build     [--release] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]",
+    "  gekko test      [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
+    "  gekko run       [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>] [-- <args>...]",
     "  gekko wit gen      [--root <dir>] [--wit <dir>] [--world <name>]",
     "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]",
     "  gekko wit build    [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>] [--output <file.wasm> | -o <file.wasm>]",

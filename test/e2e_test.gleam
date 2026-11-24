@@ -634,7 +634,7 @@ pub fn cli_parse_args_help_and_version_test() {
       root: ".",
       out: None,
       work_dir: None,
-      target: "wasm-gc",
+      target: "wasm",
       release: True,
     ))
   assert gekko.parse_args(["build"])
@@ -642,7 +642,7 @@ pub fn cli_parse_args_help_and_version_test() {
       root: ".",
       out: None,
       work_dir: None,
-      target: "wasm-gc",
+      target: "wasm",
       release: False,
     ))
   assert gekko.parse_args(["build", "--out", "myfile.exe", "--target", "native"])
@@ -658,7 +658,7 @@ pub fn cli_parse_args_help_and_version_test() {
       root: ".",
       out: Some("out.wasm"),
       work_dir: None,
-      target: "wasm-gc",
+      target: "wasm",
       release: False,
     ))
   assert gekko.parse_args([

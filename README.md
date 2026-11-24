@@ -67,8 +67,8 @@ Without installing, you can still run `gleam run -- <command>` from the reposito
 ```bash
 gekko new hello_gekko
 cd hello_gekko
-gekko run                  # auto-downloads deps, transpiles to MoonBit, and runs on wasm-gc
-gekko build --release      # emits optimized hello_gekko.wasm in the current directory
+gekko run                  # auto-downloads deps, transpiles to MoonBit, and runs
+gekko build --release      # emits portable WASI hello_gekko.wasm (runs in wasmtime)
 ```
 
 For a WebAssembly Component starter project:
@@ -110,21 +110,21 @@ gekko doctor
 gekko clean [--root <dir>]
 
 # Type-check transpiled MoonBit output for a Gleam project (--root defaults to `.`)
-gekko check [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>]
+gekko check [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]
 
-# Transpile and build targeting wasm-gc (default), wasm, js, or native.
+# Transpile and build targeting wasm (default, WASI Preview 1), wasm-gc, js, or native.
 # Writes the compiled artifact (<name>.wasm / .js / .exe) into the current
 # directory by default (or to --output / -o), keeping intermediates in build/moonbit.
-gekko build [--release] [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]
-gekko build --target wasm-gc
+gekko build [--release] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]
 gekko build --target wasm
+gekko build --target wasm-gc
 gekko build --target js
 gekko build --target native -o myfile.exe
 gekko build --release --target wasm   # optimized, much smaller output
 
 # Run tests or execute `main()` (forwarding program args after `--`)
-gekko test [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>]
-gekko run  [--target <wasm-gc|wasm|js|native>] [--root <dir>] [--work-dir <dir>] [-- <args>...]
+gekko test [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]
+gekko run  [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>] [-- <args>...]
 
 # Generate Gleam FFI stubs + MoonBit adapter from a MoonBit package (.mbti)
 gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--work-dir <dir>]
@@ -140,6 +140,34 @@ gekko --help
 ```
 
 *(Note: `--out` is accepted as a backwards-compatible alias for `--work-dir` across commands and `-o` on `build`.)*
+
+---
+
+## WebAssembly Targets & Runtime Compatibility
+
+`gekko` supports three distinct WebAssembly output modes:
+
+1. **`gekko build` (`--target wasm`, default) — Standard WASI Preview 1:**
+   Emits a linear-memory module importing `wasi_snapshot_preview1::fd_write` and exporting `_start`, so pure-Gleam programs run directly in standard WASI runtimes (`wasmtime`, `wasmer`, `wazero`, `moonrun`).
+2. **`gekko build --target wasm-gc` — Compact WasmGC:**
+   Uses the host's garbage collector with no linear memory, importing `spectest::print_char(i32)` for stdout (`println` / `echo`). Run it with `moonrun` / `gekko run --target wasm-gc`, or in browsers/Node/Deno/Bun by passing a small JS import shim:
+   ```js
+   let line = "";
+   const { instance } = await WebAssembly.instantiateStreaming(fetch("app.wasm"), {
+     spectest: {
+       print_char(ch) {
+         if (ch === 10) { console.log(line); line = ""; }
+         else { line += String.fromCharCode(ch); }
+       },
+     },
+   });
+   instance.exports._start();
+   ```
+3. **`gekko wit build` — WASI Preview 2 / Component Model:**
+   Compiles linear-memory Wasm with `wit-bindgen` + `wasm-tools` into a typed `.wasm` component for `wasmtime` and other Component Model hosts.
+
+> [!NOTE]
+> MoonBit OS/runtime FFI packages such as `moonbitlang/core/env`, `moonbitlang/x/fs`, `moonbitlang/core/bench`, and `moonbitlang/async` emit MoonBit-specific Wasm host imports (`__moonbit_fs_unstable`, `__moonbit_time_unstable`, `__moonbit_sys_unstable`, `moonbitlang/async`) that require `moonrun` on Wasm targets. For portable host I/O across Wasm runtimes, use `gekko wit` (or target `native` / `js`).
 
 ---
 

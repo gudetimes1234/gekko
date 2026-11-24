@@ -353,8 +353,8 @@ Gleam unifies records and algebraic data types under `type`, whereas MoonBit dis
 ### 4.9 Multi-Target Support & Wasm Component Model (WIT) Integration
 
 Because `gekko` emits pure MoonBit backed by `moonbitlang/core`, transpiled Gleam projects compile across **all four MoonBit backends** automatically:
-- `wasm-gc` (recommended default for non-WIT Wasm workloads)
-- `wasm` (linear memory, required for the Wasm Component Model Canonical ABI)
+- `wasm` (linear memory, default for `gekko build` — standard WASI Preview 1 and required for the Wasm Component Model Canonical ABI)
+- `wasm-gc` (host-GC WasmGC for browsers, JS engines, and `moonrun`)
 - `js`
 - `native`
 
