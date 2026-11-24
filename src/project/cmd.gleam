@@ -129,6 +129,53 @@ pub fn run_streaming(
   CommandResult(exit_code:, output:)
 }
 
+/// Return True when `moon` output indicates a stale or uninitialized registry
+/// index that can be resolved by running `moon update`.
+pub fn needs_moon_update(output: String) -> Bool {
+  string.contains(output, "moon update")
+  || string.contains(output, "not found in the registry")
+}
+
+/// Run `moon` with `args` in `cwd`, automatically running `moon update` and
+/// retrying once if the registry index is missing or stale.
+pub fn run_moon_with_auto_update(
+  args: List(String),
+  cwd: String,
+) -> CommandResult {
+  run_moon_auto_update_with(args, cwd, fn(a, d) {
+    run(command: "moon", args: a, cwd: d)
+  })
+}
+
+/// Run `moon` with `args` in `cwd` using streaming output, automatically running
+/// `moon update` and retrying once if the registry index is missing or stale.
+pub fn run_moon_streaming_with_auto_update(
+  args: List(String),
+  cwd: String,
+) -> CommandResult {
+  run_moon_auto_update_with(args, cwd, fn(a, d) {
+    run_streaming(command: "moon", args: a, cwd: d)
+  })
+}
+
+fn run_moon_auto_update_with(
+  args: List(String),
+  cwd: String,
+  runner: fn(List(String), String) -> CommandResult,
+) -> CommandResult {
+  let res = runner(args, cwd)
+  case res.exit_code != 0 && needs_moon_update(res.output) {
+    False -> res
+    True -> {
+      let update_res = run(command: "moon", args: ["update"], cwd:)
+      case update_res.exit_code {
+        0 -> runner(args, cwd)
+        _ -> res
+      }
+    }
+  }
+}
+
 /// Apply `f` to every item in `items` concurrently on BEAM processes,
 /// preserving input order and returning the first `Error` in input order.
 pub fn parallel_try_map(

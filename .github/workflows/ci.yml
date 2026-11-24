@@ -42,6 +42,7 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" update
 
       - name: Install Wasm component tools
         uses: taiki-e/install-action@v2
@@ -98,6 +99,7 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" update
 
       - name: Install Wasm component tools
         uses: taiki-e/install-action@v2

@@ -191,11 +191,7 @@ fn run_moon_workflow(
         _ -> list.flatten([pkg_args, ["--"], program_args])
       }
       let res =
-        cmd.run_streaming(
-          command: "moon",
-          args: moon_args,
-          cwd: summary.out_dir,
-        )
+        cmd.run_moon_streaming_with_auto_update(moon_args, summary.out_dir)
       case res.exit_code {
         0 -> Nil
         code -> {
@@ -296,15 +292,11 @@ pub fn build_project_with_options(
     False,
   ))
 
-  let res =
-    cmd.run(
-      command: "moon",
-      args: case release {
-        True -> ["build", "--release", "--target", target]
-        False -> ["build", "--target", target]
-      },
-      cwd: summary.out_dir,
-    )
+  let build_args = case release {
+    True -> ["build", "--release", "--target", target]
+    False -> ["build", "--target", target]
+  }
+  let res = cmd.run_moon_with_auto_update(build_args, summary.out_dir)
   use _ <- result.try(case res.exit_code {
     0 -> Ok(Nil)
     _ -> Error(diagnostics.annotate_moon_output(summary.out_dir, res.output))

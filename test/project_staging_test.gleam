@@ -1094,3 +1094,16 @@ pub fn toolchain_version_parallel_and_diagnostics_test() {
   let _ = simplifile.delete(file_or_dir_at: wout)
   Nil
 }
+
+pub fn needs_moon_update_detection_test() {
+  let ci_err =
+    "Warning: you may need to run `moon update` to update the registry\n"
+    <> "Error: Failed to resolve the module dependency graph\n\n"
+    <> "Caused by:\n"
+    <> "    Failed to resolve registry dependency `moonbitlang/x` for module `file_io`: module was not found in the registry\n"
+  assert cmd.needs_moon_update(ci_err)
+  assert cmd.needs_moon_update(
+    "Failed to resolve registry dependency `foo/bar`: module was not found in the registry",
+  )
+  assert !cmd.needs_moon_update("error: type mismatch in app/app.mbt:14:5")
+}

@@ -198,10 +198,9 @@ pub fn check_wit_workspace(
   summary: WitBridgeSummary,
 ) -> Result(String, String) {
   let res =
-    cmd.run(
-      command: "moon",
-      args: ["check", "--target", "wasm"],
-      cwd: summary.out_dir,
+    cmd.run_moon_with_auto_update(
+      ["check", "--target", "wasm"],
+      summary.out_dir,
     )
   case res.exit_code {
     0 -> Ok(res.output)
@@ -231,8 +230,7 @@ pub fn bundle_component_with_profile(
     True -> ["build", "--release", "--target", "wasm"]
     False -> ["build", "--target", "wasm"]
   }
-  let build_res =
-    cmd.run(command: "moon", args: build_args, cwd: summary.out_dir)
+  let build_res = cmd.run_moon_with_auto_update(build_args, summary.out_dir)
   use _ <- result.try(case build_res.exit_code {
     0 -> Ok(Nil)
     _ -> Error("`moon build --target wasm` failed:\n" <> build_res.output)

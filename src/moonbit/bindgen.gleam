@@ -265,8 +265,7 @@ fn locate_mbti_source(
                 out_dir,
                 False,
               ))
-              let info_res =
-                cmd.run(command: "moon", args: ["info"], cwd: out_dir)
+              let info_res = cmd.run_moon_with_auto_update(["info"], out_dir)
               case info_res.exit_code {
                 0 -> {
                   let local_mbti =
