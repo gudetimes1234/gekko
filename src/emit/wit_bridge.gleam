@@ -37,6 +37,7 @@ pub type WitBridgeSummary {
     out_dir: String,
     wit_dir: String,
     core_wasm_path: String,
+    warnings: List(String),
   )
 }
 
@@ -190,6 +191,7 @@ pub fn bridge_wit_workspace(
     out_dir:,
     wit_dir:,
     core_wasm_path:,
+    warnings: transpile_summary.warnings,
   ))
 }
 

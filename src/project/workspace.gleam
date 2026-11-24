@@ -5,13 +5,15 @@ import emit/trait_bounds
 import filepath
 import glance
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
-import gleam/set
+import gleam/set.{type Set}
 import gleam/string
 import index/symbol_table
 import lower/desugar
+import lower/mangle
 import lower/tco
 import lower/validate
 import moonbit/ffi_meta
@@ -35,6 +37,7 @@ pub type TranspileSummary {
     emitted_modules: List(String),
     local_moonbit_packages: List(String),
     module_pkg_dirs: Dict(String, String),
+    warnings: List(String),
   )
 }
 
@@ -61,16 +64,41 @@ pub fn transpile_project_with_tests(
   use packages_hash <- result.try(staging.compute_packages_dir_hash(
     project_root,
   ))
-  use ffi_overrides <- result.try(ffi_config.load_project_overrides(
+  use discovered_deps <- result.try(loader.discover_all_dependencies(
     project_root,
+    include_tests,
+  ))
+  use dep_overlays <- result.try(
+    list.try_map(discovered_deps, fn(dep) {
+      ffi_config.load_package_overlay(dep.package_root, dep.package_name)
+    }),
+  )
+  use root_overlay <- result.try(ffi_config.load_package_overlay(
+    project_root,
+    project_name,
+  ))
+  use overlays <- result.try(ffi_config.merge_overlays(
+    dep_overlays,
+    root_overlay,
+  ))
+  let discovered_versions =
+    list.fold(
+      discovered_deps,
+      dict.from_list([#(project_name, version)]),
+      fn(acc, dep) { dict.insert(acc, dep.package_name, dep.version) },
+    )
+  use version_warnings <- result.try(ffi_config.check_shim_versions(
+    overlays.shims,
+    discovered_versions,
   ))
   use root_moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
     project_root,
   ))
-  use loaded_deps <- result.try(loader.load_dependencies_with_packages_hash(
+  use loaded_deps <- result.try(loader.load_discovered_dependencies(
     project_root,
-    ffi_overrides,
-    include_tests,
+    discovered_deps,
+    overlays.overrides,
+    overlays.target_branches,
     Some(packages_hash),
   ))
   use dep_moonbit_deps <- result.try(
@@ -134,15 +162,33 @@ pub fn transpile_project_with_tests(
     list.append(list.map(loaded_deps, fn(dep) { dep.package_root }), [
       project_root,
     ])
-  let ffi_metadata = ffi_meta.scan_package_roots(ffi_roots)
+  let base_ffi_metadata =
+    ffi_meta.scan_package_roots_excluding(
+      ffi_roots,
+      overlays.injected_source_files,
+    )
+  use ffi_metadata <- result.try(scan_injected_metadata(
+    base_ffi_metadata,
+    all_modules,
+    overlays.module_injects,
+  ))
 
   let table =
-    symbol_table.index_project_with_ffi_meta(
+    symbol_table.index_project_with_overlays(
       project_name,
       all_modules,
       Some(merged_iface),
-      ffi_overrides,
+      overlays.overrides,
+      overlays.type_overrides,
+      overlays.target_branches,
       ffi_metadata,
+    )
+  let stale_warnings =
+    detect_stale_overlay_warnings(
+      overlays,
+      all_modules,
+      table,
+      discovered_versions,
     )
 
   use _ <- result.try(validate_all_int_literals(all_modules, table))
@@ -189,24 +235,31 @@ pub fn transpile_project_with_tests(
   use #(copied_dep_pkgs, reserved_after_deps) <- result.try(
     list.try_fold(loaded_deps, #([], base_reserved), fn(acc, dep) {
       let #(pkgs_acc, cur_reserved) = acc
-      use dep_pkgs <- result.try(moonbit_ffi.copy_local_packages_for_package(
-        dep.package_root,
-        dep.package_name,
-        project_name,
-        out_dir,
-        cur_reserved,
-      ))
+      use dep_pkgs <- result.try(
+        moonbit_ffi.copy_local_packages_for_package_excluding(
+          dep.package_root,
+          dep.package_name,
+          project_name,
+          out_dir,
+          cur_reserved,
+          overlays.injected_source_files,
+        ),
+      )
       let next_reserved = list.fold(dep_pkgs, cur_reserved, set.insert)
       Ok(#(list.append(pkgs_acc, dep_pkgs), next_reserved))
     }),
   )
 
-  use root_moonbit_packages <- result.try(moonbit_ffi.copy_local_packages(
-    project_root,
-    project_name,
-    out_dir,
-    reserved_after_deps,
-  ))
+  use root_moonbit_packages <- result.try(
+    moonbit_ffi.copy_local_packages_for_package_excluding(
+      project_root,
+      project_name,
+      project_name,
+      out_dir,
+      reserved_after_deps,
+      overlays.injected_source_files,
+    ),
+  )
   let local_moonbit_packages =
     list.append(copied_dep_pkgs, root_moonbit_packages)
     |> list.sort(string.compare)
@@ -247,11 +300,24 @@ pub fn transpile_project_with_tests(
       let target_dir = filepath.join(out_dir, pkg_dir)
       let mbt_rel = pkg_dir <> "/" <> pkg_dir <> ".mbt"
 
+      let mod_pkg_name = case dict.get(module_meta_by_name, mod_name) {
+        Ok(#(pn, _, _)) -> pn
+        Error(_) -> project_name
+      }
+      let mod_injects =
+        lookup_module_injects(mod_pkg_name, mod_name, overlays.module_injects)
+      use merged_imports <- result.try(merge_injected_imports(
+        mod_name,
+        imports,
+        mod_injects,
+        resolved_pkg_dirs,
+      ))
+
       use _ <- result.try(write_text_file(
         filepath.join(target_dir, "moon.pkg"),
         pkg_config.emit_moon_pkg_with_local_pkgs(
           project_name,
-          imports,
+          merged_imports,
           is_main,
           local_pkg_set,
         ),
@@ -260,6 +326,7 @@ pub fn transpile_project_with_tests(
         filepath.join(target_dir, pkg_dir <> ".mbt"),
         mbt_src,
       ))
+      use _ <- result.try(sync_injected_files(target_dir, mod_injects))
       let mod_origins = case dict.get(module_meta_by_name, mod_name) {
         Ok(#(pkg_name, ast_mod, gleam_src)) ->
           diagnostics.collect_module_origins(
@@ -312,6 +379,7 @@ pub fn transpile_project_with_tests(
     emitted_modules: list.reverse(rev_emitted),
     local_moonbit_packages:,
     module_pkg_dirs: resolved_pkg_dirs,
+    warnings: list.append(version_warnings, stale_warnings),
   ))
 }
 
@@ -557,4 +625,249 @@ fn write_text_file(path: String, contents: String) -> Result(Nil, String) {
       })
     }
   }
+}
+
+fn scan_injected_metadata(
+  base_meta: ffi_meta.FfiMetadata,
+  all_modules: List(#(String, String, glance.Module, PrepassResult)),
+  module_injects: Dict(String, ffi_config.ModuleInject),
+) -> Result(ffi_meta.FfiMetadata, String) {
+  list.try_fold(all_modules, base_meta, fn(meta_acc, entry) {
+    let #(pkg_name, mod_name, _, _) = entry
+    let injects = lookup_module_injects(pkg_name, mod_name, module_injects)
+    list.try_fold(injects, meta_acc, fn(inner_acc, inj) {
+      list.try_fold(inj.files, inner_acc, fn(file_acc, f) {
+        use content <- result.try(
+          simplifile.read(from: f.source_path)
+          |> result.map_error(fn(err) {
+            "Failed to read injected MoonBit file "
+            <> f.source_path
+            <> ": "
+            <> simplifile.describe_error(err)
+          }),
+        )
+        Ok(ffi_meta.scan_injected_mbt_source(file_acc, mod_name, content))
+      })
+    })
+  })
+}
+
+fn lookup_module_injects(
+  pkg_name: String,
+  mod_name: String,
+  module_injects: Dict(String, ffi_config.ModuleInject),
+) -> List(ffi_config.ModuleInject) {
+  let keys = [
+    pkg_name <> ":" <> mod_name,
+    pkg_name <> "." <> mod_name,
+    mod_name,
+  ]
+  list.filter_map(keys, fn(k) { dict.get(module_injects, k) })
+}
+
+fn merge_injected_imports(
+  mod_name: String,
+  base_imports: List(#(String, String)),
+  injects: List(ffi_config.ModuleInject),
+  resolved_pkg_dirs: Dict(String, String),
+) -> Result(List(#(String, String)), String) {
+  let alias_to_pkg =
+    list.fold(base_imports, dict.new(), fn(acc, entry) {
+      dict.insert(acc, entry.1, entry.0)
+    })
+  let extra =
+    list.flat_map(injects, fn(inj) {
+      list.map(inj.imports, fn(imp) {
+        let pkg_or_dir = case dict.get(resolved_pkg_dirs, imp.package) {
+          Ok(mapped) -> mapped
+          Error(_) -> imp.package
+        }
+        let alias = case imp.alias {
+          Some(a) -> a
+          None -> mangle.module_to_alias(pkg_or_dir)
+        }
+        #(pkg_or_dir, alias)
+      })
+    })
+  use _ <- result.try(
+    list.try_fold(extra, alias_to_pkg, fn(seen, pair) {
+      let #(pkg, alias) = pair
+      case dict.get(seen, alias) {
+        Ok(existing_pkg) if existing_pkg != pkg ->
+          Error(
+            "Import alias conflict for @"
+            <> alias
+            <> " in module '"
+            <> mod_name
+            <> "': '"
+            <> existing_pkg
+            <> "' vs '"
+            <> pkg
+            <> "' (disambiguate with \""
+            <> pkg
+            <> " as <custom_alias>\")",
+          )
+        _ -> Ok(dict.insert(seen, alias, pkg))
+      }
+    }),
+  )
+  Ok(list.append(base_imports, extra))
+}
+
+fn sync_injected_files(
+  target_dir: String,
+  injects: List(ffi_config.ModuleInject),
+) -> Result(Nil, String) {
+  let files = list.flat_map(injects, fn(inj) { inj.files })
+  use written_names <- result.try(
+    list.index_fold(files, Ok(set.new()), fn(acc_res, f, idx) {
+      use acc <- result.try(acc_res)
+      let dest_name =
+        "__gekko_inject_" <> int.to_string(idx + 1) <> "_" <> f.dest_filename
+      let dest_path = filepath.join(target_dir, dest_name)
+      use content <- result.try(
+        simplifile.read(from: f.source_path)
+        |> result.map_error(fn(err) {
+          "Failed to read injected MoonBit file "
+          <> f.source_path
+          <> ": "
+          <> simplifile.describe_error(err)
+        }),
+      )
+      use _ <- result.try(write_text_file(dest_path, content))
+      Ok(set.insert(acc, dest_name))
+    }),
+  )
+  case simplifile.read_directory(at: target_dir) {
+    Ok(entries) ->
+      list.try_each(entries, fn(entry) {
+        case
+          string.starts_with(entry, "__gekko_inject_")
+          && string.ends_with(entry, ".mbt")
+          && !set.contains(written_names, entry)
+        {
+          True ->
+            simplifile.delete(file_or_dir_at: filepath.join(target_dir, entry))
+            |> result.map_error(fn(err) {
+              "Failed to remove stale injected file "
+              <> entry
+              <> ": "
+              <> simplifile.describe_error(err)
+            })
+          False -> Ok(Nil)
+        }
+      })
+    Error(_) -> Ok(Nil)
+  }
+}
+
+fn detect_stale_overlay_warnings(
+  overlays: ffi_config.MergedOverlays,
+  all_modules: List(#(String, String, glance.Module, PrepassResult)),
+  table: symbol_table.SymbolTable,
+  discovered_versions: Dict(String, String),
+) -> List(String) {
+  let missing_shim_targets =
+    list.filter_map(overlays.shims, fn(entry) {
+      let #(_, meta) = entry
+      case dict.has_key(discovered_versions, meta.target) {
+        True -> Error(Nil)
+        False -> Ok(meta.target)
+      }
+    })
+    |> set.from_list
+
+  let #(fn_keys, type_keys, mod_keys) =
+    list.fold(all_modules, #(set.new(), set.new(), set.new()), fn(acc, entry) {
+      let #(fns, tys, mods) = acc
+      let #(pkg_name, mod_name, _, _) = entry
+      let next_mods =
+        mods
+        |> set.insert(pkg_name <> ":" <> mod_name)
+        |> set.insert(pkg_name <> "." <> mod_name)
+        |> set.insert(mod_name)
+      case dict.get(table.modules, mod_name) {
+        Error(_) -> #(fns, tys, next_mods)
+        Ok(mod_syms) -> {
+          let next_fns =
+            dict.fold(mod_syms.functions, fns, fn(s, fn_name, _) {
+              s
+              |> set.insert(pkg_name <> ":" <> mod_name <> "." <> fn_name)
+              |> set.insert(pkg_name <> "." <> mod_name <> "." <> fn_name)
+              |> set.insert(mod_name <> "." <> fn_name)
+            })
+          let next_tys =
+            dict.fold(mod_syms.types, tys, fn(s, ty_name, _) {
+              s
+              |> set.insert(pkg_name <> ":" <> mod_name <> "." <> ty_name)
+              |> set.insert(pkg_name <> "." <> mod_name <> "." <> ty_name)
+              |> set.insert(mod_name <> "." <> ty_name)
+            })
+          #(next_fns, next_tys, next_mods)
+        }
+      }
+    })
+
+  let check_keys = fn(
+    entries: List(String),
+    sources: Dict(String, String),
+    known: Set(String),
+    kind_label: String,
+    entity_label: String,
+  ) {
+    list.filter_map(list.sort(entries, string.compare), fn(k) {
+      case set.contains(known, k) {
+        True -> Error(Nil)
+        False -> {
+          let targets_missing_pkg = case string.split_once(k, ":") {
+            Ok(#(pkg, _)) -> set.contains(missing_shim_targets, pkg)
+            Error(_) -> False
+          }
+          case targets_missing_pkg {
+            True -> Error(Nil)
+            False -> {
+              let src = dict.get(sources, k) |> result.unwrap("root")
+              Ok(
+                "Warning: "
+                <> kind_label
+                <> " '"
+                <> k
+                <> "' (from "
+                <> src
+                <> ") did not match any "
+                <> entity_label
+                <> " in loaded packages",
+              )
+            }
+          }
+        }
+      }
+    })
+  }
+
+  let w_fns =
+    check_keys(
+      dict.keys(overlays.overrides),
+      overlays.override_sources,
+      fn_keys,
+      "override",
+      "function",
+    )
+  let w_tys =
+    check_keys(
+      dict.keys(overlays.type_overrides),
+      overlays.type_override_sources,
+      type_keys,
+      "type_override",
+      "type",
+    )
+  let w_mods =
+    check_keys(
+      dict.keys(overlays.module_injects),
+      overlays.module_inject_sources,
+      mod_keys,
+      "module_inject",
+      "module",
+    )
+  list.flatten([w_fns, w_tys, w_mods])
 }

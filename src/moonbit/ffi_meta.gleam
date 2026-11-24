@@ -112,16 +112,29 @@ pub fn base_metadata() -> FfiMetadata {
 /// Scan `<root>/moonbit/**` packages across all given package roots, starting from
 /// `base_metadata()`.
 pub fn scan_package_roots(roots: List(String)) -> FfiMetadata {
+  scan_package_roots_excluding(roots, set.new())
+}
+
+/// Like `scan_package_roots`, skipping any `.mbt` file whose canonical path
+/// is present in `excluded_files` (such as files injected via `[module_inject]`).
+pub fn scan_package_roots_excluding(
+  roots: List(String),
+  excluded_files: Set(String),
+) -> FfiMetadata {
   list.fold(roots, base_metadata(), fn(meta, root) {
     let moonbit_root = filepath.join(root, "moonbit")
     case simplifile.is_directory(moonbit_root) {
-      Ok(True) -> scan_moonbit_root(meta, moonbit_root)
+      Ok(True) -> scan_moonbit_root(meta, moonbit_root, excluded_files)
       _ -> meta
     }
   })
 }
 
-fn scan_moonbit_root(meta: FfiMetadata, moonbit_root: String) -> FfiMetadata {
+fn scan_moonbit_root(
+  meta: FfiMetadata,
+  moonbit_root: String,
+  excluded_files: Set(String),
+) -> FfiMetadata {
   case read_sorted_entries(moonbit_root) {
     Error(_) -> meta
     Ok(entries) ->
@@ -131,7 +144,7 @@ fn scan_moonbit_root(meta: FfiMetadata, moonbit_root: String) -> FfiMetadata {
           False -> {
             let full_path = filepath.join(moonbit_root, entry)
             case simplifile.is_directory(full_path) {
-              Ok(True) -> visit_pkg_dir(acc, full_path, entry)
+              Ok(True) -> visit_pkg_dir(acc, full_path, entry, excluded_files)
               _ -> acc
             }
           }
@@ -144,6 +157,7 @@ fn visit_pkg_dir(
   meta: FfiMetadata,
   cur_dir: String,
   rel_pkg: String,
+  excluded_files: Set(String),
 ) -> FfiMetadata {
   case read_sorted_entries(cur_dir) {
     Error(_) -> meta
@@ -163,7 +177,14 @@ fn visit_pkg_dir(
                     && !string.ends_with(entry, "_test.mbt")
                     && !string.ends_with(entry, "_wbtest.mbt")
                   {
-                    True -> #([full, ..files_acc], dirs_acc)
+                    True -> {
+                      let resolved =
+                        simplifile.resolve(full) |> result.unwrap(full)
+                      case set.contains(excluded_files, resolved) {
+                        True -> parts
+                        False -> #([full, ..files_acc], dirs_acc)
+                      }
+                    }
                     False -> parts
                   }
               }
@@ -178,7 +199,12 @@ fn visit_pkg_dir(
           }
         })
       list.fold(list.reverse(subdirs), after_files, fn(acc, sub) {
-        visit_pkg_dir(acc, filepath.join(cur_dir, sub), rel_pkg <> "/" <> sub)
+        visit_pkg_dir(
+          acc,
+          filepath.join(cur_dir, sub),
+          rel_pkg <> "/" <> sub,
+          excluded_files,
+        )
       })
     }
   }
@@ -204,7 +230,23 @@ pub fn scan_mbt_source(
   let #(final_meta, _) =
     list.fold(decls, #(meta, []), fn(state, decl) {
       let #(cur_meta, pending_derives) = state
-      process_top_decl(decl, pkg_name, cur_meta, pending_derives)
+      process_top_decl(decl, pkg_name, cur_meta, pending_derives, False)
+    })
+  final_meta
+}
+
+/// Scan an injected MoonBit `.mbt` file for generic function signatures
+/// (including private `fn` declarations) indexed under `mod_name`.
+pub fn scan_injected_mbt_source(
+  meta: FfiMetadata,
+  mod_name: String,
+  source: String,
+) -> FfiMetadata {
+  let decls = extract_top_decls(source)
+  let #(final_meta, _) =
+    list.fold(decls, #(meta, []), fn(state, decl) {
+      let #(cur_meta, pending_derives) = state
+      process_top_decl(decl, mod_name, cur_meta, pending_derives, True)
     })
   final_meta
 }
@@ -672,6 +714,7 @@ fn process_top_decl(
   pkg_name: String,
   meta: FfiMetadata,
   pending_derives: List(String),
+  include_private_fns: Bool,
 ) -> #(FfiMetadata, List(String)) {
   case string.starts_with(decl, "#derive(") {
     True -> {
@@ -699,16 +742,22 @@ fn process_top_decl(
                 || string.starts_with(after_vis, "impl[")
               {
                 True -> #(parse_impl_header(after_vis, pkg_name, meta), [])
-                False ->
-                  case
+                False -> {
+                  let is_pub_fn =
                     string.starts_with(decl, "pub fn ")
                     || string.starts_with(decl, "pub fn[")
                     || string.starts_with(decl, "pub async fn ")
                     || string.starts_with(decl, "pub async fn[")
-                  {
-                    True -> #(parse_pub_fn_header(decl, pkg_name, meta), [])
+                  let is_any_fn =
+                    string.starts_with(after_vis, "fn ")
+                    || string.starts_with(after_vis, "fn[")
+                    || string.starts_with(after_vis, "async fn ")
+                    || string.starts_with(after_vis, "async fn[")
+                  case is_pub_fn || { include_private_fns && is_any_fn } {
+                    True -> #(parse_fn_header(after_vis, pkg_name, meta), [])
                     False -> #(meta, [])
                   }
+                }
               }
           }
         }
@@ -894,15 +943,14 @@ fn parse_impl_header(
   }
 }
 
-fn parse_pub_fn_header(
-  decl: String,
+fn parse_fn_header(
+  after_vis: String,
   pkg_name: String,
   meta: FfiMetadata,
 ) -> FfiMetadata {
-  let after_pub = string.drop_start(decl, 4) |> string.trim_start
-  let after_async = case string.starts_with(after_pub, "async ") {
-    True -> string.drop_start(after_pub, 6) |> string.trim_start
-    False -> after_pub
+  let after_async = case string.starts_with(after_vis, "async ") {
+    True -> string.drop_start(after_vis, 6) |> string.trim_start
+    False -> after_vis
   }
   let after_fn = string.drop_start(after_async, 2) |> string.trim_start
   let #(tp_list, fn_name, after_name_and_tps) = case

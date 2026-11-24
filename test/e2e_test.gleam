@@ -739,6 +739,17 @@ pub fn cli_parse_args_help_and_version_test() {
       module: None,
       out: None,
     ))
+  assert gekko.parse_args(["shim", "inspect", "simplifile", "--root", "app"])
+    == Ok(gekko.ShimInspectAction(root: "app", package: "simplifile"))
+  assert gekko.parse_args([
+      "shim", "init", "simplifile", "--root", "app", "-o", "out_shim",
+    ])
+    == Ok(gekko.ShimInitAction(
+      root: "app",
+      package: "simplifile",
+      out: Some("out_shim"),
+    ))
+  assert gekko.parse_args(["shim", "--help"]) == Ok(gekko.HelpAction)
 
   // Parse `moon build` artifact lines
   let sample_build_out =

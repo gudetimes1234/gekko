@@ -50,25 +50,36 @@ pub fn desugar_module(
     |> list.reverse
     |> list.map(fn(imp) { IrImport(module: imp.module, alias: imp.alias) })
 
+  let branch = mod_syms.target_branch
   let custom_types =
     ast_mod.custom_types
     |> list.reverse
-    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+    |> list.filter(fn(def) {
+      !symbol_table.is_excluded_for_branch(def.attributes, branch)
+    })
   let ast_type_aliases =
     ast_mod.type_aliases
     |> list.reverse
-    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+    |> list.filter(fn(def) {
+      !symbol_table.is_excluded_for_branch(def.attributes, branch)
+    })
   let ast_constants =
     ast_mod.constants
     |> list.reverse
-    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+    |> list.filter(fn(def) {
+      !symbol_table.is_excluded_for_branch(def.attributes, branch)
+    })
   let reachable_fns =
-    symbol_table.reachable_private_functions(ast_mod, mod_syms.functions)
+    symbol_table.reachable_private_functions_for_branch(
+      ast_mod,
+      mod_syms.functions,
+      branch,
+    )
   let ast_functions =
     ast_mod.functions
     |> list.reverse
     |> list.filter(fn(def) {
-      !symbol_table.is_excluded_target(def.attributes)
+      !symbol_table.is_excluded_for_branch(def.attributes, branch)
       && set.contains(reachable_fns, def.definition.name)
     })
 

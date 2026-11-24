@@ -23,7 +23,7 @@ import lower/ir.{
 import lower/ir_util
 import lower/mangle
 import moonbit/ffi_meta.{type FfiMetadata}
-import project/prepass.{PackageCall, WasmImport}
+import project/prepass.{InPackageCall, PackageCall, WasmImport}
 
 import emit/moonbit_decl.{
   type EmitCtx, EmitCtx, add_gprelude_import, add_module_import,
@@ -268,6 +268,14 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
       let body =
         "  @" <> ffi_alias <> "." <> target_fn <> "(" <> call_args <> ")"
       #("///|\n" <> header <> " {\n" <> body <> "\n}", ctx_imp)
+    }
+
+    Some(InPackageCall(target_fn)) -> {
+      let call_args =
+        list.map(f.params, fn(p) { p.name })
+        |> string.join(", ")
+      let body = "  " <> target_fn <> "(" <> call_args <> ")"
+      #("///|\n" <> header <> " {\n" <> body <> "\n}", ctx2)
     }
 
     Some(WasmImport(wasm_mod, imp_name)) -> {

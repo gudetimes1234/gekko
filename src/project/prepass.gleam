@@ -17,6 +17,14 @@ pub type FfiKind {
   PackageCall(package: String, function: String)
   /// Emits a raw WebAssembly import stub: `fn __ffi_name(...) -> ... = "mod" "import"`
   WasmImport(wasm_module: String, import_name: String)
+  /// Calls a function defined in a co-located MoonBit file injected into the same package.
+  InPackageCall(function: String)
+}
+
+/// Which `@target(...)` branch to keep when compiling a Gleam module.
+pub type TargetBranch {
+  PreferErlang
+  PreferJavascript
 }
 
 /// Target MoonBit type for an `@external_type(moonbit, "pkg", "Type")` directive.

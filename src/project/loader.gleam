@@ -10,7 +10,7 @@ import gleam/string
 import index/symbol_table
 import project/cmd
 import project/interface.{type PackageInterface}
-import project/prepass.{type FfiKind, type PrepassResult}
+import project/prepass.{type FfiKind, type PrepassResult, type TargetBranch}
 import project/staging
 import project/text_edit
 import simplifile
@@ -28,7 +28,7 @@ pub type LoadedDependency {
   )
 }
 
-type DiscoveredPkg {
+pub type DiscoveredPkg {
   DiscoveredPkg(
     package_name: String,
     version: String,
@@ -125,14 +125,12 @@ pub fn load_dependencies_with_options(
   )
 }
 
-/// Like `load_dependencies_with_options`, reusing a precomputed `build/packages`
-/// hash and extracting per-dependency compiler interfaces in parallel.
-pub fn load_dependencies_with_packages_hash(
+/// Discover and topologically sort all non-intercepted Hex and local-path
+/// dependencies for `project_root`.
+pub fn discover_all_dependencies(
   project_root: String,
-  ffi_overrides: Dict(String, FfiKind),
   include_tests: Bool,
-  packages_hash: Option(String),
-) -> Result(List(LoadedDependency), String) {
+) -> Result(List(DiscoveredPkg), String) {
   use #(root_name, _) <- result.try(read_project_meta(project_root))
   let packages_dir =
     project_root
@@ -161,9 +159,47 @@ pub fn load_dependencies_with_packages_hash(
     |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
     |> list.map(fn(pair) { pair.1 })
 
-  let ordered = topo_sort_packages(discovered)
+  Ok(topo_sort_packages(discovered))
+}
+
+/// Like `load_dependencies_with_options`, reusing a precomputed `build/packages`
+/// hash and extracting per-dependency compiler interfaces in parallel.
+pub fn load_dependencies_with_packages_hash(
+  project_root: String,
+  ffi_overrides: Dict(String, FfiKind),
+  include_tests: Bool,
+  packages_hash: Option(String),
+) -> Result(List(LoadedDependency), String) {
+  use ordered <- result.try(discover_all_dependencies(
+    project_root,
+    include_tests,
+  ))
+  load_discovered_dependencies(
+    project_root,
+    ordered,
+    ffi_overrides,
+    dict.new(),
+    packages_hash,
+  )
+}
+
+/// Load, validate externals, and extract compiler interfaces for an already
+/// discovered and topologically sorted list of dependencies.
+pub fn load_discovered_dependencies(
+  project_root: String,
+  ordered: List(DiscoveredPkg),
+  ffi_overrides: Dict(String, FfiKind),
+  target_branches: Dict(String, TargetBranch),
+  packages_hash: Option(String),
+) -> Result(List(LoadedDependency), String) {
   cmd.parallel_try_map(ordered, fn(pkg) {
-    load_single_dependency(project_root, pkg, ffi_overrides, packages_hash)
+    load_single_dependency(
+      project_root,
+      pkg,
+      ffi_overrides,
+      target_branches,
+      packages_hash,
+    )
   })
 }
 
@@ -529,82 +565,75 @@ fn load_single_dependency(
   project_root: String,
   pkg: DiscoveredPkg,
   ffi_overrides: Dict(String, FfiKind),
+  target_branches: Dict(String, TargetBranch),
   packages_hash: Option(String),
 ) -> Result(LoadedDependency, String) {
   let src_dir = filepath.join(pkg.package_root, "src")
-  use modules <- result.try(discover_and_parse(src_dir, None))
-  use _ <- result.try(validate_dependency_externals(
-    pkg.package_name,
-    modules,
-    ffi_overrides,
-  ))
+  use modules <- result.try(case simplifile.is_directory(src_dir) {
+    Ok(True) -> discover_and_parse(src_dir, None)
+    _ -> Ok([])
+  })
+  case modules {
+    [] ->
+      Ok(LoadedDependency(
+        package_name: pkg.package_name,
+        version: pkg.version,
+        package_root: pkg.package_root,
+        modules: [],
+        interface: None,
+      ))
+    _ -> {
+      use _ <- result.try(validate_dependency_externals(
+        pkg.package_name,
+        modules,
+        ffi_overrides,
+        target_branches,
+      ))
 
-  let dep_staging =
-    project_root
-    |> filepath.join("build")
-    |> filepath.join(".gekko_staging_deps")
-    |> filepath.join(pkg.package_name)
-  use iface <- result.try(staging.extract_package_interface_with_packages_hash(
-    pkg.package_root,
-    project_root,
-    dep_staging,
-    packages_hash,
-  ))
+      let dep_staging =
+        project_root
+        |> filepath.join("build")
+        |> filepath.join(".gekko_staging_deps")
+        |> filepath.join(pkg.package_name)
+      use iface <- result.try(
+        staging.extract_package_interface_with_packages_hash(
+          pkg.package_root,
+          project_root,
+          dep_staging,
+          packages_hash,
+        ),
+      )
 
-  Ok(LoadedDependency(
-    package_name: pkg.package_name,
-    version: pkg.version,
-    package_root: pkg.package_root,
-    modules:,
-    interface: Some(iface),
-  ))
+      Ok(LoadedDependency(
+        package_name: pkg.package_name,
+        version: pkg.version,
+        package_root: pkg.package_root,
+        modules:,
+        interface: Some(iface),
+      ))
+    }
+  }
 }
 
 fn validate_dependency_externals(
   pkg_name: String,
   modules: List(#(String, glance.Module, PrepassResult)),
   ffi_overrides: Dict(String, FfiKind),
+  target_branches: Dict(String, TargetBranch),
 ) -> Result(Nil, String) {
-  list.try_each(modules, fn(entry) {
-    let #(mod_name, ast_mod, prepass_res) = entry
-    let active_fns =
-      list.filter(ast_mod.functions, fn(fn_def) {
-        !symbol_table.is_excluded_target(fn_def.attributes)
-      })
-    let fn_infos =
-      list.fold(active_fns, dict.new(), fn(acc, fn_def) {
-        let fn_name = fn_def.definition.name
-        let ffi =
-          symbol_table.resolve_function_ffi(
-            pkg_name,
-            mod_name,
-            fn_name,
-            prepass_res,
-            ffi_overrides,
-          )
-        let info =
-          symbol_table.FunctionInfo(
-            module: mod_name,
-            name: fn_name,
-            publicity: fn_def.definition.publicity,
-            arity: list.length(fn_def.definition.parameters),
-            parameters: [],
-            return_type: None,
-            resolved: None,
-            ffi:,
-            has_erlang_or_js_external: False,
-            has_gleam_body: fn_def.definition.body != [],
-          )
-        dict.insert(acc, fn_name, info)
-      })
-    let reachable = symbol_table.reachable_private_functions(ast_mod, fn_infos)
-    list.try_each(active_fns, fn(fn_def) {
-      let fn_name = fn_def.definition.name
-      case set.contains(reachable, fn_name) {
-        False -> Ok(Nil)
-        True -> {
-          let has_erl_or_js = has_erlang_or_js_external(fn_def.attributes)
-          let has_ffi_mapping =
+  let rev_errors =
+    list.fold(modules, [], fn(acc, entry) {
+      let #(mod_name, ast_mod, prepass_res) = entry
+      let branch =
+        symbol_table.resolve_target_branch(pkg_name, mod_name, target_branches)
+      let active_fns =
+        list.filter(ast_mod.functions, fn(fn_def) {
+          !symbol_table.is_excluded_for_branch(fn_def.attributes, branch)
+        })
+      let fn_infos =
+        list.fold(active_fns, dict.new(), fn(fn_acc, fn_def) {
+          let fn_name = fn_def.definition.name
+          let ffi =
             symbol_table.resolve_function_ffi(
               pkg_name,
               mod_name,
@@ -612,39 +641,78 @@ fn validate_dependency_externals(
               prepass_res,
               ffi_overrides,
             )
-            != None
-          let has_fallback_body = fn_def.definition.body != []
-          case has_erl_or_js && !has_ffi_mapping && !has_fallback_body {
-            True -> {
-              let #(line, col) =
-                text_edit.byte_offset_to_line_col(
-                  prepass_res.cleaned_source,
-                  fn_def.definition.location.start,
-                )
-              Error(
-                "Unmapped external function "
-                <> pkg_name
-                <> ":"
-                <> mod_name
-                <> "."
-                <> fn_name
-                <> " at "
-                <> pkg_name
-                <> ":src/"
-                <> mod_name
-                <> ".gleam:"
-                <> int.to_string(line)
-                <> ":"
-                <> int.to_string(col)
-                <> " (add an override in [tools.gekko.overrides] in gleam.toml or in gekko.toml)",
+          let info =
+            symbol_table.FunctionInfo(
+              module: mod_name,
+              name: fn_name,
+              publicity: fn_def.definition.publicity,
+              arity: list.length(fn_def.definition.parameters),
+              parameters: [],
+              return_type: None,
+              resolved: None,
+              ffi:,
+              has_erlang_or_js_external: False,
+              has_gleam_body: fn_def.definition.body != [],
+            )
+          dict.insert(fn_acc, fn_name, info)
+        })
+      let reachable =
+        symbol_table.reachable_private_functions_for_branch(
+          ast_mod,
+          fn_infos,
+          branch,
+        )
+      list.fold(active_fns, acc, fn(err_acc, fn_def) {
+        let fn_name = fn_def.definition.name
+        case set.contains(reachable, fn_name) {
+          False -> err_acc
+          True -> {
+            let has_erl_or_js = has_erlang_or_js_external(fn_def.attributes)
+            let has_ffi_mapping =
+              symbol_table.resolve_function_ffi(
+                pkg_name,
+                mod_name,
+                fn_name,
+                prepass_res,
+                ffi_overrides,
               )
+              != None
+            let has_fallback_body = fn_def.definition.body != []
+            case has_erl_or_js && !has_ffi_mapping && !has_fallback_body {
+              True -> {
+                let #(line, col) =
+                  text_edit.byte_offset_to_line_col(
+                    prepass_res.cleaned_source,
+                    fn_def.definition.location.start,
+                  )
+                let msg =
+                  "Unmapped external function "
+                  <> pkg_name
+                  <> ":"
+                  <> mod_name
+                  <> "."
+                  <> fn_name
+                  <> " at "
+                  <> pkg_name
+                  <> ":src/"
+                  <> mod_name
+                  <> ".gleam:"
+                  <> int.to_string(line)
+                  <> ":"
+                  <> int.to_string(col)
+                  <> " (add an override in [tools.gekko.overrides] in gleam.toml or in gekko.toml)"
+                [msg, ..err_acc]
+              }
+              False -> err_acc
             }
-            False -> Ok(Nil)
           }
         }
-      }
+      })
     })
-  })
+  case rev_errors {
+    [] -> Ok(Nil)
+    _ -> Error(string.join(list.reverse(rev_errors), "\n"))
+  }
 }
 
 fn has_erlang_or_js_external(attributes: List(glance.Attribute)) -> Bool {

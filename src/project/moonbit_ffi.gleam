@@ -37,6 +37,27 @@ pub fn copy_local_packages_for_package(
   out_dir: String,
   reserved_pkg_dirs: Set(String),
 ) -> Result(List(String), String) {
+  copy_local_packages_for_package_excluding(
+    pkg_root,
+    source_pkg_name,
+    project_name,
+    out_dir,
+    reserved_pkg_dirs,
+    set.new(),
+  )
+}
+
+/// Like `copy_local_packages_for_package`, skipping any file whose resolved
+/// canonical path is present in `excluded_files` (such as files injected into
+/// transpiled modules via `[module_inject]`).
+pub fn copy_local_packages_for_package_excluding(
+  pkg_root: String,
+  source_pkg_name: String,
+  project_name: String,
+  out_dir: String,
+  reserved_pkg_dirs: Set(String),
+  excluded_files: Set(String),
+) -> Result(List(String), String) {
   let moonbit_root = filepath.join(pkg_root, "moonbit")
   case simplifile.is_directory(moonbit_root) {
     Ok(True) -> {
@@ -50,6 +71,7 @@ pub fn copy_local_packages_for_package(
           project_name,
           out_dir,
           reserved_pkg_dirs,
+          excluded_files,
           [],
         ),
       )
@@ -106,6 +128,7 @@ fn walk_root_subdirs(
   project_name: String,
   out_dir: String,
   reserved_pkg_dirs: Set(String),
+  excluded_files: Set(String),
   acc: List(String),
 ) -> Result(List(String), String) {
   list.try_fold(entries, acc, fn(cur_acc, entry) {
@@ -122,6 +145,7 @@ fn walk_root_subdirs(
               project_name,
               out_dir,
               reserved_pkg_dirs,
+              excluded_files,
               cur_acc,
             )
           _ -> Ok(cur_acc)
@@ -138,6 +162,7 @@ fn visit_package_dir(
   project_name: String,
   out_dir: String,
   reserved_pkg_dirs: Set(String),
+  excluded_files: Set(String),
   acc: List(String),
 ) -> Result(List(String), String) {
   use entries <- result.try(read_sorted_dir(cur_dir))
@@ -152,7 +177,13 @@ fn visit_package_dir(
             Ok(True) -> #(files_acc, [entry, ..dirs_acc])
             _ ->
               case simplifile.is_file(full) {
-                Ok(True) -> #([entry, ..files_acc], dirs_acc)
+                Ok(True) -> {
+                  let resolved = simplifile.resolve(full) |> result.unwrap(full)
+                  case set.contains(excluded_files, resolved) {
+                    True -> parts
+                    False -> #([entry, ..files_acc], dirs_acc)
+                  }
+                }
                 _ -> parts
               }
           }
@@ -233,6 +264,7 @@ fn visit_package_dir(
       project_name,
       out_dir,
       reserved_pkg_dirs,
+      excluded_files,
       cur_acc,
     )
   })

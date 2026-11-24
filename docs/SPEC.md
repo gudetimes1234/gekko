@@ -165,16 +165,17 @@ Standard `gleam check` and `glance` restrict `@external(...)` targets to `erlang
    - Replaces the attribute line with `// @external_moonbit_stripped` (preserving exact line numbers for diagnostics).
    - Injects a dummy `{ panic }` body in the in-memory copy if the Gleam function is bodyless so `glance` and staging parse cleanly.
 
-3. **Sidecar `gekko.toml` (or `[tools.gekko.overrides]` in `gleam.toml`):**
-   Allows root projects to bind third-party Hex dependency functions to MoonBit implementations without modifying `build/packages/`:
-   ```toml
-   [overrides."simplifile.read"]
-   package = "wasi/filesystem"
-   function = "read_to_string"
-   ```
+3. **Sidecar `gekko.toml`, `[tools.gekko.*]`, and Companion Shim Packages:**
+   Allows both root projects and standalone companion shim dependencies to bind unmodified third-party Hex dependency types and functions to MoonBit implementations without modifying `build/packages/` (see [`docs/SHIMS.md`](./SHIMS.md) for the full schema):
+   - `[shim]` (`target`, SemVer `version` constraint check)
+   - `[type_overrides."pkg:mod.Type"]` (`package`, `type`)
+   - `[overrides."pkg:mod.fn"]` (`package` + `function`, `wasm_module` + `import_name`, or `in_package`)
+   - `[module_inject."pkg:mod"]` (`files`, `imports` injected directly into the transpiled MoonBit package to avoid circular imports)
+   - `[target_branch."pkg:mod"]` (`prefer = "erlang" | "javascript"`)
 
 **FFI Emission Modes:**
 - **Package Call Mode (`"pkg/path"`, `"fn_name"`):** Adds `"pkg/path"` to the package's `moon.pkg` `import { ... }` block and emits a wrapper function calling `@alias.fn_name(args...)`.
+- **In-Package Call Mode (`in_package = "fn_name"`):** Calls a co-located function defined in a `[module_inject]` `.mbt` file within the same MoonBit package.
 - **Raw Wasm Import Mode (`"wasm:module_name"`, `"import_name"`):** Emits a MoonBit Wasm import declaration:
   ```moonbit
   ///|

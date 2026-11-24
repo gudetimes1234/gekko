@@ -16,7 +16,7 @@ import lower/ir.{
 }
 
 import moonbit/ffi_meta.{type FfiMetadata, type MbtType}
-import project/prepass.{ExternalType, PackageCall}
+import project/prepass.{ExternalType, InPackageCall, PackageCall}
 
 import emit/trait_infer.{
   type AnalyzeCtx, AnalyzeCtx, GetterSig, align_ir_call_args,
@@ -348,6 +348,18 @@ fn seed_all_fn_bounds(
       let seeded = case f.ffi, f.type_params {
         Some(PackageCall(pkg, target_fn)), [_, ..] ->
           case ffi_meta.lookup_function(ctx.ffi_metadata, pkg, target_fn) {
+            Some(ext_meta) ->
+              extract_ffi_bounds(f, mod.module_name, ext_meta, ctx)
+            None -> empty_fn_bounds()
+          }
+        Some(InPackageCall(target_fn)), [_, ..] ->
+          case
+            ffi_meta.lookup_function(
+              ctx.ffi_metadata,
+              mod.module_name,
+              target_fn,
+            )
+          {
             Some(ext_meta) ->
               extract_ffi_bounds(f, mod.module_name, ext_meta, ctx)
             None -> empty_fn_bounds()

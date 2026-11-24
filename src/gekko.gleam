@@ -12,6 +12,7 @@ import moonbit/bindgen
 import project/cmd
 import project/diagnostics
 import project/scaffold
+import project/shim_cli
 import project/workspace
 import simplifile
 import wit/gleam_gen
@@ -66,6 +67,8 @@ pub type CliAction {
     module: Option(String),
     out: Option(String),
   )
+  ShimInspectAction(root: String, package: String)
+  ShimInitAction(root: String, package: String, out: Option(String))
   HelpAction
   VersionAction
 }
@@ -133,6 +136,14 @@ pub fn main() -> Nil {
       require_tools_or_halt(["moon"])
       run_moonbit_bind(root, package, module, out)
     }
+    Ok(ShimInspectAction(root:, package:)) -> {
+      require_tools_or_halt(["gleam"])
+      run_shim_inspect(root, package)
+    }
+    Ok(ShimInitAction(root:, package:, out:)) -> {
+      require_tools_or_halt(["gleam"])
+      run_shim_init(root, package, out)
+    }
   }
 }
 
@@ -173,6 +184,7 @@ fn run_moon_workflow(
       halt(1)
     }
     Ok(summary) -> {
+      list.each(summary.warnings, io.println_error)
       let target_args = case target {
         Some(t) -> [moon_subcmd, "--target", t]
         None -> [moon_subcmd]
@@ -302,7 +314,13 @@ pub fn build_project_with_options(
     _ -> Error(diagnostics.annotate_moon_output(summary.out_dir, res.output))
   })
 
-  let warnings = filter_moon_build_warnings(res.output)
+  let moon_warnings = filter_moon_build_warnings(res.output)
+  let overlay_warnings = string.join(summary.warnings, "\n")
+  let warnings = case overlay_warnings, moon_warnings {
+    "", _ -> moon_warnings
+    _, "" -> overlay_warnings
+    _, _ -> overlay_warnings <> "\n" <> moon_warnings
+  }
   let root_pkg_dir =
     dict.get(summary.module_pkg_dirs, summary.project_name)
     |> result.unwrap(pkg_config.module_to_pkg_dir(summary.project_name))
@@ -804,6 +822,7 @@ fn run_wit_check(
       wit_dir,
       world,
     ))
+    list.each(summary.warnings, io.println_error)
     wit_bridge.check_wit_workspace(summary)
     |> result.map_error(fn(err) {
       diagnostics.annotate_moon_output(summary.out_dir, err)
@@ -839,6 +858,7 @@ fn run_wit_build(
       wit_dir,
       world,
     ))
+    list.each(summary.warnings, io.println_error)
     let output_wasm =
       option.unwrap(
         output_opt,
@@ -887,6 +907,26 @@ fn run_moonbit_bind(
         io.println_error("Warning (skipped " <> s.0 <> "): " <> s.1)
       })
     }
+  }
+}
+
+fn run_shim_inspect(root: String, package: String) -> Nil {
+  case shim_cli.inspect_package(root, package) {
+    Error(err) -> {
+      io.println_error("gekko shim inspect error: " <> err)
+      halt(1)
+    }
+    Ok(report) -> io.println(report)
+  }
+}
+
+fn run_shim_init(root: String, package: String, out: Option(String)) -> Nil {
+  case shim_cli.init_shim(root, package, out) {
+    Error(err) -> {
+      io.println_error("gekko shim init error: " <> err)
+      halt(1)
+    }
+    Ok(msg) -> io.println(msg)
   }
 }
 
@@ -992,6 +1032,31 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
           }
         }
         ["moonbit", ..] -> Error("Expected `gekko moonbit bind <pkg> [flags]`")
+        ["shim", "inspect", ..rest] -> {
+          use #(root, pkg_opt) <- result.try(parse_shim_inspect_flags(
+            rest,
+            ".",
+            None,
+          ))
+          case pkg_opt {
+            Some(pkg) -> Ok(ShimInspectAction(root:, package: pkg))
+            None -> Error("Expected `<pkg>` after `gekko shim inspect`")
+          }
+        }
+        ["shim", "init", ..rest] -> {
+          use #(root, pkg_opt, out) <- result.try(parse_shim_init_flags(
+            rest,
+            ".",
+            None,
+            None,
+          ))
+          case pkg_opt {
+            Some(pkg) -> Ok(ShimInitAction(root:, package: pkg, out:))
+            None -> Error("Expected `<pkg>` after `gekko shim init`")
+          }
+        }
+        ["shim", ..] ->
+          Error("Expected `gekko shim <inspect|init> <pkg> [flags]`")
         [unknown, ..] -> Error("Unknown subcommand: " <> unknown)
       }
   }
@@ -1180,6 +1245,43 @@ fn parse_flags(
   }
 }
 
+fn parse_shim_inspect_flags(
+  args: List(String),
+  root: String,
+  pkg: Option(String),
+) -> Result(#(String, Option(String)), String) {
+  case args {
+    [] -> Ok(#(root, pkg))
+    ["--root", val, ..rest] -> parse_shim_inspect_flags(rest, val, pkg)
+    [val, ..rest] ->
+      case string.starts_with(val, "-"), pkg {
+        True, _ -> Error("Unknown or incomplete flag: " <> val)
+        False, None -> parse_shim_inspect_flags(rest, root, Some(val))
+        False, Some(_) -> Error("Unexpected argument: " <> val)
+      }
+  }
+}
+
+fn parse_shim_init_flags(
+  args: List(String),
+  root: String,
+  pkg: Option(String),
+  out: Option(String),
+) -> Result(#(String, Option(String), Option(String)), String) {
+  case args {
+    [] -> Ok(#(root, pkg, out))
+    ["--root", val, ..rest] -> parse_shim_init_flags(rest, val, pkg, out)
+    ["--out", val, ..rest] | ["--output", val, ..rest] | ["-o", val, ..rest] ->
+      parse_shim_init_flags(rest, root, pkg, Some(val))
+    [val, ..rest] ->
+      case string.starts_with(val, "-"), pkg {
+        True, _ -> Error("Unknown or incomplete flag: " <> val)
+        False, None -> parse_shim_init_flags(rest, root, Some(val), out)
+        False, Some(_) -> Error("Unexpected argument: " <> val)
+      }
+  }
+}
+
 fn print_usage() -> Nil {
   let lines = [
     "gekko " <> version <> " - Gleam-to-MoonBit & Wasm Component transpiler",
@@ -1197,6 +1299,8 @@ fn print_usage() -> Nil {
     "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]",
     "  gekko wit build    [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>] [--output <file.wasm> | -o <file.wasm>]",
     "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--work-dir <dir>]",
+    "  gekko shim inspect <pkg> [--root <dir>]",
+    "  gekko shim init    <pkg> [--root <dir>] [--out <dir> | -o <dir>]",
     "  gekko --version | -V",
     "  gekko --help    | -h",
     "",

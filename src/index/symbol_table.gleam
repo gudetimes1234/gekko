@@ -10,7 +10,10 @@ import project/interface.{
   type PackageInterface, type ResolvedFunction, type ResolvedType,
   type ResolvedTypeDef, FnType, NamedType, TupleType, VariableType,
 }
-import project/prepass.{type ExternalType, type FfiKind, type PrepassResult}
+import project/prepass.{
+  type ExternalType, type FfiKind, type PrepassResult, type TargetBranch,
+  PreferErlang, PreferJavascript,
+}
 
 /// Global symbol index for a Gleam package (and its staged/parsed modules).
 pub type SymbolTable {
@@ -22,6 +25,7 @@ pub type ModuleSymbols {
   ModuleSymbols(
     name: String,
     source: String,
+    target_branch: TargetBranch,
     imports: List(ImportInfo),
     alias_to_module: Dict(String, String),
     unqualified_values: Dict(String, #(String, String)),
@@ -40,6 +44,7 @@ pub fn empty_module_symbols(name: String) -> ModuleSymbols {
   ModuleSymbols(
     name:,
     source: "",
+    target_branch: PreferErlang,
     imports: [],
     alias_to_module: dict.new(),
     unqualified_values: dict.new(),
@@ -184,6 +189,28 @@ pub fn index_project_with_ffi_meta(
   ffi_overrides: Dict(String, FfiKind),
   ffi_metadata: FfiMetadata,
 ) -> SymbolTable {
+  index_project_with_overlays(
+    root_package_name,
+    package_modules,
+    pkg_interface,
+    ffi_overrides,
+    dict.new(),
+    dict.new(),
+    ffi_metadata,
+  )
+}
+
+/// Build a project-wide `SymbolTable` with full overlay support (`ffi_overrides`,
+/// `type_overrides`, `target_branches`) and MoonBit FFI trait metadata.
+pub fn index_project_with_overlays(
+  root_package_name: String,
+  package_modules: List(#(String, String, glance.Module, PrepassResult)),
+  pkg_interface: Option(PackageInterface),
+  ffi_overrides: Dict(String, FfiKind),
+  type_overrides: Dict(String, ExternalType),
+  target_branches: Dict(String, TargetBranch),
+  ffi_metadata: FfiMetadata,
+) -> SymbolTable {
   let mod_to_pkg =
     list.fold(package_modules, dict.new(), fn(acc, entry) {
       dict.insert(acc, entry.1, entry.0)
@@ -201,6 +228,8 @@ pub fn index_project_with_ffi_meta(
           prepass_res,
           mod_iface,
           ffi_overrides,
+          type_overrides,
+          target_branches,
           mod_to_pkg,
         )
       dict.insert(acc, mod_name, indexed)
@@ -211,15 +240,47 @@ pub fn index_project_with_ffi_meta(
   SymbolTable(package_name: root_package_name, modules: computed_modules)
 }
 
-/// Return True if a top-level definition has `@target(javascript)` and should
-/// be skipped when compiling to MoonBit.
-pub fn is_excluded_target(attributes: List(glance.Attribute)) -> Bool {
+/// Return True if a top-level definition should be excluded when compiling
+/// under `branch` (`PreferErlang` excludes `@target(javascript)`,
+/// `PreferJavascript` excludes `@target(erlang)`).
+pub fn is_excluded_for_branch(
+  attributes: List(glance.Attribute),
+  branch: TargetBranch,
+) -> Bool {
+  let excluded = case branch {
+    PreferErlang -> "javascript"
+    PreferJavascript -> "erlang"
+  }
   list.any(attributes, fn(attr) {
     case attr.name, attr.arguments {
-      "target", [glance.Variable(name: "javascript", ..)] -> True
+      "target", [glance.Variable(name:, ..)] -> name == excluded
       _, _ -> False
     }
   })
+}
+
+/// Return True if a top-level definition has `@target(javascript)` and should
+/// be skipped when compiling to MoonBit.
+pub fn is_excluded_target(attributes: List(glance.Attribute)) -> Bool {
+  is_excluded_for_branch(attributes, PreferErlang)
+}
+
+/// Resolve the active `@target(...)` branch for `(package_name, mod_name)`.
+pub fn resolve_target_branch(
+  package_name: String,
+  mod_name: String,
+  target_branches: Dict(String, TargetBranch),
+) -> TargetBranch {
+  let candidates = [
+    package_name <> ":" <> mod_name,
+    package_name <> "." <> mod_name,
+    mod_name,
+    package_name,
+  ]
+  case list.find_map(candidates, fn(k) { dict.get(target_branches, k) }) {
+    Ok(branch) -> branch
+    Error(_) -> PreferErlang
+  }
 }
 
 /// Look up a function in `current_module`, resolving module qualifiers and
@@ -388,26 +449,30 @@ fn index_module(
   prepass_res: PrepassResult,
   mod_iface: Option(interface.ModuleInterface),
   ffi_overrides: Dict(String, FfiKind),
+  type_overrides: Dict(String, ExternalType),
+  target_branches: Dict(String, TargetBranch),
   mod_to_pkg: Dict(String, String),
 ) -> ModuleSymbols {
   let #(imports, alias_to_module, unqualified_values, unqualified_types) =
     index_imports(ast_mod.imports)
 
+  let branch = resolve_target_branch(package_name, mod_name, target_branches)
+
   let active_type_aliases =
     list.filter(ast_mod.type_aliases, fn(def) {
-      !is_excluded_target(def.attributes)
+      !is_excluded_for_branch(def.attributes, branch)
     })
   let active_custom_types =
     list.filter(ast_mod.custom_types, fn(def) {
-      !is_excluded_target(def.attributes)
+      !is_excluded_for_branch(def.attributes, branch)
     })
   let active_functions =
     list.filter(ast_mod.functions, fn(def) {
-      !is_excluded_target(def.attributes)
+      !is_excluded_for_branch(def.attributes, branch)
     })
   let active_constants =
     list.filter(ast_mod.constants, fn(def) {
-      !is_excluded_target(def.attributes)
+      !is_excluded_for_branch(def.attributes, branch)
     })
 
   let type_aliases =
@@ -421,6 +486,7 @@ fn index_module(
       mod_name,
       active_custom_types,
       prepass_res,
+      type_overrides,
       mod_iface,
       alias_to_module,
       unqualified_types,
@@ -459,6 +525,7 @@ fn index_module(
   ModuleSymbols(
     name: mod_name,
     source: prepass_res.cleaned_source,
+    target_branch: branch,
     imports:,
     alias_to_module:,
     unqualified_values:,
@@ -530,26 +597,53 @@ fn resolve_import_alias(
   }
 }
 
+/// Resolve any MoonBit `@external_type` mapping from `type_overrides` or source pragmas.
+pub fn resolve_type_override(
+  package_name: String,
+  mod_name: String,
+  type_name: String,
+  prepass_res: PrepassResult,
+  type_overrides: Dict(String, ExternalType),
+) -> Option(ExternalType) {
+  let candidate_keys = [
+    package_name <> ":" <> mod_name <> "." <> type_name,
+    package_name <> "." <> mod_name <> "." <> type_name,
+    mod_name <> "." <> type_name,
+  ]
+  case list.find_map(candidate_keys, fn(k) { dict.get(type_overrides, k) }) {
+    Ok(ext) -> Some(ext)
+    Error(_) ->
+      list.find(prepass_res.external_types, fn(entry) {
+        entry.gleam_type_name == type_name
+      })
+      |> option.from_result
+      |> option.map(fn(entry) { entry.target })
+  }
+}
+
 fn index_custom_types(
   package_name: String,
   mod_name: String,
   type_defs: List(glance.Definition(glance.CustomType)),
   prepass_res: PrepassResult,
+  type_overrides: Dict(String, ExternalType),
   mod_iface: Option(interface.ModuleInterface),
   alias_to_module: Dict(String, String),
   unqualified_types: Dict(String, #(String, String)),
   mod_to_pkg: Dict(String, String),
 ) -> #(Dict(String, TypeInfo), Dict(String, ConstructorInfo)) {
-  let ext_type_map =
-    list.fold(prepass_res.external_types, dict.new(), fn(acc, entry) {
-      dict.insert(acc, entry.gleam_type_name, entry.target)
-    })
-
   list.fold(type_defs, #(dict.new(), dict.new()), fn(acc, def) {
     let #(types_acc, ctors_acc) = acc
     let ct = def.definition
     let iface_type = lookup_iface_type(mod_iface, ct.name)
-    let external_type = dict.get(ext_type_map, ct.name) |> option.from_result
+    let external_type =
+      resolve_type_override(
+        package_name,
+        mod_name,
+        ct.name,
+        prepass_res,
+        type_overrides,
+      )
 
     let variants =
       list.map(ct.variants, fn(variant) {
@@ -1205,9 +1299,19 @@ pub fn reachable_private_functions(
   ast_mod: glance.Module,
   functions: Dict(String, FunctionInfo),
 ) -> Set(String) {
+  reachable_private_functions_for_branch(ast_mod, functions, PreferErlang)
+}
+
+/// Like `reachable_private_functions`, filtering `@target(...)` definitions
+/// according to `branch`.
+pub fn reachable_private_functions_for_branch(
+  ast_mod: glance.Module,
+  functions: Dict(String, FunctionInfo),
+  branch: TargetBranch,
+) -> Set(String) {
   let active_fns =
     ast_mod.functions
-    |> list.filter(fn(def) { !is_excluded_target(def.attributes) })
+    |> list.filter(fn(def) { !is_excluded_for_branch(def.attributes, branch) })
     |> list.map(fn(def) { def.definition })
 
   let fn_map =
@@ -1215,7 +1319,7 @@ pub fn reachable_private_functions(
 
   let active_consts =
     ast_mod.constants
-    |> list.filter(fn(def) { !is_excluded_target(def.attributes) })
+    |> list.filter(fn(def) { !is_excluded_for_branch(def.attributes, branch) })
     |> list.map(fn(def) { def.definition })
 
   let const_map =

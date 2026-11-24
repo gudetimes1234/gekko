@@ -82,18 +82,25 @@ pub fn validate_module_int_literals_in_package(
   let ctx =
     ValidateCtx(package_name:, table:, module_name:, source: mod_syms.source)
 
+  let branch = mod_syms.target_branch
   let ast_constants =
     ast_mod.constants
     |> list.reverse
-    |> list.filter(fn(def) { !symbol_table.is_excluded_target(def.attributes) })
+    |> list.filter(fn(def) {
+      !symbol_table.is_excluded_for_branch(def.attributes, branch)
+    })
 
   let reachable_fns =
-    symbol_table.reachable_private_functions(ast_mod, mod_syms.functions)
+    symbol_table.reachable_private_functions_for_branch(
+      ast_mod,
+      mod_syms.functions,
+      branch,
+    )
   let ast_functions =
     ast_mod.functions
     |> list.reverse
     |> list.filter(fn(def) {
-      !symbol_table.is_excluded_target(def.attributes)
+      !symbol_table.is_excluded_for_branch(def.attributes, branch)
       && set.contains(reachable_fns, def.definition.name)
     })
 

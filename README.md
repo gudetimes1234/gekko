@@ -129,6 +129,10 @@ gekko run  [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]
 # Generate Gleam FFI stubs + MoonBit adapter from a MoonBit package (.mbti)
 gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--work-dir <dir>]
 
+# Inspect unmapped FFI in a dependency or scaffold a companion shim package
+gekko shim inspect <pkg> [--root <dir>]
+gekko shim init    <pkg> [--root <dir>] [--out <dir> | -o <dir>]
+
 # Generate WIT bindings, type-check, and bundle a Wasm Component (WIT / WASI Preview 2)
 gekko wit gen   [--root <dir>] [--wit <dir>] [--world <name>]
 gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]
@@ -281,21 +285,22 @@ import {
 }
 ```
 
-### 4. Raw `@external(moonbit, ...)` & Dependency Overrides
+### 4. Raw `@external(moonbit, ...)` & Companion Shim Overlays
 
 ```gleam
 @external(moonbit, "my_org/math", "fast_sqrt")
 pub fn fast_sqrt(x: Float) -> Float
 ```
 
-Or override functions in third-party Hex dependencies in `gleam.toml` (`[tools.gekko.overrides."..."]`) without modifying `build/packages/`:
+To use **unmodified third-party Hex packages** that contain Erlang/JS externals without forking them, `gekko` supports **companion shim / overlay packages** (`gekko.toml` or `[tools.gekko.*]` in `gleam.toml`) across both dependencies and root projects:
 
-```toml
-# gleam.toml
-[tools.gekko.overrides."simplifile.read"]
-package = "wasi/filesystem"
-function = "read_to_string"
-```
+- **`[shim]`**: Declares the target package and SemVer range (`target`, `version`).
+- **`[type_overrides."pkg:mod.Type"]`**: Maps opaque external types (`package`, `type`).
+- **`[overrides."pkg:mod.fn"]`**: Maps functions to a MoonBit `package` + `function`, a `wasm_module` + `import_name`, or a co-located `in_package` function.
+- **`[module_inject."pkg:mod"]`**: Injects `.mbt` files and extra `imports` directly into a transpiled module's MoonBit package (solving circular imports for same-module error enums).
+- **`[target_branch."pkg:mod"]`**: Selects `prefer = "javascript"` or `"erlang"` for `@target(...)` blocks.
+
+Use `gekko shim inspect <pkg>` and `gekko shim init <pkg>` to audit a dependency and scaffold a typed shim skeleton. See **[`docs/SHIMS.md`](./docs/SHIMS.md)** for the full guide and configuration reference.
 
 ---
 
@@ -322,6 +327,7 @@ Standalone example projects are hosted in [`gekko_examples`](https://github.com/
 ## Project Documentation
 
 - **[`docs/SPEC.md`](./docs/SPEC.md)** — Full architectural specification, lowering rules, runtime design, and WIT bridge details.
+- **[`docs/SHIMS.md`](./docs/SHIMS.md)** — Companion shim & overlay packages guide (`[shim]`, `[type_overrides]`, `[module_inject]`, `[target_branch]`, `gekko shim`).
 - **[`docs/SEMANTICS.md`](./docs/SEMANTICS.md)** — Runtime semantics, target behavior, and documented differences from Erlang/JS Gleam.
 - **[`docs/ROADMAP.md`](./docs/ROADMAP.md)** — Phased implementation plan, deliverables, and verification gates.
 - **[`docs/GLEAM_SYNTAX_MAP.md`](./docs/GLEAM_SYNTAX_MAP.md)** — Complete mapping from `glance` AST nodes to MoonBit lowering rules.

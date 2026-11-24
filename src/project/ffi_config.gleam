@@ -1,12 +1,84 @@
 import filepath
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
-import project/prepass.{type FfiKind, PackageCall, WasmImport}
+import project/prepass.{
+  type ExternalType, type FfiKind, type TargetBranch, ExternalType,
+  InPackageCall, PackageCall, PreferErlang, PreferJavascript, WasmImport,
+}
 import simplifile
 import tom.{type Toml}
+
+/// Metadata declared in `[shim]` identifying the target package and SemVer range.
+pub type ShimMeta {
+  ShimMeta(target: String, version: Option(String))
+}
+
+/// A MoonBit source file to inject directly into a transpiled module's package.
+pub type ModuleInjectFile {
+  ModuleInjectFile(
+    source_path: String,
+    dest_filename: String,
+    source_pkg: String,
+  )
+}
+
+/// An extra MoonBit package import required by injected files in a module.
+pub type ModuleInjectImport {
+  ModuleInjectImport(package: String, alias: Option(String))
+}
+
+/// Injected MoonBit files and extra imports for a single target Gleam module.
+pub type ModuleInject {
+  ModuleInject(files: List(ModuleInjectFile), imports: List(ModuleInjectImport))
+}
+
+/// Complete overlay configuration loaded from a single package (`gleam.toml` + `gekko.toml`).
+pub type PackageOverlay {
+  PackageOverlay(
+    source_pkg: String,
+    shim: Option(ShimMeta),
+    overrides: Dict(String, FfiKind),
+    type_overrides: Dict(String, ExternalType),
+    module_injects: Dict(String, ModuleInject),
+    target_branches: Dict(String, TargetBranch),
+  )
+}
+
+/// Merged overlay configuration across all dependency shims and the root project.
+pub type MergedOverlays {
+  MergedOverlays(
+    shims: List(#(String, ShimMeta)),
+    overrides: Dict(String, FfiKind),
+    override_sources: Dict(String, String),
+    type_overrides: Dict(String, ExternalType),
+    type_override_sources: Dict(String, String),
+    module_injects: Dict(String, ModuleInject),
+    module_inject_sources: Dict(String, String),
+    target_branches: Dict(String, TargetBranch),
+    injected_source_files: Set(String),
+  )
+}
+
+/// Return an empty `MergedOverlays` record.
+pub fn empty_merged_overlays() -> MergedOverlays {
+  MergedOverlays(
+    shims: [],
+    overrides: dict.new(),
+    override_sources: dict.new(),
+    type_overrides: dict.new(),
+    type_override_sources: dict.new(),
+    module_injects: dict.new(),
+    module_inject_sources: dict.new(),
+    target_branches: dict.new(),
+    injected_source_files: set.new(),
+  )
+}
 
 /// Parse FFI overrides from a `gekko.toml` file string (`[overrides."..."]`).
 pub fn parse_gekko_toml(
@@ -636,8 +708,12 @@ fn extract_ffi_kind(
     |> list.reverse
     |> string.join(".")
 
-  case dict.get(table, "package"), dict.get(table, "wasm_module") {
-    Ok(tom.String(pkg)), Error(_) ->
+  case
+    dict.get(table, "package"),
+    dict.get(table, "wasm_module"),
+    dict.get(table, "in_package")
+  {
+    Ok(tom.String(pkg)), Error(_), Error(_) ->
       case dict.get(table, "function") {
         Ok(tom.String(func)) ->
           Ok(Some(PackageCall(package: pkg, function: func)))
@@ -651,7 +727,7 @@ fn extract_ffi_kind(
           )
       }
 
-    Error(_), Ok(tom.String(wasm_mod)) ->
+    Error(_), Ok(tom.String(wasm_mod)), Error(_) ->
       case dict.get(table, "import_name") {
         Ok(tom.String(imp)) ->
           Ok(Some(WasmImport(wasm_module: wasm_mod, import_name: imp)))
@@ -667,20 +743,55 @@ fn extract_ffi_kind(
           )
       }
 
-    Ok(_), Ok(_) ->
+    Error(_), Error(_), Ok(tom.String(func)) ->
+      case
+        dict.get(table, "function"),
+        dict.get(table, "import_name"),
+        string.trim(func)
+      {
+        Ok(_), _, _ ->
+          Error(
+            "Override '"
+            <> key_name
+            <> "' cannot specify both 'in_package' and 'function'",
+          )
+        _, Ok(_), _ ->
+          Error(
+            "Override '"
+            <> key_name
+            <> "' cannot specify both 'in_package' and 'import_name'",
+          )
+        _, _, "" ->
+          Error(
+            "Override '" <> key_name <> "' field 'in_package' must not be empty",
+          )
+        _, _, _ -> Ok(Some(InPackageCall(function: func)))
+      }
+
+    Error(_), Error(_), Ok(_) ->
+      Error("Override '" <> key_name <> "' field 'in_package' must be String")
+
+    Ok(_), Ok(_), _ ->
       Error(
         "Override '"
         <> key_name
         <> "' cannot specify both 'package' and 'wasm_module'",
       )
 
-    Ok(_), Error(_) ->
+    Ok(_), _, Ok(_) | _, Ok(_), Ok(_) ->
+      Error(
+        "Override '"
+        <> key_name
+        <> "' cannot combine 'in_package' with 'package' or 'wasm_module'",
+      )
+
+    Ok(_), Error(_), Error(_) ->
       Error("Override '" <> key_name <> "' field 'package' must be String")
 
-    Error(_), Ok(_) ->
+    Error(_), Ok(_), Error(_) ->
       Error("Override '" <> key_name <> "' field 'wasm_module' must be String")
 
-    Error(_), Error(_) ->
+    Error(_), Error(_), Error(_) ->
       case dict.get(table, "function"), dict.get(table, "import_name") {
         Ok(_), _ ->
           Error(
@@ -718,5 +829,868 @@ fn format_get_error(err: tom.GetError) -> String {
       <> expected
       <> ", got "
       <> got
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Overlay & Shim Parsers (`[shim]`, `[type_overrides]`, `[module_inject]`, `[target_branch]`)
+// -----------------------------------------------------------------------------
+
+/// Parse `[shim]` metadata from a `gekko.toml` string.
+pub fn parse_shim_gekko_toml(
+  content: String,
+) -> Result(Option(ShimMeta), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  extract_shim_meta(parsed, ["shim"])
+}
+
+/// Parse `[tools.gekko.shim]` metadata from a `gleam.toml` string.
+pub fn parse_shim_gleam_toml(
+  content: String,
+) -> Result(Option(ShimMeta), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  extract_shim_meta(parsed, ["tools", "gekko", "shim"])
+}
+
+fn extract_shim_meta(
+  parsed: Dict(String, Toml),
+  key_path: List(String),
+) -> Result(Option(ShimMeta), String) {
+  case tom.get_table(parsed, key_path) {
+    Error(tom.NotFound(_)) -> Ok(None)
+    Error(err) -> Error(format_get_error(err))
+    Ok(table) -> {
+      use target <- result.try(case dict.get(table, "target") {
+        Ok(tom.String(t)) ->
+          case string.trim(t) {
+            "" -> Error("Shim 'target' must not be empty")
+            trimmed -> Ok(trimmed)
+          }
+        Ok(_) -> Error("Shim 'target' must be String")
+        Error(_) -> Error("Shim section must specify 'target'")
+      })
+      use version <- result.try(case dict.get(table, "version") {
+        Error(_) -> Ok(None)
+        Ok(tom.String(v)) -> {
+          use _ <- result.try(parse_version_constraint(v))
+          Ok(Some(v))
+        }
+        Ok(_) -> Error("Shim 'version' must be String")
+      })
+      Ok(Some(ShimMeta(target:, version:)))
+    }
+  }
+}
+
+/// Parse `[type_overrides."..."]` from a `gekko.toml` string.
+pub fn parse_type_overrides_gekko_toml(
+  content: String,
+) -> Result(Dict(String, ExternalType), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  case tom.get_table(parsed, ["type_overrides"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_type_override)
+    Error(tom.NotFound(_)) -> Ok(dict.new())
+    Error(err) -> Error(format_get_error(err))
+  }
+}
+
+/// Parse `[tools.gekko.type_overrides."..."]` from a `gleam.toml` string.
+pub fn parse_type_overrides_gleam_toml(
+  content: String,
+) -> Result(Dict(String, ExternalType), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  case tom.get_table(parsed, ["tools", "gekko", "type_overrides"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_type_override)
+    Error(tom.NotFound(_)) -> Ok(dict.new())
+    Error(err) -> Error(format_get_error(err))
+  }
+}
+
+fn extract_type_override(
+  table: Dict(String, Toml),
+  rev_key_parts: List(String),
+) -> Result(Option(ExternalType), String) {
+  let key_name = rev_key_parts |> list.reverse |> string.join(".")
+  case dict.get(table, "package"), dict.get(table, "type") {
+    Ok(tom.String(pkg)), Ok(tom.String(ty)) ->
+      case string.trim(ty) {
+        "" ->
+          Error(
+            "Type override '" <> key_name <> "' field 'type' must not be empty",
+          )
+        _ -> Ok(Some(ExternalType(package: pkg, type_name: ty)))
+      }
+    Ok(tom.String(_)), Ok(_) ->
+      Error("Type override '" <> key_name <> "' field 'type' must be String")
+    Ok(tom.String(_)), Error(_) ->
+      Error(
+        "Type override '"
+        <> key_name
+        <> "' with 'package' must also specify 'type'",
+      )
+    Ok(_), _ ->
+      Error("Type override '" <> key_name <> "' field 'package' must be String")
+    Error(_), Ok(_) ->
+      Error(
+        "Type override '" <> key_name <> "' specifies 'type' without 'package'",
+      )
+    Error(_), Error(_) -> Ok(None)
+  }
+}
+
+/// Parse `[module_inject."..."]` from a `gekko.toml` string.
+pub fn parse_module_inject_gekko_toml(
+  content: String,
+) -> Result(Dict(String, ModuleInject), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  case tom.get_table(parsed, ["module_inject"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_module_inject)
+    Error(tom.NotFound(_)) -> Ok(dict.new())
+    Error(err) -> Error(format_get_error(err))
+  }
+}
+
+/// Parse `[tools.gekko.module_inject."..."]` from a `gleam.toml` string.
+pub fn parse_module_inject_gleam_toml(
+  content: String,
+) -> Result(Dict(String, ModuleInject), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  case tom.get_table(parsed, ["tools", "gekko", "module_inject"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_module_inject)
+    Error(tom.NotFound(_)) -> Ok(dict.new())
+    Error(err) -> Error(format_get_error(err))
+  }
+}
+
+fn extract_module_inject(
+  table: Dict(String, Toml),
+  rev_key_parts: List(String),
+) -> Result(Option(ModuleInject), String) {
+  let key_name = rev_key_parts |> list.reverse |> string.join(".")
+  let has_files = dict.has_key(table, "files")
+  let has_imports = dict.has_key(table, "imports")
+  case has_files || has_imports {
+    False -> Ok(None)
+    True -> {
+      use files <- result.try(case dict.get(table, "files") {
+        Error(_) -> Ok([])
+        Ok(tom.Array(items)) ->
+          list.try_map(items, fn(item) {
+            case item {
+              tom.String(path) ->
+                case string.trim(path) {
+                  "" ->
+                    Error(
+                      "Module inject '"
+                      <> key_name
+                      <> "' 'files' entries must not be empty",
+                    )
+                  p ->
+                    Ok(ModuleInjectFile(
+                      source_path: p,
+                      dest_filename: filepath.base_name(p),
+                      source_pkg: "",
+                    ))
+                }
+              _ ->
+                Error(
+                  "Module inject '"
+                  <> key_name
+                  <> "' field 'files' must be an array of Strings",
+                )
+            }
+          })
+        Ok(_) ->
+          Error(
+            "Module inject '"
+            <> key_name
+            <> "' field 'files' must be an array of Strings",
+          )
+      })
+      use imports <- result.try(case dict.get(table, "imports") {
+        Error(_) -> Ok([])
+        Ok(tom.Array(items)) ->
+          list.try_map(items, fn(item) {
+            case item {
+              tom.String(spec) -> parse_inject_import_spec(spec, key_name)
+              _ ->
+                Error(
+                  "Module inject '"
+                  <> key_name
+                  <> "' field 'imports' must be an array of Strings",
+                )
+            }
+          })
+        Ok(_) ->
+          Error(
+            "Module inject '"
+            <> key_name
+            <> "' field 'imports' must be an array of Strings",
+          )
+      })
+      case files == [] && imports == [] {
+        True ->
+          Error(
+            "Module inject '"
+            <> key_name
+            <> "' must specify at least one file or import",
+          )
+        False -> Ok(Some(ModuleInject(files:, imports:)))
+      }
+    }
+  }
+}
+
+fn parse_inject_import_spec(
+  raw: String,
+  key_name: String,
+) -> Result(ModuleInjectImport, String) {
+  let trimmed = string.trim(raw)
+  case trimmed {
+    "" ->
+      Error(
+        "Module inject '" <> key_name <> "' 'imports' entries must not be empty",
+      )
+    _ ->
+      case string.split_once(trimmed, " @") {
+        Ok(#(pkg, alias)) ->
+          validate_inject_import(pkg, Some(alias), key_name, raw)
+        Error(_) ->
+          case string.split_once(trimmed, " as ") {
+            Ok(#(pkg, alias)) ->
+              validate_inject_import(pkg, Some(alias), key_name, raw)
+            Error(_) -> Ok(ModuleInjectImport(package: trimmed, alias: None))
+          }
+      }
+  }
+}
+
+fn validate_inject_import(
+  pkg: String,
+  alias: Option(String),
+  key_name: String,
+  raw: String,
+) -> Result(ModuleInjectImport, String) {
+  let p = string.trim(pkg)
+  let a = option.map(alias, string.trim)
+  case p, a {
+    "", _ | _, Some("") ->
+      Error(
+        "Invalid import specification '"
+        <> raw
+        <> "' in module_inject '"
+        <> key_name
+        <> "'",
+      )
+    _, _ -> Ok(ModuleInjectImport(package: p, alias: a))
+  }
+}
+
+/// Parse `[target_branch."..."]` from a `gekko.toml` string.
+pub fn parse_target_branch_gekko_toml(
+  content: String,
+) -> Result(Dict(String, TargetBranch), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  case tom.get_table(parsed, ["target_branch"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_target_branch)
+    Error(tom.NotFound(_)) -> Ok(dict.new())
+    Error(err) -> Error(format_get_error(err))
+  }
+}
+
+/// Parse `[tools.gekko.target_branch."..."]` from a `gleam.toml` string.
+pub fn parse_target_branch_gleam_toml(
+  content: String,
+) -> Result(Dict(String, TargetBranch), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  case tom.get_table(parsed, ["tools", "gekko", "target_branch"]) {
+    Ok(table) -> collect_nested_entries(table, [], extract_target_branch)
+    Error(tom.NotFound(_)) -> Ok(dict.new())
+    Error(err) -> Error(format_get_error(err))
+  }
+}
+
+fn extract_target_branch(
+  table: Dict(String, Toml),
+  rev_key_parts: List(String),
+) -> Result(Option(TargetBranch), String) {
+  let key_name = rev_key_parts |> list.reverse |> string.join(".")
+  case dict.get(table, "prefer") {
+    Error(_) -> Ok(None)
+    Ok(tom.String("erlang")) -> Ok(Some(PreferErlang))
+    Ok(tom.String("javascript")) -> Ok(Some(PreferJavascript))
+    Ok(tom.String(other)) ->
+      Error(
+        "Target branch '"
+        <> key_name
+        <> "' field 'prefer' must be 'erlang' or 'javascript', got '"
+        <> other
+        <> "'",
+      )
+    Ok(_) ->
+      Error("Target branch '" <> key_name <> "' field 'prefer' must be String")
+  }
+}
+
+fn collect_nested_entries(
+  table: Dict(String, Toml),
+  prefix: List(String),
+  extractor: fn(Dict(String, Toml), List(String)) -> Result(Option(a), String),
+) -> Result(Dict(String, a), String) {
+  dict.to_list(table)
+  |> list.try_fold(dict.new(), fn(acc, entry) {
+    let #(key, value) = entry
+    case value {
+      tom.Table(sub) | tom.InlineTable(sub) ->
+        case extractor(sub, [key, ..prefix]) {
+          Ok(Some(item)) -> {
+            let full_key = [key, ..prefix] |> list.reverse |> string.join(".")
+            Ok(dict.insert(acc, full_key, item))
+          }
+          Ok(None) -> {
+            use nested <- result.try(collect_nested_entries(
+              sub,
+              [key, ..prefix],
+              extractor,
+            ))
+            Ok(dict.merge(acc, nested))
+          }
+          Error(msg) -> Error(msg)
+        }
+      _ -> {
+        let full_key = [key, ..prefix] |> list.reverse |> string.join(".")
+        Error("Expected table for overlay key '" <> full_key <> "'")
+      }
+    }
+  })
+}
+
+/// Load and merge all overlay sections (`shim`, `overrides`, `type_overrides`,
+/// `module_inject`, `target_branch`) from a package's `gleam.toml` and `gekko.toml`.
+pub fn load_package_overlay(
+  pkg_root: String,
+  pkg_name: String,
+) -> Result(PackageOverlay, String) {
+  use #(shim_g, shim_k) <- result.try(load_toml_pair(
+    pkg_root,
+    None,
+    parse_shim_gleam_toml,
+    parse_shim_gekko_toml,
+  ))
+  use #(ovr_g, ovr_k) <- result.try(load_toml_pair(
+    pkg_root,
+    dict.new(),
+    parse_gleam_toml_overrides,
+    parse_gekko_toml,
+  ))
+  use #(ty_g, ty_k) <- result.try(load_toml_pair(
+    pkg_root,
+    dict.new(),
+    parse_type_overrides_gleam_toml,
+    parse_type_overrides_gekko_toml,
+  ))
+  use #(inj_g, inj_k) <- result.try(load_toml_pair(
+    pkg_root,
+    dict.new(),
+    parse_module_inject_gleam_toml,
+    parse_module_inject_gekko_toml,
+  ))
+  use #(br_g, br_k) <- result.try(load_toml_pair(
+    pkg_root,
+    dict.new(),
+    parse_target_branch_gleam_toml,
+    parse_target_branch_gekko_toml,
+  ))
+
+  let shim = case shim_k {
+    Some(_) -> shim_k
+    None -> shim_g
+  }
+  let overrides = dict.merge(ovr_g, ovr_k)
+  let type_overrides = dict.merge(ty_g, ty_k)
+  let target_branches = dict.merge(br_g, br_k)
+  let raw_injects = merge_module_inject_dicts(inj_g, inj_k)
+  use resolved_injects <- result.try(resolve_module_inject_files(
+    pkg_root,
+    pkg_name,
+    raw_injects,
+  ))
+
+  Ok(PackageOverlay(
+    source_pkg: pkg_name,
+    shim:,
+    overrides:,
+    type_overrides:,
+    module_injects: resolved_injects,
+    target_branches:,
+  ))
+}
+
+fn resolve_module_inject_files(
+  pkg_root: String,
+  pkg_name: String,
+  injects: Dict(String, ModuleInject),
+) -> Result(Dict(String, ModuleInject), String) {
+  let abs_root = simplifile.resolve(pkg_root) |> result.unwrap(pkg_root)
+  dict.to_list(injects)
+  |> list.try_fold(dict.new(), fn(acc, entry) {
+    let #(mod_key, inj) = entry
+    use resolved_files <- result.try(
+      list.try_map(inj.files, fn(f) {
+        let joined = case filepath.is_absolute(f.source_path) {
+          True -> f.source_path
+          False -> filepath.join(abs_root, f.source_path)
+        }
+        let normalized =
+          simplifile.resolve(joined)
+          |> result.unwrap(filepath.expand(joined) |> result.unwrap(joined))
+        case simplifile.is_file(normalized) {
+          Ok(True) ->
+            Ok(ModuleInjectFile(
+              source_path: normalized,
+              dest_filename: f.dest_filename,
+              source_pkg: pkg_name,
+            ))
+          _ ->
+            Error(
+              "Injected MoonBit file '"
+              <> f.source_path
+              <> "' declared in package '"
+              <> pkg_name
+              <> "' for module_inject '"
+              <> mod_key
+              <> "' was not found at "
+              <> normalized,
+            )
+        }
+      }),
+    )
+    Ok(dict.insert(acc, mod_key, ModuleInject(..inj, files: resolved_files)))
+  })
+}
+
+fn merge_module_inject_dicts(
+  base: Dict(String, ModuleInject),
+  extra: Dict(String, ModuleInject),
+) -> Dict(String, ModuleInject) {
+  dict.fold(extra, base, fn(acc, key, inj) {
+    case dict.get(acc, key) {
+      Error(_) -> dict.insert(acc, key, inj)
+      Ok(existing) -> dict.insert(acc, key, merge_two_injects(existing, inj))
+    }
+  })
+}
+
+fn merge_two_injects(a: ModuleInject, b: ModuleInject) -> ModuleInject {
+  let files =
+    list.append(a.files, b.files)
+    |> dedup_by(fn(f) { #(f.source_path, f.dest_filename) })
+  let imports =
+    list.append(a.imports, b.imports)
+    |> dedup_by(fn(i) { #(i.package, i.alias) })
+  ModuleInject(files:, imports:)
+}
+
+fn dedup_by(items: List(a), key_fn: fn(a) -> k) -> List(a) {
+  let #(_, rev) =
+    list.fold(items, #(set.new(), []), fn(acc, item) {
+      let #(seen, out) = acc
+      let k = key_fn(item)
+      case set.contains(seen, k) {
+        True -> acc
+        False -> #(set.insert(seen, k), [item, ..out])
+      }
+    })
+  list.reverse(rev)
+}
+
+/// Merge dependency shim overlays and the root project's overlay.
+/// Conflicting overrides between two dependency shims produce an error unless
+/// the root project explicitly overrides the same key.
+pub fn merge_overlays(
+  dep_overlays: List(PackageOverlay),
+  root_overlay: PackageOverlay,
+) -> Result(MergedOverlays, String) {
+  let shims =
+    list.filter_map(dep_overlays, fn(ov) {
+      case ov.shim {
+        Some(meta) -> Ok(#(ov.source_pkg, meta))
+        None -> Error(Nil)
+      }
+    })
+  let shims = case root_overlay.shim {
+    Some(meta) -> list.append(shims, [#(root_overlay.source_pkg, meta)])
+    None -> shims
+  }
+
+  use #(ovr_map, ovr_src) <- result.try(merge_keyed_with_root(
+    dep_overlays,
+    root_overlay,
+    fn(ov) { ov.overrides },
+    "override",
+  ))
+  use #(ty_map, ty_src) <- result.try(merge_keyed_with_root(
+    dep_overlays,
+    root_overlay,
+    fn(ov) { ov.type_overrides },
+    "type_override",
+  ))
+  use #(br_map, _) <- result.try(merge_keyed_with_root(
+    dep_overlays,
+    root_overlay,
+    fn(ov) { ov.target_branches },
+    "target_branch",
+  ))
+
+  let #(inj_map, inj_src) =
+    list.fold(
+      list.append(dep_overlays, [root_overlay]),
+      #(dict.new(), dict.new()),
+      fn(acc, ov) {
+        let #(m, s) = acc
+        let next_m = merge_module_inject_dicts(m, ov.module_injects)
+        let next_s =
+          dict.fold(ov.module_injects, s, fn(s_acc, k, _v) {
+            dict.insert(s_acc, k, ov.source_pkg)
+          })
+        #(next_m, next_s)
+      },
+    )
+
+  let injected_source_files =
+    dict.fold(inj_map, set.new(), fn(acc, _k, inj) {
+      list.fold(inj.files, acc, fn(s, f) { set.insert(s, f.source_path) })
+    })
+
+  Ok(MergedOverlays(
+    shims:,
+    overrides: ovr_map,
+    override_sources: ovr_src,
+    type_overrides: ty_map,
+    type_override_sources: ty_src,
+    module_injects: inj_map,
+    module_inject_sources: inj_src,
+    target_branches: br_map,
+    injected_source_files:,
+  ))
+}
+
+fn merge_keyed_with_root(
+  dep_overlays: List(PackageOverlay),
+  root_overlay: PackageOverlay,
+  getter: fn(PackageOverlay) -> Dict(String, a),
+  kind_label: String,
+) -> Result(#(Dict(String, a), Dict(String, String)), String) {
+  let root_map = getter(root_overlay)
+  let #(dep_map, dep_src, conflicts) =
+    list.fold(dep_overlays, #(dict.new(), dict.new(), []), fn(acc, ov) {
+      let #(cur_map, cur_src, cur_conflicts) = acc
+      dict.fold(getter(ov), #(cur_map, cur_src, cur_conflicts), fn(st, k, v) {
+        let #(m, s, c) = st
+        case dict.get(m, k) {
+          Error(_) -> #(
+            dict.insert(m, k, v),
+            dict.insert(s, k, ov.source_pkg),
+            c,
+          )
+          Ok(existing) ->
+            case existing == v {
+              True -> st
+              False -> {
+                let prev_pkg = dict.get(s, k) |> result.unwrap("unknown")
+                #(m, s, [#(k, prev_pkg, ov.source_pkg), ..c])
+              }
+            }
+        }
+      })
+    })
+
+  let unresolved =
+    list.filter(list.reverse(conflicts), fn(c) { !dict.has_key(root_map, c.0) })
+  case unresolved {
+    [#(key, pkg_a, pkg_b), ..] ->
+      Error(
+        "Conflicting "
+        <> kind_label
+        <> " for '"
+        <> key
+        <> "' between shim packages '"
+        <> pkg_a
+        <> "' and '"
+        <> pkg_b
+        <> "' (override it in root gleam.toml/gekko.toml to resolve)",
+      )
+    [] -> {
+      let final_map = dict.merge(dep_map, root_map)
+      let final_src =
+        dict.fold(root_map, dep_src, fn(s, k, _v) {
+          dict.insert(s, k, root_overlay.source_pkg)
+        })
+      Ok(#(final_map, final_src))
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// SemVer Constraint Evaluation
+// -----------------------------------------------------------------------------
+
+type SemVer {
+  SemVer(major: Int, minor: Int, patch: Int, pre: Option(String))
+}
+
+type VersionClause {
+  VersionClause(
+    op: String,
+    major: Int,
+    minor: Int,
+    patch: Option(Int),
+    pre: Option(String),
+  )
+}
+
+/// Check whether `version` satisfies a Gleam/Hex SemVer `constraint`
+/// (e.g. `">= 2.0.0 and < 3.0.0"`, `"~> 1.2"`, `"^3.0.0"`).
+pub fn version_matches_constraint(
+  version: String,
+  constraint: String,
+) -> Result(Bool, String) {
+  use ver <- result.try(parse_semver(version))
+  use clauses <- result.try(parse_version_constraint(constraint))
+  Ok(list.all(clauses, fn(c) { eval_clause(ver, c) }))
+}
+
+/// Validate declared `[shim]` target presence and SemVer constraints against
+/// discovered package versions.
+pub fn check_shim_versions(
+  shims: List(#(String, ShimMeta)),
+  discovered_versions: Dict(String, String),
+) -> Result(List(String), String) {
+  list.try_map(shims, fn(entry) {
+    let #(shim_pkg, meta) = entry
+    case dict.get(discovered_versions, meta.target) {
+      Error(_) ->
+        Ok(Some(
+          "Warning: shim '"
+          <> shim_pkg
+          <> "' targets package '"
+          <> meta.target
+          <> "', which is not a dependency of this project",
+        ))
+      Ok(actual_ver) ->
+        case meta.version {
+          None -> Ok(None)
+          Some(constraint) -> {
+            use matches <- result.try(version_matches_constraint(
+              actual_ver,
+              constraint,
+            ))
+            case matches {
+              True -> Ok(None)
+              False ->
+                Ok(Some(
+                  "Warning: shim '"
+                  <> shim_pkg
+                  <> "' expects '"
+                  <> meta.target
+                  <> "' ("
+                  <> constraint
+                  <> "), but resolved version is "
+                  <> actual_ver,
+                ))
+            }
+          }
+        }
+    }
+  })
+  |> result.map(fn(opts) { list.filter_map(opts, option.to_result(_, Nil)) })
+}
+
+fn parse_version_constraint(
+  constraint: String,
+) -> Result(List(VersionClause), String) {
+  let normalized =
+    constraint
+    |> string.replace("&&", " and ")
+    |> string.replace(",", " and ")
+  let parts =
+    string.split(normalized, " and ")
+    |> list.map(string.trim)
+    |> list.filter(fn(p) { p != "" })
+  case parts {
+    [] -> Error("Empty version constraint '" <> constraint <> "'")
+    _ -> list.try_map(parts, parse_single_clause)
+  }
+}
+
+fn parse_single_clause(clause: String) -> Result(VersionClause, String) {
+  let trimmed = string.trim(clause)
+  let #(op, rest) = case
+    string.starts_with(trimmed, ">="),
+    string.starts_with(trimmed, "<="),
+    string.starts_with(trimmed, "=="),
+    string.starts_with(trimmed, "!="),
+    string.starts_with(trimmed, "~>"),
+    string.starts_with(trimmed, ">"),
+    string.starts_with(trimmed, "<"),
+    string.starts_with(trimmed, "^"),
+    string.starts_with(trimmed, "=")
+  {
+    True, _, _, _, _, _, _, _, _ -> #(">=", string.drop_start(trimmed, 2))
+    _, True, _, _, _, _, _, _, _ -> #("<=", string.drop_start(trimmed, 2))
+    _, _, True, _, _, _, _, _, _ -> #("==", string.drop_start(trimmed, 2))
+    _, _, _, True, _, _, _, _, _ -> #("!=", string.drop_start(trimmed, 2))
+    _, _, _, _, True, _, _, _, _ -> #("~>", string.drop_start(trimmed, 2))
+    _, _, _, _, _, True, _, _, _ -> #(">", string.drop_start(trimmed, 1))
+    _, _, _, _, _, _, True, _, _ -> #("<", string.drop_start(trimmed, 1))
+    _, _, _, _, _, _, _, True, _ -> #("^", string.drop_start(trimmed, 1))
+    _, _, _, _, _, _, _, _, True -> #("==", string.drop_start(trimmed, 1))
+    _, _, _, _, _, _, _, _, _ -> #("==", trimmed)
+  }
+  let ver_str = string.trim(rest)
+  let without_build = case string.split_once(ver_str, "+") {
+    Ok(#(v, _)) -> v
+    Error(_) -> ver_str
+  }
+  let #(core, pre) = case string.split_once(without_build, "-") {
+    Ok(#(c, p)) -> #(c, Some(p))
+    Error(_) -> #(without_build, None)
+  }
+  let nums = string.split(core, ".")
+  case nums {
+    [maj_s, min_s] -> {
+      use maj <- result.try(parse_ver_int(maj_s, clause))
+      use min <- result.try(parse_ver_int(min_s, clause))
+      Ok(VersionClause(op:, major: maj, minor: min, patch: None, pre:))
+    }
+    [maj_s, min_s, pat_s] -> {
+      use maj <- result.try(parse_ver_int(maj_s, clause))
+      use min <- result.try(parse_ver_int(min_s, clause))
+      use pat <- result.try(parse_ver_int(pat_s, clause))
+      Ok(VersionClause(op:, major: maj, minor: min, patch: Some(pat), pre:))
+    }
+    _ -> Error("Invalid SemVer clause '" <> clause <> "'")
+  }
+}
+
+fn parse_semver(raw: String) -> Result(SemVer, String) {
+  let trimmed = string.trim(raw)
+  let without_build = case string.split_once(trimmed, "+") {
+    Ok(#(v, _)) -> v
+    Error(_) -> trimmed
+  }
+  let #(core, pre) = case string.split_once(without_build, "-") {
+    Ok(#(c, p)) -> #(c, Some(p))
+    Error(_) -> #(without_build, None)
+  }
+  case string.split(core, ".") {
+    [maj_s, min_s, pat_s] -> {
+      use major <- result.try(parse_ver_int(maj_s, raw))
+      use minor <- result.try(parse_ver_int(min_s, raw))
+      use patch <- result.try(parse_ver_int(pat_s, raw))
+      Ok(SemVer(major:, minor:, patch:, pre:))
+    }
+    _ -> Error("Invalid SemVer version '" <> raw <> "'")
+  }
+}
+
+fn parse_ver_int(s: String, ctx: String) -> Result(Int, String) {
+  case int.parse(s) {
+    Ok(n) if n >= 0 -> Ok(n)
+    _ -> Error("Invalid SemVer component '" <> s <> "' in '" <> ctx <> "'")
+  }
+}
+
+fn eval_clause(ver: SemVer, clause: VersionClause) -> Bool {
+  let target =
+    SemVer(
+      major: clause.major,
+      minor: clause.minor,
+      patch: option.unwrap(clause.patch, 0),
+      pre: clause.pre,
+    )
+  let cmp = compare_semver(ver, target)
+  case clause.op {
+    "==" -> cmp == 0
+    "!=" -> cmp != 0
+    ">" -> cmp > 0
+    ">=" -> cmp >= 0
+    "<" -> cmp < 0
+    "<=" -> cmp <= 0
+    "~>" -> {
+      let upper = case clause.patch {
+        None -> SemVer(major: clause.major + 1, minor: 0, patch: 0, pre: None)
+        Some(_) ->
+          SemVer(
+            major: clause.major,
+            minor: clause.minor + 1,
+            patch: 0,
+            pre: None,
+          )
+      }
+      cmp >= 0 && compare_semver(ver, upper) < 0
+    }
+    "^" -> {
+      let upper = case clause.major, clause.minor {
+        0, 0 -> SemVer(major: 0, minor: 0, patch: target.patch + 1, pre: None)
+        0, _ -> SemVer(major: 0, minor: clause.minor + 1, patch: 0, pre: None)
+        _, _ -> SemVer(major: clause.major + 1, minor: 0, patch: 0, pre: None)
+      }
+      cmp >= 0 && compare_semver(ver, upper) < 0
+    }
+    _ -> False
+  }
+}
+
+fn compare_semver(a: SemVer, b: SemVer) -> Int {
+  case int.compare(a.major, b.major) {
+    order.Lt -> -1
+    order.Gt -> 1
+    order.Eq ->
+      case int.compare(a.minor, b.minor) {
+        order.Lt -> -1
+        order.Gt -> 1
+        order.Eq ->
+          case int.compare(a.patch, b.patch) {
+            order.Lt -> -1
+            order.Gt -> 1
+            order.Eq ->
+              case a.pre, b.pre {
+                None, None -> 0
+                Some(_), None -> -1
+                None, Some(_) -> 1
+                Some(pa), Some(pb) ->
+                  case string.compare(pa, pb) {
+                    order.Lt -> -1
+                    order.Gt -> 1
+                    order.Eq -> 0
+                  }
+              }
+          }
+      }
   }
 }
